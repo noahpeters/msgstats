@@ -127,7 +127,12 @@ describe('report endpoints', () => {
     const january = response.body.find(
       (row: { period: string }) => row.period === '2024-01-01',
     ) as
-      | { total: number; productive: number; highlyProductive: number }
+      | {
+          total: number;
+          productive: number;
+          highlyProductive: number;
+          priceGiven: number;
+        }
       | undefined;
     expect(january).toBeTruthy();
     expect(january?.total).toBe(2);

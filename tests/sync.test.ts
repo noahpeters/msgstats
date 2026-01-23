@@ -15,6 +15,7 @@ import * as metaClient from '../server/meta/client';
 vi.mock('../server/meta/client', () => ({
   fetchConversations: vi.fn(),
   fetchConversationMessages: vi.fn(),
+  fetchPageName: vi.fn(),
 }));
 
 function setupApp() {
@@ -50,17 +51,29 @@ describe('runMessengerSync', () => {
       { id: 'convo-1', updated_time: '2024-05-01T00:10:00Z' },
     ]);
     fetchMessagesMock.mockResolvedValue([
-      { id: 'm1', from: { id: pageId }, created_time: '2024-05-01T00:00:00Z' },
+      {
+        id: 'm1',
+        from: { id: pageId },
+        created_time: '2024-05-01T00:00:00Z',
+        message: 'Hello $50',
+      },
       {
         id: 'm2',
         from: { id: 'user-1' },
         created_time: '2024-05-01T00:01:00Z',
+        message: 'Hi there',
       },
-      { id: 'm3', from: { id: pageId }, created_time: '2024-05-01T00:02:00Z' },
+      {
+        id: 'm3',
+        from: { id: pageId },
+        created_time: '2024-05-01T00:02:00Z',
+        message: 'Follow up',
+      },
       {
         id: 'm4',
         from: { id: 'user-2' },
         created_time: '2024-05-01T00:03:00Z',
+        message: 'Thanks',
       },
     ]);
 
@@ -86,6 +99,9 @@ describe('runMessengerSync', () => {
     );
     expect(businessMessages).toHaveLength(2);
     expect(customerMessages).toHaveLength(2);
+    expect(storedMessages.find((row) => row.id === 'm1')?.body).toBe(
+      'Hello $50',
+    );
 
     const state = db
       .select()

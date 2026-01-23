@@ -25,7 +25,19 @@ type AssetsResponse = {
 export default function Assets(): React.ReactElement {
   const [assets, setAssets] = React.useState<AssetsResponse | null>(null);
   const [syncingPageId, setSyncingPageId] = React.useState<string | null>(null);
+  const [deletingPageId, setDeletingPageId] = React.useState<string | null>(
+    null,
+  );
   const [error, setError] = React.useState<string | null>(null);
+
+  const refreshAssets = React.useCallback(async () => {
+    const response = await fetch('/api/assets');
+    if (!response.ok) {
+      return;
+    }
+    const data = (await response.json()) as AssetsResponse;
+    setAssets(data);
+  }, []);
 
   React.useEffect(() => {
     let mounted = true;
@@ -58,6 +70,30 @@ export default function Assets(): React.ReactElement {
       setError(err instanceof Error ? err.message : 'Sync failed.');
     } finally {
       setSyncingPageId(null);
+    }
+  };
+
+  const handleDelete = async (pageId: string, pageName: string) => {
+    const confirmed = window.confirm(
+      `Delete ${pageName || pageId} and all related data? This cannot be undone.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setDeletingPageId(pageId);
+    setError(null);
+    try {
+      const response = await fetch(`/api/pages/${pageId}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error('Delete failed.');
+      }
+      await refreshAssets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete failed.');
+    } finally {
+      setDeletingPageId(null);
     }
   };
 
@@ -103,6 +139,15 @@ export default function Assets(): React.ReactElement {
                       {syncingPageId === page.id
                         ? 'Syncing…'
                         : 'Sync Messenger'}
+                    </button>
+                    <button
+                      {...stylex.props(layout.ghostButton)}
+                      onClick={() =>
+                        handleDelete(page.id, page.name || `Page ${page.id}`)
+                      }
+                      disabled={deletingPageId === page.id}
+                    >
+                      {deletingPageId === page.id ? 'Deleting…' : 'Delete page'}
                     </button>
                   </div>
                 </li>

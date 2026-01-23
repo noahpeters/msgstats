@@ -22,7 +22,7 @@ export const metaConfig = {
     pageWithToken: ['id', 'name', 'access_token'],
     permissions: ['permission', 'status'],
     conversations: ['id', 'updated_time'],
-    messages: ['id', 'from', 'created_time'],
+    messages: ['id', 'from', 'created_time', 'message'],
     igAccounts: ['id', 'name'],
   },
 };

@@ -17,7 +17,6 @@ import {
   exchangeCodeForToken,
   fetchBusinessPages,
   fetchBusinesses,
-  fetchPageName,
   fetchPageToken,
   fetchPermissions,
 } from './meta/client';
@@ -31,6 +30,23 @@ export function createApp() {
 
   const app = express();
   app.use(express.json());
+  // Log every HTTP request
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.info(
+        `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} ${duration}ms`,
+      );
+    });
+    next();
+  });
+
+  // Global error handler for uncaught exceptions
+  app.use((err, _res, next) => {
+    console.error(err);
+    next(err);
+  });
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -185,6 +201,7 @@ export function createApp() {
       );
       res.json({ hasToken: true, permissions, missing });
     } catch (error) {
+      console.error(error);
       res.status(502).json({
         hasToken: true,
         permissions: [],
@@ -222,6 +239,7 @@ export function createApp() {
       });
       res.json(businesses);
     } catch (error) {
+      console.error(error);
       res.status(502).json({
         error:
           error instanceof Error ? error.message : 'Meta business fetch failed',
@@ -264,6 +282,7 @@ export function createApp() {
         })),
       );
     } catch (error) {
+      console.error(error);
       res.status(502).json({
         error:
           error instanceof Error ? error.message : 'Meta pages fetch failed',
@@ -304,7 +323,12 @@ export function createApp() {
         accessToken: inputToken,
         version: config.metaApiVersion,
       });
-      const resolvedName = pageNameFromClient?.trim() || page.name;
+      const trimmedClient = pageNameFromClient?.trim() ?? '';
+      const normalizedClient = trimmedClient.toLowerCase();
+      const resolvedName =
+        !trimmedClient || normalizedClient === 'page'
+          ? page.name
+          : trimmedClient;
       const encrypted = encryptString(
         page.accessToken,
         config.appEncryptionKey,
@@ -332,6 +356,7 @@ export function createApp() {
 
       res.json({ pageId: page.id, name: resolvedName });
     } catch (error) {
+      console.error(error);
       res.status(502).json({
         error:
           error instanceof Error ? error.message : 'Meta page token failed',
@@ -352,127 +377,61 @@ export function createApp() {
       return;
     }
 
-    const result = db
-      .update(metaPages)
-      .set({ name: name.trim(), updatedAt: new Date().toISOString() })
-      .where(eq(metaPages.id, pageId))
-      .run();
-    if (result.changes === 0) {
-      res.status(404).json({ error: 'Page not enabled yet' });
-      return;
-    }
-
-    res.json({ pageId, name: name.trim() });
+    res.json({ pageId, name: name.trim(), skipped: true });
   });
 
   app.get('/api/assets', async (_req, res) => {
-    const userTokenRow = db
-      .select()
-      .from(metaTokens)
-      .orderBy(desc(metaTokens.createdAt))
-      .get();
-    const userToken = userTokenRow
-      ? decryptString(
-          {
-            ciphertext: userTokenRow.encryptedValue,
-            iv: userTokenRow.iv,
-            tag: userTokenRow.tag,
-          },
-          config.appEncryptionKey,
-        )
-      : null;
     const pages = db
       .select({
         id: metaPages.id,
         name: metaPages.name,
-        encryptedAccessToken: metaPages.encryptedAccessToken,
-        iv: metaPages.iv,
-        tag: metaPages.tag,
       })
       .from(metaPages)
       .all();
-    const refreshedPages = await Promise.all(
-      pages.map(async (page) => {
-        let name = page.name;
-        const normalizedName = name?.trim().toLowerCase();
-        if (!name || !name.trim() || normalizedName === 'page') {
-          try {
-            const pageToken = decryptString(
-              {
-                ciphertext: page.encryptedAccessToken,
-                iv: page.iv,
-                tag: page.tag,
-              },
-              config.appEncryptionKey,
-            );
-            const fresh = await fetchPageName({
-              pageId: page.id,
-              accessToken: pageToken,
-              version: config.metaApiVersion,
-            });
-            name = fresh.name;
-            db.update(metaPages)
-              .set({ name })
-              .where(eq(metaPages.id, page.id))
-              .run();
-          } catch {
-            // ignore refresh errors, keep existing name
-          }
-        }
-        const normalizedAfterPageToken = name?.trim().toLowerCase();
-        if (
-          userToken &&
-          (!name || !name.trim() || normalizedAfterPageToken === 'page')
-        ) {
-          try {
-            const fresh = await fetchPageName({
-              pageId: page.id,
-              accessToken: userToken,
-              version: config.metaApiVersion,
-            });
-            name = fresh.name;
-            db.update(metaPages)
-              .set({ name })
-              .where(eq(metaPages.id, page.id))
-              .run();
-          } catch {
-            // ignore refresh errors, keep existing name
-          }
-        }
-        const conversationCount = db
-          .select({ id: conversations.id })
-          .from(conversations)
-          .where(eq(conversations.pageId, page.id))
-          .all().length;
-        const messageCount = db
-          .select({ id: messages.id })
-          .from(messages)
-          .where(eq(messages.pageId, page.id))
-          .all().length;
-        const lastSync = db
-          .select({ lastSyncedAt: syncStates.lastSyncedAt })
-          .from(syncStates)
-          .where(eq(syncStates.pageId, page.id))
-          .orderBy(desc(syncStates.updatedAt))
-          .get();
-        return {
-          id: page.id,
-          name,
-          lastSyncedAt: lastSync?.lastSyncedAt ?? null,
-          conversationCount,
-          messageCount,
-        };
-      }),
-    );
+    const enrichedPages = pages.map((page) => {
+      const conversationCount = db
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.pageId, page.id))
+        .all().length;
+      const messageCount = db
+        .select({ id: messages.id })
+        .from(messages)
+        .where(eq(messages.pageId, page.id))
+        .all().length;
+      const lastSync = db
+        .select({ lastSyncedAt: syncStates.lastSyncedAt })
+        .from(syncStates)
+        .where(eq(syncStates.pageId, page.id))
+        .orderBy(desc(syncStates.updatedAt))
+        .get();
+      return {
+        id: page.id,
+        name: page.name,
+        lastSyncedAt: lastSync?.lastSyncedAt ?? null,
+        conversationCount,
+        messageCount,
+      };
+    });
     const ig = db
       .select({ id: igAssets.id, name: igAssets.name, pageId: igAssets.pageId })
       .from(igAssets)
       .all();
     res.json({
-      pages: refreshedPages,
+      pages: enrichedPages,
       igAssets: ig,
       igEnabled: config.igEnabled,
     });
+  });
+
+  app.delete('/api/pages/:pageId', (req, res) => {
+    const { pageId } = req.params;
+    db.delete(messages).where(eq(messages.pageId, pageId)).run();
+    db.delete(conversations).where(eq(conversations.pageId, pageId)).run();
+    db.delete(syncStates).where(eq(syncStates.pageId, pageId)).run();
+    db.delete(igAssets).where(eq(igAssets.pageId, pageId)).run();
+    db.delete(metaPages).where(eq(metaPages.id, pageId)).run();
+    res.json({ deleted: true, pageId });
   });
 
   return { app, config, db };

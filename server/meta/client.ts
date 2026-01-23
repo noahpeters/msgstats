@@ -78,6 +78,8 @@ async function fetchWithRetry(
     }
   }
 
+  console.error(lastError); // log the unexpected failure
+
   throw lastError ?? new Error('Request failed');
 }
 
@@ -253,18 +255,26 @@ export async function fetchPageToken(options: {
       fields: metaConfig.fields.pageWithToken.join(','),
     },
   );
-  const payload = await fetchGraph<{
-    id: string;
-    name: string;
-    access_token: string;
-  }>(url);
-  if (!payload.data?.id || !payload.data.access_token) {
-    throw new Error('Meta page token response missing fields');
+  const payload = await fetchGraph<Record<string, unknown>>(url);
+  const data = payload as {
+    id?: string;
+    name?: string;
+    access_token?: string;
+  };
+  console.log(payload);
+  if (!data?.id || !data.access_token) {
+    const keys = data ? Object.keys(data).join(',') : 'none';
+    console.error(
+      `Meta page token response missing fields (keys: ${keys || 'none'}) ${JSON.stringify(data, null, 2)}`,
+    );
+    throw new Error(
+      `Meta page token response missing fields (keys: ${keys || 'none'})`,
+    );
   }
   return {
-    id: payload.data.id,
-    name: payload.data.name,
-    accessToken: payload.data.access_token,
+    id: data.id,
+    name: data.name ?? '',
+    accessToken: data.access_token,
   };
 }
 
@@ -322,6 +332,7 @@ export type MetaMessage = {
     id: string;
   };
   created_time: string;
+  message?: string;
 };
 
 export async function fetchConversationMessages(options: {

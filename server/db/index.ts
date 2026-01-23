@@ -6,12 +6,17 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 
 function ensureConversationColumns(sqlite: Database.Database) {
+  const migrations = sqlite
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'",
+    )
+    .get();
   const table = sqlite
     .prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'",
     )
     .get();
-  if (!table) {
+  if (!table || !migrations) {
     return;
   }
 
@@ -43,6 +48,14 @@ function ensureConversationColumns(sqlite: Database.Database) {
 }
 
 function ensureSyncStates(sqlite: Database.Database) {
+  const migrations = sqlite
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'",
+    )
+    .get();
+  if (!migrations) {
+    return;
+  }
   const table = sqlite
     .prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_states'",

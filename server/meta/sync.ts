@@ -2,8 +2,19 @@ import { randomUUID } from 'crypto';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { and, desc, eq } from 'drizzle-orm';
 import { decryptString } from '../security/encryption';
-import { conversations, messages, metaPages, syncStates } from '../db/schema';
-import { fetchConversationMessages, fetchConversations } from './client';
+import {
+  conversations,
+  messages,
+  metaPages,
+  metaTokens,
+  syncStates,
+} from '../db/schema';
+import {
+  fetchConversationMessages,
+  fetchConversations,
+  fetchPageName,
+} from './client';
+import type { MetaConversation } from './client';
 import type { AppConfig } from '../config';
 
 export type SyncStatus = {
@@ -23,6 +34,24 @@ const syncStatus: SyncStatus = {
   conversationsProcessed: 0,
   messagesProcessed: 0,
 };
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  const queue = [...items];
+  const runners = Array.from({ length: limit }, async () => {
+    while (queue.length) {
+      const next = queue.shift();
+      if (!next) {
+        return;
+      }
+      await worker(next);
+    }
+  });
+  await Promise.all(runners);
+}
 
 export function getSyncStatus(): SyncStatus {
   return syncStatus;
@@ -52,6 +81,55 @@ export async function runMessengerSync(options: {
     },
     config.appEncryptionKey,
   );
+  const normalizedName = pageRow.name?.trim().toLowerCase();
+  if (!pageRow.name || !pageRow.name.trim() || normalizedName === 'page') {
+    let resolvedName: string | null = null;
+    try {
+      const fresh = await fetchPageName({
+        pageId,
+        accessToken: pageToken,
+        version: config.metaApiVersion,
+      });
+      resolvedName = fresh.name;
+    } catch {
+      // ignore page-token name errors
+    }
+
+    if (!resolvedName) {
+      const userTokenRow = db
+        .select()
+        .from(metaTokens)
+        .orderBy(desc(metaTokens.createdAt))
+        .get();
+      if (userTokenRow) {
+        const userToken = decryptString(
+          {
+            ciphertext: userTokenRow.encryptedValue,
+            iv: userTokenRow.iv,
+            tag: userTokenRow.tag,
+          },
+          config.appEncryptionKey,
+        );
+        try {
+          const fresh = await fetchPageName({
+            pageId,
+            accessToken: userToken,
+            version: config.metaApiVersion,
+          });
+          resolvedName = fresh.name;
+        } catch {
+          // ignore user-token name errors
+        }
+      }
+    }
+
+    if (resolvedName && resolvedName.trim()) {
+      db.update(metaPages)
+        .set({ name: resolvedName.trim(), updatedAt: new Date().toISOString() })
+        .where(eq(metaPages.id, pageId))
+        .run();
+    }
+  }
 
   const syncState = db
     .select()
@@ -89,7 +167,7 @@ export async function runMessengerSync(options: {
   let conversationsProcessed = 0;
   let latestUpdatedTime: string | null = null;
 
-  for (const convo of filteredConversations) {
+  const processConversation = async (convo: MetaConversation) => {
     const convoMessages = await fetchConversationMessages({
       conversationId: convo.id,
       accessToken: pageToken,
@@ -121,7 +199,7 @@ export async function runMessengerSync(options: {
           conversationId: convo.id,
           pageId,
           senderType,
-          body: null,
+          body: msg.message ?? null,
           createdTime: msg.created_time,
         })
         .onConflictDoNothing()
@@ -161,7 +239,14 @@ export async function runMessengerSync(options: {
     if (!latestUpdatedTime || convo.updated_time > latestUpdatedTime) {
       latestUpdatedTime = convo.updated_time;
     }
-  }
+  };
+
+  const concurrencyLimit = 3;
+  await mapWithConcurrency(
+    filteredConversations,
+    concurrencyLimit,
+    processConversation,
+  );
 
   const syncTime = latestUpdatedTime ?? new Date().toISOString();
   db.insert(syncStates)
