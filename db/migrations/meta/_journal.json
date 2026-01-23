@@ -1,0 +1,69 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "0000",
+      "when": 0,
+      "tag": "0000_meta_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "0001",
+      "when": 0,
+      "tag": "0001_meta_oauth_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "0002",
+      "when": 0,
+      "tag": "0002_meta_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "0003",
+      "when": 0,
+      "tag": "0003_ig_assets",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "0004",
+      "when": 0,
+      "tag": "0004_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "0005",
+      "when": 0,
+      "tag": "0005_conversations_page_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "0006",
+      "when": 0,
+      "tag": "0006_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "0007",
+      "when": 0,
+      "tag": "0007_messages_conversation_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "0008",
+      "when": 0,
+      "tag": "0008_sync_runs",
+      "breakpoints": true
+    }
+  ]
+}
