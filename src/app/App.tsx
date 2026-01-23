@@ -1,12 +1,12 @@
 import * as React from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import * as stylex from '@stylexjs/stylex';
-import { layout, colors } from './styles';
+import { layout } from './styles';
 
 const activeLink = stylex.create({
   active: {
-    color: colors.ink,
-    borderBottom: `2px solid ${colors.sea}`,
+    color: '#0c1b1a',
+    borderBottom: '2px solid #0f766e',
     paddingBottom: '4px',
   },
 });

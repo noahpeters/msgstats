@@ -7,21 +7,12 @@ export default defineConfig((env) => {
   return {
     plugins: [
       stylex({
-        babelConfig: {
-          plugins: [
-            [
-              '@stylexjs/babel-plugin',
-              {
-                dev: !isSsrBuild,
-                runtimeInjection: true,
-                treeshakeCompensation: true,
-                unstable_moduleResolution: {
-                  type: 'commonjs',
-                  rootDir: __dirname,
-                },
-              },
-            ],
-          ],
+        dev: !isSsrBuild,
+        runtimeInjection: true,
+        treeshakeCompensation: true,
+        unstable_moduleResolution: {
+          type: 'commonJS',
+          rootDir: __dirname,
         },
       }),
       react(),

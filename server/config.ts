@@ -6,6 +6,9 @@ export type AppConfig = {
   databasePath: string;
   metaApiVersion: string;
   igEnabled: boolean;
+  metaScopes: string[];
+  metaPageId?: string;
+  metaPageAccessToken?: string;
 };
 
 function requireEnv(name: string): string {
@@ -19,6 +22,10 @@ function requireEnv(name: string): string {
 import { metaConfig } from './meta/config';
 
 export function loadConfig(): AppConfig {
+  const scopes = (process.env.META_SCOPES ?? 'pages_show_list,pages_messaging')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
   return {
     metaAppId: requireEnv('META_APP_ID'),
     metaAppSecret: requireEnv('META_APP_SECRET'),
@@ -27,5 +34,8 @@ export function loadConfig(): AppConfig {
     databasePath: process.env.DATABASE_PATH ?? './data/msgstats.sqlite',
     metaApiVersion: process.env.META_API_VERSION ?? metaConfig.version,
     igEnabled: process.env.IG_ENABLED === 'true',
+    metaScopes: scopes,
+    metaPageId: process.env.META_PAGE_ID,
+    metaPageAccessToken: process.env.META_PAGE_ACCESS_TOKEN,
   };
 }

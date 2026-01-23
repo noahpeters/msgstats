@@ -40,8 +40,8 @@ describe('report endpoints', () => {
           pageId: 'p1',
           igBusinessId: null,
           updatedTime: '2024-04-10T10:00:00Z',
-          customerCount: 2,
-          businessCount: 2,
+          customerCount: 3,
+          businessCount: 3,
         },
         {
           id: 'c2',
@@ -49,8 +49,8 @@ describe('report endpoints', () => {
           pageId: 'p1',
           igBusinessId: null,
           updatedTime: '2024-04-12T10:00:00Z',
-          customerCount: 4,
-          businessCount: 4,
+          customerCount: 5,
+          businessCount: 5,
         },
         {
           id: 'c3',
@@ -84,8 +84,8 @@ describe('report endpoints', () => {
           pageId: 'p2',
           igBusinessId: null,
           updatedTime: '2024-01-15T10:00:00Z',
-          customerCount: 2,
-          businessCount: 2,
+          customerCount: 3,
+          businessCount: 3,
         },
         {
           id: 'c5',
@@ -93,8 +93,8 @@ describe('report endpoints', () => {
           pageId: 'p2',
           igBusinessId: null,
           updatedTime: '2024-01-20T10:00:00Z',
-          customerCount: 4,
-          businessCount: 4,
+          customerCount: 5,
+          businessCount: 5,
         },
         {
           id: 'c6',

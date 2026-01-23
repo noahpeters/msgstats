@@ -6,7 +6,8 @@
     "node": ">=20 <24"
   },
   "scripts": {
-    "dev": "tsx server/index.ts",
+    "dev": "DOTENV_CONFIG_PATH=.env.dev tsx server/index.ts",
+    "migrate": "DOTENV_CONFIG_PATH=.env.dev tsx server/scripts/migrate.ts",
     "build": "vite build && vite build --ssr src/entry-server.tsx",
     "start": "node dist/server/index.js",
     "lint": "eslint . --ext .ts,.tsx",

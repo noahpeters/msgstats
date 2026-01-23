@@ -7,10 +7,10 @@ describe('getProductiveTier', () => {
   });
 
   it('returns productive for minimum counts', () => {
-    expect(getProductiveTier(2, 2)).toBe('productive');
+    expect(getProductiveTier(3, 3)).toBe('productive');
   });
 
   it('returns highly productive for high counts', () => {
-    expect(getProductiveTier(4, 4)).toBe('highly_productive');
+    expect(getProductiveTier(5, 5)).toBe('highly_productive');
   });
 });

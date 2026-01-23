@@ -123,19 +123,53 @@ export async function exchangeCodeForToken(options: {
   };
 }
 
+export async function debugToken(options: {
+  inputToken: string;
+  appId: string;
+  appSecret: string;
+  version: string;
+}): Promise<{
+  isValid: boolean;
+  scopes: string[];
+  userId?: string;
+  appId?: string;
+  expiresAt?: number;
+}> {
+  const appToken = `${options.appId}|${options.appSecret}`;
+  const url = buildUrl(metaConfig.endpoints.debugToken, options.version, {
+    input_token: options.inputToken,
+    access_token: appToken,
+  });
+  const payload = await fetchGraph<{
+    is_valid: boolean;
+    scopes?: string[];
+    user_id?: string;
+    app_id?: string;
+    expires_at?: number;
+  }>(url);
+  return {
+    isValid: payload.data.is_valid,
+    scopes: payload.data.scopes ?? [],
+    userId: payload.data.user_id,
+    appId: payload.data.app_id,
+    expiresAt: payload.data.expires_at,
+  };
+}
+
 export type MetaPage = {
   id: string;
   name: string;
-  access_token: string;
+  access_token?: string;
 };
 
 export async function fetchPages(options: {
   accessToken: string;
   version: string;
+  fields?: string[];
 }): Promise<MetaPage[]> {
   const url = buildUrl(metaConfig.endpoints.meAccounts, options.version, {
     access_token: options.accessToken,
-    fields: metaConfig.fields.pages.join(','),
+    fields: (options.fields ?? metaConfig.fields.pages).join(','),
   });
   const payload = await fetchGraph<MetaPage[]>(url);
   return payload.data;

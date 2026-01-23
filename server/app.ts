@@ -10,10 +10,11 @@ import {
   syncRuns,
   igAssets,
 } from './db/schema';
-import { encryptString } from './security/encryption';
-import { exchangeCodeForToken } from './meta/client';
+import { decryptString, encryptString } from './security/encryption';
+import { debugToken, exchangeCodeForToken, fetchPages } from './meta/client';
 import { startMetaSync } from './meta/sync';
 import { buildReport } from './reports';
+import { recomputeConversationStats } from './db/recompute';
 
 export function createApp() {
   const config = loadConfig();
@@ -40,8 +41,7 @@ export function createApp() {
       redirect_uri: config.metaRedirectUri,
       state,
       response_type: 'code',
-      scope:
-        'pages_messaging,pages_read_engagement,pages_show_list,instagram_basic,instagram_manage_messages',
+      scope: config.metaScopes.join(','),
     });
 
     const authUrl = `https://www.facebook.com/${config.metaApiVersion}/dialog/oauth?${params.toString()}`;
@@ -135,12 +135,107 @@ export function createApp() {
     });
   });
 
-  app.get('/api/reports/weekly', (_req, res) => {
-    res.json(buildReport(db, 'weekly'));
+  app.get('/api/reports/weekly', (req, res) => {
+    const bucketBy = req.query.bucketBy === 'updated' ? 'updated' : 'start';
+    res.json(buildReport(db, 'weekly', bucketBy));
   });
 
-  app.get('/api/reports/monthly', (_req, res) => {
-    res.json(buildReport(db, 'monthly'));
+  app.get('/api/reports/monthly', (req, res) => {
+    const bucketBy = req.query.bucketBy === 'updated' ? 'updated' : 'start';
+    res.json(buildReport(db, 'monthly', bucketBy));
+  });
+
+  app.post('/api/recompute', async (_req, res) => {
+    const result = await recomputeConversationStats(db);
+    res.json(result);
+  });
+
+  app.get('/api/meta/debug', async (_req, res) => {
+    const tokenRow = db
+      .select()
+      .from(metaTokens)
+      .orderBy(desc(metaTokens.createdAt))
+      .get();
+
+    if (!tokenRow) {
+      res.json({ hasToken: false });
+      return;
+    }
+
+    let inputToken: string;
+    try {
+      inputToken = decryptString(
+        {
+          ciphertext: tokenRow.encryptedValue,
+          iv: tokenRow.iv,
+          tag: tokenRow.tag,
+        },
+        config.appEncryptionKey,
+      );
+    } catch (error) {
+      res.status(500).json({
+        hasToken: true,
+        error: 'Failed to decode token',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    try {
+      const debug = await debugToken({
+        inputToken,
+        appId: config.metaAppId,
+        appSecret: config.metaAppSecret,
+        version: config.metaApiVersion,
+      });
+      res.json({ hasToken: true, debug });
+    } catch (error) {
+      res.status(500).json({
+        hasToken: true,
+        error: 'Meta debug failed',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  app.get('/api/meta/pages', async (_req, res) => {
+    const tokenRow = db
+      .select()
+      .from(metaTokens)
+      .orderBy(desc(metaTokens.createdAt))
+      .get();
+
+    if (!tokenRow) {
+      res.json({ hasToken: false, pages: [] });
+      return;
+    }
+
+    try {
+      const inputToken = decryptString(
+        {
+          ciphertext: tokenRow.encryptedValue,
+          iv: tokenRow.iv,
+          tag: tokenRow.tag,
+        },
+        config.appEncryptionKey,
+      );
+      const pages = await fetchPages({
+        accessToken: inputToken,
+        version: config.metaApiVersion,
+        fields: ['id', 'name', 'access_token'],
+      });
+      const basic = await fetchPages({
+        accessToken: inputToken,
+        version: config.metaApiVersion,
+        fields: ['id', 'name'],
+      });
+      res.json({ hasToken: true, pages, basic });
+    } catch (error) {
+      res.status(500).json({
+        hasToken: true,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   app.get('/api/assets', (_req, res) => {

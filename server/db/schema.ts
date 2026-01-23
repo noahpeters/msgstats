@@ -39,8 +39,10 @@ export const conversations = sqliteTable(
     pageId: text('page_id').notNull(),
     igBusinessId: text('ig_business_id'),
     updatedTime: text('updated_time').notNull(),
+    startedTime: text('started_time'),
     customerCount: integer('customer_count').notNull(),
     businessCount: integer('business_count').notNull(),
+    priceGiven: integer('price_given').notNull().default(0),
   },
   (table) => ({
     pageIdx: index('conversations_page_idx').on(table.pageId),

@@ -85,16 +85,30 @@ async function performMetaSync(options: {
     options.config.appEncryptionKey,
   );
 
-  const pages = await fetchPages({
-    accessToken: userToken,
-    version: options.config.metaApiVersion,
-  });
+  const pages =
+    options.config.metaPageId && options.config.metaPageAccessToken
+      ? [
+          {
+            id: options.config.metaPageId,
+            name: 'Page',
+            access_token: options.config.metaPageAccessToken,
+          },
+        ]
+      : await fetchPages({
+          accessToken: userToken,
+          version: options.config.metaApiVersion,
+        });
 
   let pageCount = 0;
   let conversationCount = 0;
   let messageCount = 0;
 
   for (const page of pages) {
+    if (!page.access_token) {
+      throw new Error(
+        `Missing page access token for page ${page.id}. Check Meta scopes and re-connect.`,
+      );
+    }
     pageCount += 1;
     const pageToken = encryptString(
       page.access_token,
@@ -138,11 +152,19 @@ async function performMetaSync(options: {
 
       let customerCount = 0;
       let businessCount = 0;
+      let priceGiven = 0;
+      let startedTime: string | null = null;
       for (const msg of convoMessages) {
         messageCount += 1;
         const senderType = msg.from?.id === page.id ? 'business' : 'customer';
+        if (!startedTime || msg.created_time < startedTime) {
+          startedTime = msg.created_time;
+        }
         if (senderType === 'business') {
           businessCount += 1;
+          if (priceGiven === 0 && msg.message?.includes('$')) {
+            priceGiven = 1;
+          }
         } else {
           customerCount += 1;
         }
@@ -168,15 +190,19 @@ async function performMetaSync(options: {
           pageId: page.id,
           igBusinessId: null,
           updatedTime: convo.updated_time,
+          startedTime: startedTime ?? convo.updated_time,
           customerCount,
           businessCount,
+          priceGiven,
         })
         .onConflictDoUpdate({
           target: conversations.id,
           set: {
             updatedTime: convo.updated_time,
+            startedTime: startedTime ?? convo.updated_time,
             customerCount,
             businessCount,
+            priceGiven,
           },
         })
         .run();

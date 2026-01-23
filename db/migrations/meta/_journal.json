@@ -64,6 +64,20 @@
       "when": 0,
       "tag": "0008_sync_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "0009",
+      "when": 0,
+      "tag": "0009_conversations_price_given",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "0010",
+      "when": 0,
+      "tag": "0010_conversations_started_time",
+      "breakpoints": true
     }
   ]
 }

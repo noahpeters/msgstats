@@ -7,10 +7,10 @@ export function getProductiveTier(
   customerCount: number,
   businessCount: number,
 ): ProductiveTier {
-  if (customerCount >= 4 && businessCount >= 4) {
+  if (customerCount >= 5 && businessCount >= 5) {
     return 'highly_productive';
   }
-  if (customerCount >= 2 && businessCount >= 2) {
+  if (customerCount >= 3 && businessCount >= 3) {
     return 'productive';
   }
   return 'unproductive';

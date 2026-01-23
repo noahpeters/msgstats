@@ -1,0 +1,1 @@
+ALTER TABLE conversations ADD COLUMN price_given INTEGER NOT NULL DEFAULT 0;
