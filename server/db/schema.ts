@@ -40,6 +40,7 @@ export const conversations = sqliteTable(
     igBusinessId: text('ig_business_id'),
     updatedTime: text('updated_time').notNull(),
     startedTime: text('started_time'),
+    lastMessageAt: text('last_message_at'),
     customerCount: integer('customer_count').notNull(),
     businessCount: integer('business_count').notNull(),
     priceGiven: integer('price_given').notNull().default(0),
@@ -74,3 +75,20 @@ export const syncRuns = sqliteTable('sync_runs', {
   conversations: integer('conversations').notNull(),
   messages: integer('messages').notNull(),
 });
+
+export const syncStates = sqliteTable(
+  'sync_states',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    pageId: text('page_id').notNull(),
+    platform: text('platform').notNull(),
+    lastSyncedAt: text('last_synced_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    pagePlatformIdx: index('sync_states_page_platform_idx').on(
+      table.pageId,
+      table.platform,
+    ),
+  }),
+);

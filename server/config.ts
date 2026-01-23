@@ -7,8 +7,6 @@ export type AppConfig = {
   metaApiVersion: string;
   igEnabled: boolean;
   metaScopes: string[];
-  metaPageId?: string;
-  metaPageAccessToken?: string;
 };
 
 function requireEnv(name: string): string {
@@ -22,7 +20,10 @@ function requireEnv(name: string): string {
 import { metaConfig } from './meta/config';
 
 export function loadConfig(): AppConfig {
-  const scopes = (process.env.META_SCOPES ?? 'pages_show_list,pages_messaging')
+  const scopes = (
+    process.env.META_SCOPES ??
+    'pages_show_list,pages_manage_metadata,business_management,pages_messaging'
+  )
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
@@ -35,7 +36,5 @@ export function loadConfig(): AppConfig {
     metaApiVersion: process.env.META_API_VERSION ?? metaConfig.version,
     igEnabled: process.env.IG_ENABLED === 'true',
     metaScopes: scopes,
-    metaPageId: process.env.META_PAGE_ID,
-    metaPageAccessToken: process.env.META_PAGE_ACCESS_TOKEN,
   };
 }

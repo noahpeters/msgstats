@@ -78,6 +78,27 @@
       "when": 0,
       "tag": "0010_conversations_started_time",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "0011",
+      "when": 0,
+      "tag": "0011_conversations_last_message_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "0012",
+      "when": 0,
+      "tag": "0012_sync_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "0013",
+      "when": 0,
+      "tag": "0013_sync_states_page_idx",
+      "breakpoints": true
     }
   ]
 }

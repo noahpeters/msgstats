@@ -11,13 +11,28 @@ type ReportRow = {
   qualifiedRate: number;
 };
 
+type PageAsset = {
+  id: string;
+  name: string;
+};
+
 type BucketBy = 'start' | 'updated';
 
 async function fetchReport(
   endpoint: string,
-  bucketBy: BucketBy,
+  pageId?: string,
+  bucketBy?: BucketBy,
 ): Promise<ReportRow[]> {
-  const response = await fetch(`${endpoint}?bucketBy=${bucketBy}`);
+  const params = new URLSearchParams();
+  if (pageId) {
+    params.set('pageId', pageId);
+  }
+  if (bucketBy) {
+    params.set('bucketBy', bucketBy);
+  }
+  const response = await fetch(
+    params.toString() ? `${endpoint}?${params.toString()}` : endpoint,
+  );
   if (!response.ok) {
     return [];
   }
@@ -38,9 +53,10 @@ function ReportTable({
       <h2>{title}</h2>
       <p {...stylex.props(layout.note)}>
         Productive: customer ≥3 and business ≥3. Highly productive: customer ≥5
-        and business ≥5. Price given: any business message contains &quot;$&quot;.
-        Qualified rate: (productive + highly productive) / total. Buckets use
-        conversation {bucketBy === 'start' ? 'start' : 'last update'} date.
+        and business ≥5. Price given: any business message includes "$".
+        Qualified rate: (productive + highly productive) / total. Buckets are
+        based on the conversation{' '}
+        {bucketBy === 'start' ? 'start' : 'last update'} date.
       </p>
       <table {...stylex.props(layout.table)}>
         <thead>
@@ -79,19 +95,26 @@ export default function Reports(): React.ReactElement {
   const [monthly, setMonthly] = React.useState<ReportRow[]>([]);
   const [recomputing, setRecomputing] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [pages, setPages] = React.useState<PageAsset[]>([]);
+  const [pageId, setPageId] = React.useState<string>('');
   const [bucketBy, setBucketBy] = React.useState<BucketBy>('start');
 
   const loadReports = React.useCallback(async () => {
     const [weeklyData, monthlyData] = await Promise.all([
-      fetchReport('/api/reports/weekly', bucketBy),
-      fetchReport('/api/reports/monthly', bucketBy),
+      fetchReport('/api/reports/weekly', pageId || undefined, bucketBy),
+      fetchReport('/api/reports/monthly', pageId || undefined, bucketBy),
     ]);
     setWeekly(weeklyData);
     setMonthly(monthlyData);
-  }, [bucketBy]);
+  }, [pageId, bucketBy]);
 
   React.useEffect(() => {
     void (async () => {
+      const assets = await fetch('/api/assets');
+      if (assets.ok) {
+        const data = (await assets.json()) as { pages: PageAsset[] };
+        setPages(data.pages);
+      }
       await loadReports();
     })();
   }, [loadReports]);
@@ -124,6 +147,20 @@ export default function Reports(): React.ReactElement {
             {recomputing ? 'Recomputing…' : 'Recompute Stats'}
           </button>
           <label {...stylex.props(layout.note)}>
+            <span style={{ marginRight: '8px' }}>Page filter</span>
+            <select
+              value={pageId}
+              onChange={(event) => setPageId(event.target.value)}
+            >
+              <option value="">All pages</option>
+              {pages.map((page) => (
+                <option key={page.id} value={page.id}>
+                  {page.name || `Page ${page.id}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label {...stylex.props(layout.note)}>
             <span style={{ marginRight: '8px' }}>Bucket by</span>
             <select
               value={bucketBy}
@@ -136,8 +173,7 @@ export default function Reports(): React.ReactElement {
           {error ? <span>{error}</span> : null}
         </div>
         <p {...stylex.props(layout.note)}>
-          Recompute counts and price flags from stored messages without syncing
-          again.
+          Recompute message counts from stored messages without syncing again.
         </p>
       </section>
       <ReportTable title="Weekly report" rows={weekly} bucketBy={bucketBy} />

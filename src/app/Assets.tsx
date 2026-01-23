@@ -5,6 +5,9 @@ import { layout, colors } from './styles';
 type PageAsset = {
   id: string;
   name: string;
+  lastSyncedAt: string | null;
+  conversationCount: number;
+  messageCount: number;
 };
 
 type IgAsset = {
@@ -21,6 +24,8 @@ type AssetsResponse = {
 
 export default function Assets(): React.ReactElement {
   const [assets, setAssets] = React.useState<AssetsResponse | null>(null);
+  const [syncingPageId, setSyncingPageId] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let mounted = true;
@@ -39,15 +44,67 @@ export default function Assets(): React.ReactElement {
     };
   }, []);
 
+  const handleSync = async (pageId: string) => {
+    setSyncingPageId(pageId);
+    setError(null);
+    try {
+      const response = await fetch(`/api/sync/pages/${pageId}/messenger`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error('Sync failed to start.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync failed.');
+    } finally {
+      setSyncingPageId(null);
+    }
+  };
+
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
       <section {...stylex.props(layout.card)}>
-        <h2>Facebook Pages</h2>
+        <h2>Enabled Pages</h2>
+        <p {...stylex.props(layout.note)}>
+          These pages have stored page tokens and are ready for Messenger sync.
+        </p>
+        {error ? <p style={{ color: colors.coral }}>{error}</p> : null}
         <ul>
           {assets?.pages.length
             ? assets.pages.map((page) => (
                 <li key={page.id}>
-                  <strong>{page.name}</strong> <span>({page.id})</span>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '12px',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div>
+                      <strong>{page.name || `Page ${page.id}`}</strong>{' '}
+                      <span>({page.id})</span>
+                      <div {...stylex.props(layout.note)}>
+                        Last sync:{' '}
+                        {page.lastSyncedAt
+                          ? new Date(page.lastSyncedAt).toLocaleString()
+                          : 'Never'}
+                      </div>
+                      <div {...stylex.props(layout.note)}>
+                        Conversations: {page.conversationCount} · Messages:{' '}
+                        {page.messageCount}
+                      </div>
+                    </div>
+                    <button
+                      {...stylex.props(layout.ghostButton)}
+                      onClick={() => handleSync(page.id)}
+                      disabled={syncingPageId === page.id}
+                    >
+                      {syncingPageId === page.id
+                        ? 'Syncing…'
+                        : 'Sync Messenger'}
+                    </button>
+                  </div>
                 </li>
               ))
             : 'No pages synced yet.'}

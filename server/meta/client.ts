@@ -38,6 +38,18 @@ function withVersion(path: string, version: string): string {
   return `${metaConfig.baseUrl}/${version}${path}`;
 }
 
+function buildUrl(
+  path: string,
+  version: string,
+  params: Record<string, string>,
+): string {
+  const url = new URL(withVersion(path, version));
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.set(key, value);
+  });
+  return url.toString();
+}
+
 async function fetchWithRetry(
   input: string,
   init?: RequestInit,
@@ -82,16 +94,15 @@ async function fetchGraph<T>(
   return payload;
 }
 
-function buildUrl(
-  path: string,
-  version: string,
-  params: Record<string, string>,
-): string {
-  const url = new URL(withVersion(path, version));
-  Object.entries(params).forEach(([key, value]) => {
-    url.searchParams.set(key, value);
-  });
-  return url.toString();
+async function paginateList<T>(firstUrl: string): Promise<T[]> {
+  const results: T[] = [];
+  let nextUrl: string | undefined = firstUrl;
+  while (nextUrl) {
+    const payload: GraphResponse<T[]> = await fetchGraph<T[]>(nextUrl);
+    results.push(...payload.data);
+    nextUrl = payload.paging?.next;
+  }
+  return results;
 }
 
 export async function exchangeCodeForToken(options: {
@@ -156,23 +167,125 @@ export async function debugToken(options: {
   };
 }
 
+export async function fetchPermissions(options: {
+  accessToken: string;
+  version: string;
+}): Promise<{ permission: string; status: string }[]> {
+  const url = buildUrl(metaConfig.endpoints.mePermissions, options.version, {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.permissions.join(','),
+  });
+  const payload =
+    await fetchGraph<{ permission: string; status: string }[]>(url);
+  return payload.data;
+}
+
+export type MetaBusiness = {
+  id: string;
+  name: string;
+};
+
+export async function fetchBusinesses(options: {
+  accessToken: string;
+  version: string;
+}): Promise<MetaBusiness[]> {
+  const url = buildUrl(metaConfig.endpoints.meBusinesses, options.version, {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.businesses.join(','),
+    limit: '200',
+  });
+  return paginateList<MetaBusiness>(url);
+}
+
 export type MetaPage = {
   id: string;
   name: string;
   access_token?: string;
 };
 
-export async function fetchPages(options: {
+export async function fetchBusinessPages(options: {
+  businessId: string;
   accessToken: string;
   version: string;
-  fields?: string[];
-}): Promise<MetaPage[]> {
-  const url = buildUrl(metaConfig.endpoints.meAccounts, options.version, {
-    access_token: options.accessToken,
-    fields: (options.fields ?? metaConfig.fields.pages).join(','),
-  });
-  const payload = await fetchGraph<MetaPage[]>(url);
-  return payload.data;
+}): Promise<{ pages: MetaPage[]; source: 'owned_pages' | 'client_pages' }> {
+  const ownedUrl = buildUrl(
+    metaConfig.endpoints.businessOwnedPages(options.businessId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields: metaConfig.fields.pages.join(','),
+      limit: '200',
+    },
+  );
+
+  try {
+    const ownedPages = await paginateList<MetaPage>(ownedUrl);
+    if (ownedPages.length > 0) {
+      return { pages: ownedPages, source: 'owned_pages' };
+    }
+  } catch {
+    // fallback to client_pages
+  }
+
+  const clientUrl = buildUrl(
+    metaConfig.endpoints.businessClientPages(options.businessId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields: metaConfig.fields.pages.join(','),
+      limit: '200',
+    },
+  );
+  const clientPages = await paginateList<MetaPage>(clientUrl);
+  return { pages: clientPages, source: 'client_pages' };
+}
+
+export async function fetchPageToken(options: {
+  pageId: string;
+  accessToken: string;
+  version: string;
+}): Promise<{ id: string; name: string; accessToken: string }> {
+  const url = buildUrl(
+    metaConfig.endpoints.pageDetails(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields: metaConfig.fields.pageWithToken.join(','),
+    },
+  );
+  const payload = await fetchGraph<{
+    id: string;
+    name: string;
+    access_token: string;
+  }>(url);
+  if (!payload.data?.id || !payload.data.access_token) {
+    throw new Error('Meta page token response missing fields');
+  }
+  return {
+    id: payload.data.id,
+    name: payload.data.name,
+    accessToken: payload.data.access_token,
+  };
+}
+
+export async function fetchPageName(options: {
+  pageId: string;
+  accessToken: string;
+  version: string;
+}): Promise<{ id: string; name: string }> {
+  const url = buildUrl(
+    metaConfig.endpoints.pageDetails(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields: metaConfig.fields.pageName.join(','),
+    },
+  );
+  const payload = await fetchGraph<{ id: string; name: string }>(url);
+  return {
+    id: payload.data.id,
+    name: payload.data.name,
+  };
 }
 
 export type MetaConversation = {
@@ -184,25 +297,23 @@ export async function fetchConversations(options: {
   pageId: string;
   accessToken: string;
   version: string;
+  since?: string;
 }): Promise<MetaConversation[]> {
+  const params: Record<string, string> = {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.conversations.join(','),
+    limit: '50',
+    platform: 'messenger',
+  };
+  if (options.since) {
+    params.since = options.since;
+  }
   const firstUrl = buildUrl(
     metaConfig.endpoints.conversations(options.pageId),
     options.version,
-    {
-      access_token: options.accessToken,
-      fields: metaConfig.fields.conversations.join(','),
-      limit: '50',
-    },
+    params,
   );
-  const results: MetaConversation[] = [];
-  let nextUrl: string | undefined = firstUrl;
-  while (nextUrl) {
-    const payload: GraphResponse<MetaConversation[]> =
-      await fetchGraph<MetaConversation[]>(nextUrl);
-    results.push(...payload.data);
-    nextUrl = payload.paging?.next;
-  }
-  return results;
+  return paginateList<MetaConversation>(firstUrl);
 }
 
 export type MetaMessage = {
@@ -211,30 +322,49 @@ export type MetaMessage = {
     id: string;
   };
   created_time: string;
-  message?: string;
 };
 
-export async function fetchMessages(options: {
+export async function fetchConversationMessages(options: {
   conversationId: string;
   accessToken: string;
   version: string;
 }): Promise<MetaMessage[]> {
-  const firstUrl = buildUrl(
-    metaConfig.endpoints.messages(options.conversationId),
+  const fields = `messages.limit(50){${metaConfig.fields.messages.join(',')}}`;
+  const url = buildUrl(
+    metaConfig.endpoints.conversationDetails(options.conversationId),
     options.version,
     {
       access_token: options.accessToken,
-      fields: metaConfig.fields.messages.join(','),
-      limit: '100',
+      fields,
     },
   );
-  const results: MetaMessage[] = [];
-  let nextUrl: string | undefined = firstUrl;
+  const payload = await fetchGraph<{
+    messages?: {
+      data: MetaMessage[];
+      paging?: {
+        next?: string;
+      };
+    };
+  }>(url);
+  if (!payload.data?.messages) {
+    const listUrl = buildUrl(
+      metaConfig.endpoints.conversationMessages(options.conversationId),
+      options.version,
+      {
+        access_token: options.accessToken,
+        fields: metaConfig.fields.messages.join(','),
+        limit: '50',
+      },
+    );
+    return paginateList<MetaMessage>(listUrl);
+  }
+
+  const results: MetaMessage[] = [...payload.data.messages.data];
+  let nextUrl = payload.data.messages.paging?.next;
   while (nextUrl) {
-    const payload: GraphResponse<MetaMessage[]> =
-      await fetchGraph<MetaMessage[]>(nextUrl);
-    results.push(...payload.data);
-    nextUrl = payload.paging?.next;
+    const page = await fetchGraph<MetaMessage[]>(nextUrl);
+    results.push(...page.data);
+    nextUrl = page.paging?.next;
   }
   return results;
 }

@@ -39,24 +39,29 @@ describe('report endpoints', () => {
           platform: 'facebook',
           pageId: 'p1',
           igBusinessId: null,
+          startedTime: '2024-04-09T09:00:00Z',
           updatedTime: '2024-04-10T10:00:00Z',
           customerCount: 3,
           businessCount: 3,
+          priceGiven: 1,
         },
         {
           id: 'c2',
           platform: 'facebook',
           pageId: 'p1',
           igBusinessId: null,
+          startedTime: '2024-04-11T09:00:00Z',
           updatedTime: '2024-04-12T10:00:00Z',
           customerCount: 5,
           businessCount: 5,
+          priceGiven: 0,
         },
         {
           id: 'c3',
           platform: 'facebook',
           pageId: 'p1',
           igBusinessId: null,
+          startedTime: '2024-03-02T10:00:00Z',
           updatedTime: '2024-03-02T10:00:00Z',
           customerCount: 1,
           businessCount: 1,
@@ -72,6 +77,7 @@ describe('report endpoints', () => {
     expect(latest.total).toBe(2);
     expect(latest.productive).toBe(1);
     expect(latest.highlyProductive).toBe(1);
+    expect(latest.priceGiven).toBe(1);
   });
 
   it('returns monthly report data', async () => {
@@ -83,27 +89,33 @@ describe('report endpoints', () => {
           platform: 'facebook',
           pageId: 'p2',
           igBusinessId: null,
+          startedTime: '2024-01-10T10:00:00Z',
           updatedTime: '2024-01-15T10:00:00Z',
           customerCount: 3,
           businessCount: 3,
+          priceGiven: 1,
         },
         {
           id: 'c5',
           platform: 'facebook',
           pageId: 'p2',
           igBusinessId: null,
-          updatedTime: '2024-01-20T10:00:00Z',
+          startedTime: '2024-01-20T10:00:00Z',
+          updatedTime: '2024-02-02T10:00:00Z',
           customerCount: 5,
           businessCount: 5,
+          priceGiven: 0,
         },
         {
           id: 'c6',
           platform: 'facebook',
           pageId: 'p2',
           igBusinessId: null,
+          startedTime: '2024-02-03T10:00:00Z',
           updatedTime: '2024-02-03T10:00:00Z',
           customerCount: 1,
           businessCount: 1,
+          priceGiven: 0,
         },
       ])
       .run();
@@ -121,5 +133,6 @@ describe('report endpoints', () => {
     expect(january?.total).toBe(2);
     expect(january?.productive).toBe(1);
     expect(january?.highlyProductive).toBe(1);
+    expect(january?.priceGiven).toBe(1);
   });
 });

@@ -21,8 +21,8 @@ export type BucketBy = 'start' | 'updated';
 
 function rollup(
   rows: {
-    updatedTime: string;
     startedTime: string | null;
+    updatedTime: string;
     customerCount: number;
     businessCount: number;
     priceGiven: number;
@@ -37,7 +37,9 @@ function rollup(
 
   for (const row of rows) {
     const date = new Date(
-      bucketBy === 'start' ? row.startedTime ?? row.updatedTime : row.updatedTime,
+      bucketBy === 'start'
+        ? row.startedTime ?? row.updatedTime
+        : row.updatedTime,
     );
     const periodDate =
       mode === 'weekly' ? startOfWeekUTC(date) : startOfMonthUTC(date);
@@ -84,8 +86,8 @@ export function buildReport(
 ): ReportRow[] {
   const rows = db
     .select({
-      updatedTime: conversations.updatedTime,
       startedTime: conversations.startedTime,
+      updatedTime: conversations.updatedTime,
       customerCount: conversations.customerCount,
       businessCount: conversations.businessCount,
       priceGiven: conversations.priceGiven,
@@ -104,8 +106,8 @@ export function buildReportForPage(
 ): ReportRow[] {
   const rows = db
     .select({
-      updatedTime: conversations.updatedTime,
       startedTime: conversations.startedTime,
+      updatedTime: conversations.updatedTime,
       customerCount: conversations.customerCount,
       businessCount: conversations.businessCount,
       priceGiven: conversations.priceGiven,
