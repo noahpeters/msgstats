@@ -19,10 +19,16 @@ import {
   fetchBusinesses,
   fetchPageToken,
   fetchPermissions,
+  fetchInstagramAssets,
+  fetchPageIgDebug,
 } from './meta/client';
 import { buildReport, buildReportForPage } from './reports';
 import { recomputeConversationStats } from './db/recompute';
-import { getSyncStatus, startMessengerSync } from './meta/sync';
+import {
+  getSyncStatus,
+  startMessengerSync,
+  startInstagramSync,
+} from './meta/sync';
 
 export function createApp() {
   const config = loadConfig();
@@ -43,10 +49,17 @@ export function createApp() {
   });
 
   // Global error handler for uncaught exceptions
-  app.use((err, _res, next) => {
-    console.error(err);
-    next(err);
-  });
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      _res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      console.error(err);
+      next(err);
+    },
+  );
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -135,6 +148,30 @@ export function createApp() {
   app.post('/api/sync/pages/:pageId/messenger', (req, res) => {
     const { pageId } = req.params;
     const runId = startMessengerSync({ db, config, pageId });
+    res.json({ runId });
+  });
+
+  app.post('/api/sync/pages/:pageId/instagram/:igId', (req, res) => {
+    const { pageId, igId } = req.params;
+    const pageRow = db
+      .select()
+      .from(metaPages)
+      .where(eq(metaPages.id, pageId))
+      .get();
+    if (!pageRow) {
+      res.status(400).json({ error: 'Page not enabled' });
+      return;
+    }
+    const igAsset = db
+      .select()
+      .from(igAssets)
+      .where(eq(igAssets.id, igId))
+      .get();
+    if (!igAsset) {
+      res.status(400).json({ error: 'Instagram asset not enabled' });
+      return;
+    }
+    const runId = startInstagramSync({ db, config, pageId, igId });
     res.json({ runId });
   });
 
@@ -288,6 +325,258 @@ export function createApp() {
           error instanceof Error ? error.message : 'Meta pages fetch failed',
       });
     }
+  });
+
+  app.get('/api/meta/pages/:pageId/ig-assets', async (req, res) => {
+    const { pageId } = req.params;
+    const pageRow = db
+      .select()
+      .from(metaPages)
+      .where(eq(metaPages.id, pageId))
+      .get();
+    if (!pageRow) {
+      res.status(404).json({ error: 'Page not enabled' });
+      return;
+    }
+
+    const inputToken = decryptString(
+      {
+        ciphertext: pageRow.encryptedAccessToken,
+        iv: pageRow.iv,
+        tag: pageRow.tag,
+      },
+      config.appEncryptionKey,
+    );
+
+    try {
+      let assets: Awaited<ReturnType<typeof fetchInstagramAssets>> = [];
+      try {
+        assets = await fetchInstagramAssets({
+          pageId,
+          accessToken: inputToken,
+          version: config.metaApiVersion,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message.includes('Page Access Token')) {
+          const userTokenRow = db
+            .select()
+            .from(metaTokens)
+            .orderBy(desc(metaTokens.createdAt))
+            .get();
+          if (!userTokenRow) {
+            res.status(401).json({ error: 'No Meta token' });
+            return;
+          }
+          const userToken = decryptString(
+            {
+              ciphertext: userTokenRow.encryptedValue,
+              iv: userTokenRow.iv,
+              tag: userTokenRow.tag,
+            },
+            config.appEncryptionKey,
+          );
+          const page = await fetchPageToken({
+            pageId,
+            accessToken: userToken,
+            version: config.metaApiVersion,
+          });
+          const encrypted = encryptString(
+            page.accessToken,
+            config.appEncryptionKey,
+          );
+          db.insert(metaPages)
+            .values({
+              id: pageId,
+              name: page.name,
+              encryptedAccessToken: encrypted.ciphertext,
+              iv: encrypted.iv,
+              tag: encrypted.tag,
+              updatedAt: new Date().toISOString(),
+            })
+            .onConflictDoUpdate({
+              target: metaPages.id,
+              set: {
+                encryptedAccessToken: encrypted.ciphertext,
+                iv: encrypted.iv,
+                tag: encrypted.tag,
+                updatedAt: new Date().toISOString(),
+              },
+            })
+            .run();
+          assets = await fetchInstagramAssets({
+            pageId,
+            accessToken: page.accessToken,
+            version: config.metaApiVersion,
+          });
+        } else {
+          throw error;
+        }
+      }
+      if (!assets.length) {
+        const userTokenRow = db
+          .select()
+          .from(metaTokens)
+          .orderBy(desc(metaTokens.createdAt))
+          .get();
+        if (userTokenRow) {
+          const userToken = decryptString(
+            {
+              ciphertext: userTokenRow.encryptedValue,
+              iv: userTokenRow.iv,
+              tag: userTokenRow.tag,
+            },
+            config.appEncryptionKey,
+          );
+          try {
+            assets = await fetchInstagramAssets({
+              pageId,
+              accessToken: userToken,
+              version: config.metaApiVersion,
+            });
+          } catch (fallbackError) {
+            console.warn('IG assets user-token fallback failed');
+            console.warn(fallbackError);
+          }
+        }
+      }
+      assets.forEach((asset) => {
+        db.insert(igAssets)
+          .values({
+            id: asset.id,
+            name: asset.name ?? asset.id,
+            pageId,
+            updatedAt: new Date().toISOString(),
+          })
+          .onConflictDoUpdate({
+            target: igAssets.id,
+            set: {
+              name: asset.name ?? asset.id,
+              pageId,
+              updatedAt: new Date().toISOString(),
+            },
+          })
+          .run();
+      });
+      const stored = db
+        .select({
+          id: igAssets.id,
+          name: igAssets.name,
+          pageId: igAssets.pageId,
+        })
+        .from(igAssets)
+        .where(eq(igAssets.pageId, pageId))
+        .all();
+      res.json({ igAssets: stored });
+    } catch (error) {
+      console.error(error);
+      res.status(502).json({
+        error: error instanceof Error ? error.message : 'Meta IG assets failed',
+      });
+    }
+  });
+
+  app.get('/api/meta/pages/:pageId/ig-debug', async (req, res) => {
+    const { pageId } = req.params;
+    const pageRow = db
+      .select()
+      .from(metaPages)
+      .where(eq(metaPages.id, pageId))
+      .get();
+    if (!pageRow) {
+      res.status(404).json({ error: 'Page not enabled' });
+      return;
+    }
+
+    const pageToken = decryptString(
+      {
+        ciphertext: pageRow.encryptedAccessToken,
+        iv: pageRow.iv,
+        tag: pageRow.tag,
+      },
+      config.appEncryptionKey,
+    );
+
+    const userTokenRow = db
+      .select()
+      .from(metaTokens)
+      .orderBy(desc(metaTokens.createdAt))
+      .get();
+    const userToken = userTokenRow
+      ? decryptString(
+          {
+            ciphertext: userTokenRow.encryptedValue,
+            iv: userTokenRow.iv,
+            tag: userTokenRow.tag,
+          },
+          config.appEncryptionKey,
+        )
+      : null;
+
+    try {
+      const pageData = await fetchPageIgDebug({
+        pageId,
+        accessToken: pageToken,
+        version: config.metaApiVersion,
+      });
+
+      let userData = null as null | typeof pageData;
+      if (userToken) {
+        userData = await fetchPageIgDebug({
+          pageId,
+          accessToken: userToken,
+          version: config.metaApiVersion,
+        });
+      }
+
+      res.json({
+        pageId,
+        pageToken: {
+          instagram_business_account: pageData?.instagram_business_account,
+          connected_instagram_account: pageData?.connected_instagram_account,
+        },
+        userToken: userData
+          ? {
+              instagram_business_account:
+                userData?.instagram_business_account,
+              connected_instagram_account:
+                userData?.connected_instagram_account,
+            }
+          : null,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(502).json({
+        error: error instanceof Error ? error.message : 'Meta IG debug failed',
+      });
+    }
+  });
+
+  app.post('/api/meta/pages/:pageId/ig-assets', (req, res) => {
+    const { pageId } = req.params;
+    const id = typeof req.body?.id === 'string' ? req.body.id : null;
+    const name = typeof req.body?.name === 'string' ? req.body.name : null;
+    if (!id) {
+      res.status(400).json({ error: 'Missing ig asset id' });
+      return;
+    }
+    db.insert(igAssets)
+      .values({
+        id,
+        name: name ?? id,
+        pageId,
+        updatedAt: new Date().toISOString(),
+      })
+      .onConflictDoUpdate({
+        target: igAssets.id,
+        set: {
+          name: name ?? id,
+          pageId,
+          updatedAt: new Date().toISOString(),
+        },
+      })
+      .run();
+    res.json({ id, name: name ?? id, pageId });
   });
 
   app.post('/api/meta/pages/:pageId/token', async (req, res) => {

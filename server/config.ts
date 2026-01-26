@@ -22,7 +22,7 @@ import { metaConfig } from './meta/config';
 export function loadConfig(): AppConfig {
   const scopes = (
     process.env.META_SCOPES ??
-    'pages_show_list,pages_manage_metadata,business_management,pages_messaging'
+    'pages_show_list,pages_manage_metadata,business_management,pages_messaging,instagram_basic,instagram_manage_messages'
   )
     .split(',')
     .map((value) => value.trim())

@@ -13,6 +13,9 @@ export const metaConfig = {
     conversationDetails: (conversationId: string) => `/${conversationId}`,
     conversationMessages: (conversationId: string) =>
       `/${conversationId}/messages`,
+    igConversations: (pageId: string) => `/${pageId}/conversations`,
+    igConversationMessages: (conversationId: string) =>
+      `/${conversationId}/messages`,
     igAccounts: (pageId: string) => `/${pageId}/instagram_accounts`,
   },
   fields: {

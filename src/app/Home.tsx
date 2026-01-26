@@ -38,6 +38,12 @@ type AssetsResponse = {
   igEnabled: boolean;
 };
 
+type IgAsset = {
+  id: string;
+  name: string;
+  pageId: string;
+};
+
 function useSyncStatus(): [SyncStatus | null, () => Promise<void>] {
   const [status, setStatus] = React.useState<SyncStatus | null>(null);
 
@@ -75,6 +81,9 @@ export default function Home(): React.ReactElement {
   const [enablingPageId, setEnablingPageId] = React.useState<string | null>(
     null,
   );
+  const [igAssetsByPage, setIgAssetsByPage] = React.useState<
+    Record<string, IgAsset[]>
+  >({});
 
   const refreshPermissions = React.useCallback(async () => {
     const response = await fetch('/api/meta/permissions');
@@ -96,6 +105,29 @@ export default function Home(): React.ReactElement {
     void refreshPermissions();
     void refreshAssets();
   }, [refreshAssets, refreshPermissions]);
+
+  const loadIgAssets = React.useCallback(async (pageId: string) => {
+    const response = await fetch(`/api/meta/pages/${pageId}/ig-assets`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      return;
+    }
+    const data = (await response.json()) as { igAssets: IgAsset[] };
+    setIgAssetsByPage((current) => ({
+      ...current,
+      [pageId]: data.igAssets,
+    }));
+  }, []);
+
+  React.useEffect(() => {
+    if (!assets?.igEnabled || !assets.pages.length) {
+      return;
+    }
+    assets.pages.forEach((page) => {
+      void loadIgAssets(page.id);
+    });
+  }, [assets, loadIgAssets]);
 
   const loadBusinesses = async () => {
     setLoadingBusinesses(true);
@@ -381,6 +413,50 @@ export default function Home(): React.ReactElement {
         </div>
         {status?.error ? (
           <p style={{ color: colors.coral }}>{status.error}</p>
+        ) : null}
+      </section>
+      <section {...stylex.props(layout.card)}>
+        <h2>Instagram assets</h2>
+        {assets?.igEnabled ? (
+          <div style={{ display: 'grid', gap: '12px' }}>
+            {assets.pages.length ? (
+              assets.pages.map((page) => {
+                const igAssets = igAssetsByPage[page.id] ?? [];
+                return (
+                  <div key={page.id}>
+                    <strong>{page.name || `Page ${page.id}`}</strong>
+                    {igAssets.length ? (
+                      <ul>
+                        {igAssets.map((asset) => (
+                          <li key={asset.id}>
+                            <span>
+                              {asset.name} ({asset.id})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p {...stylex.props(layout.note)}>
+                        No IG assets found for this page.
+                      </p>
+                    )}
+                  </div>
+                );
+              })
+            ) : (
+              <p {...stylex.props(layout.note)}>
+                Enable a page to see connected Instagram assets.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p {...stylex.props(layout.note)}>
+            Instagram messaging sync is behind a feature flag. TODO: enable once
+            permissions and assets are ready.
+          </p>
+        )}
+        {!assets?.igEnabled ? (
+          <p style={{ color: colors.sea }}>Feature flag: IG_DISABLED</p>
         ) : null}
       </section>
     </div>

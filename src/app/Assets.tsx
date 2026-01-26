@@ -28,6 +28,10 @@ export default function Assets(): React.ReactElement {
   const [deletingPageId, setDeletingPageId] = React.useState<string | null>(
     null,
   );
+  const [syncingIgId, setSyncingIgId] = React.useState<string | null>(null);
+  const [igAssetsByPage, setIgAssetsByPage] = React.useState<
+    Record<string, IgAsset[]>
+  >({});
   const [error, setError] = React.useState<string | null>(null);
 
   const refreshAssets = React.useCallback(async () => {
@@ -55,6 +59,29 @@ export default function Assets(): React.ReactElement {
       mounted = false;
     };
   }, []);
+
+  const loadIgAssets = React.useCallback(async (pageId: string) => {
+    const response = await fetch(`/api/meta/pages/${pageId}/ig-assets`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      return;
+    }
+    const data = (await response.json()) as { igAssets: IgAsset[] };
+    setIgAssetsByPage((current) => ({
+      ...current,
+      [pageId]: data.igAssets,
+    }));
+  }, []);
+
+  React.useEffect(() => {
+    if (!assets?.igEnabled || !assets.pages.length) {
+      return;
+    }
+    assets.pages.forEach((page) => {
+      void loadIgAssets(page.id);
+    });
+  }, [assets, loadIgAssets]);
 
   const handleSync = async (pageId: string) => {
     setSyncingPageId(pageId);
@@ -94,6 +121,26 @@ export default function Assets(): React.ReactElement {
       setError(err instanceof Error ? err.message : 'Delete failed.');
     } finally {
       setDeletingPageId(null);
+    }
+  };
+
+  const handleIgSync = async (pageId: string, igId: string) => {
+    setSyncingIgId(igId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/sync/pages/${pageId}/instagram/${igId}`,
+        {
+          method: 'POST',
+        },
+      );
+      if (!response.ok) {
+        throw new Error('Instagram sync failed to start.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Instagram sync failed.');
+    } finally {
+      setSyncingIgId(null);
     }
   };
 
@@ -158,13 +205,49 @@ export default function Assets(): React.ReactElement {
       <section {...stylex.props(layout.card)}>
         <h2>Instagram messaging</h2>
         {assets?.igEnabled ? (
-          <ul>
-            {assets.igAssets.map((asset) => (
-              <li key={asset.id}>
-                <strong>{asset.name}</strong> tied to page {asset.pageId}
-              </li>
-            ))}
-          </ul>
+          <div style={{ display: 'grid', gap: '12px' }}>
+            {assets.pages.map((page) => {
+              const igAssets = igAssetsByPage[page.id] ?? [];
+              return (
+                <div key={page.id}>
+                  <strong>{page.name || `Page ${page.id}`}</strong>
+                  {igAssets.length ? (
+                    <ul>
+                      {igAssets.map((asset) => (
+                        <li key={asset.id}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              gap: '12px',
+                              alignItems: 'center',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <span>
+                              {asset.name} ({asset.id})
+                            </span>
+                            <button
+                              {...stylex.props(layout.ghostButton)}
+                              onClick={() => handleIgSync(page.id, asset.id)}
+                              disabled={syncingIgId === asset.id}
+                            >
+                              {syncingIgId === asset.id
+                                ? 'Syncing…'
+                                : 'Sync Instagram'}
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p {...stylex.props(layout.note)}>
+                      No IG assets found for this page.
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <p {...stylex.props(layout.note)}>
             Instagram messaging sync is behind a feature flag. TODO: enable once

@@ -335,6 +335,29 @@ export type MetaMessage = {
   message?: string;
 };
 
+export async function fetchIgConversations(options: {
+  pageId: string;
+  accessToken: string;
+  version: string;
+  since?: string;
+}): Promise<MetaConversation[]> {
+  const params: Record<string, string> = {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.conversations.join(','),
+    limit: '50',
+    platform: 'instagram',
+  };
+  if (options.since) {
+    params.since = options.since;
+  }
+  const firstUrl = buildUrl(
+    metaConfig.endpoints.igConversations(options.pageId),
+    options.version,
+    params,
+  );
+  return paginateList<MetaConversation>(firstUrl);
+}
+
 export async function fetchConversationMessages(options: {
   conversationId: string;
   accessToken: string;
@@ -380,10 +403,95 @@ export async function fetchConversationMessages(options: {
   return results;
 }
 
+export async function fetchIgConversationMessages(options: {
+  conversationId: string;
+  accessToken: string;
+  version: string;
+}): Promise<MetaMessage[]> {
+  const fields = `messages.limit(50){${metaConfig.fields.messages.join(',')}}`;
+  const url = buildUrl(
+    metaConfig.endpoints.conversationDetails(options.conversationId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields,
+    },
+  );
+  const payload = await fetchGraph<{
+    messages?: {
+      data: MetaMessage[];
+      paging?: {
+        next?: string;
+      };
+    };
+  }>(url);
+  if (!payload.data?.messages) {
+    const listUrl = buildUrl(
+      metaConfig.endpoints.igConversationMessages(options.conversationId),
+      options.version,
+      {
+        access_token: options.accessToken,
+        fields: metaConfig.fields.messages.join(','),
+        limit: '50',
+      },
+    );
+    return paginateList<MetaMessage>(listUrl);
+  }
+
+  const results: MetaMessage[] = [...payload.data.messages.data];
+  let nextUrl = payload.data.messages.paging?.next;
+  while (nextUrl) {
+    const page = await fetchGraph<MetaMessage[]>(nextUrl);
+    results.push(...page.data);
+    nextUrl = page.paging?.next;
+  }
+  return results;
+}
+
 export type MetaIgAsset = {
   id: string;
   name?: string;
 };
+
+export async function fetchPageIgDebug(options: {
+  pageId: string;
+  accessToken: string;
+  version: string;
+}): Promise<{
+  instagram_business_account?: {
+    id: string;
+    username?: string;
+    name?: string;
+  };
+  connected_instagram_account?: {
+    id: string;
+    username?: string;
+    name?: string;
+  };
+}> {
+  const url = buildUrl(
+    metaConfig.endpoints.pageDetails(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields:
+        'instagram_business_account{id,username,name},connected_instagram_account{id,username,name}',
+    },
+  );
+  const payload = await fetchGraph<{
+    instagram_business_account?: {
+      id: string;
+      username?: string;
+      name?: string;
+    };
+    connected_instagram_account?: {
+      id: string;
+      username?: string;
+      name?: string;
+    };
+  }>(url);
+  return payload.data;
+}
 
 export async function fetchInstagramAssets(options: {
   pageId: string;
@@ -399,5 +507,40 @@ export async function fetchInstagramAssets(options: {
     },
   );
   const payload = await fetchGraph<MetaIgAsset[]>(url);
-  return payload.data;
+  if (payload.data.length) {
+    return payload.data;
+  }
+
+  const pageUrl = buildUrl(
+    metaConfig.endpoints.pageDetails(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields:
+        'instagram_business_account{id,username,name},connected_instagram_account{id,username}',
+    },
+  );
+  const pagePayload = await fetchGraph<{
+    instagram_business_account?: { id: string; username?: string; name?: string };
+    connected_instagram_account?: { id: string; username?: string; name?: string };
+  }>(pageUrl);
+
+  const fallbackAssets: MetaIgAsset[] = [];
+  if (pagePayload.data?.instagram_business_account?.id) {
+    fallbackAssets.push({
+      id: pagePayload.data.instagram_business_account.id,
+      name:
+        pagePayload.data.instagram_business_account.name ??
+        pagePayload.data.instagram_business_account.username,
+    });
+  }
+  if (pagePayload.data?.connected_instagram_account?.id) {
+    fallbackAssets.push({
+      id: pagePayload.data.connected_instagram_account.id,
+      name:
+        pagePayload.data.connected_instagram_account.name ??
+        pagePayload.data.connected_instagram_account.username,
+    });
+  }
+  return fallbackAssets;
 }
