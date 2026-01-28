@@ -5,6 +5,7 @@ type ConversationRow = {
   updatedTime: string;
   startedTime: string | null;
   lastMessageAt: string | null;
+  lowResponseAfterPrice: number;
   customerCount: number;
   businessCount: number;
   priceGiven: number;
@@ -16,6 +17,7 @@ type ReportRow = {
   productive: number;
   highly_productive: number;
   price_given: number;
+  low_response_after_price: number;
   qualified_rate: number;
 };
 
@@ -56,7 +58,13 @@ export function buildReportRows(
 ): ReportRow[] {
   const buckets = new Map<
     string,
-    { total: number; productive: number; highly: number; priceGiven: number }
+    {
+      total: number;
+      productive: number;
+      highly: number;
+      priceGiven: number;
+      lowResponseAfterPrice: number;
+    }
   >();
   for (const row of rows) {
     const timestamp =
@@ -74,6 +82,7 @@ export function buildReportRows(
       productive: 0,
       highly: 0,
       priceGiven: 0,
+      lowResponseAfterPrice: 0,
     };
     bucketStats.total += 1;
     const tier = classifyTier(row.customerCount, row.businessCount);
@@ -86,6 +95,9 @@ export function buildReportRows(
     if (row.priceGiven) {
       bucketStats.priceGiven += 1;
     }
+    if (row.lowResponseAfterPrice) {
+      bucketStats.lowResponseAfterPrice += 1;
+    }
     buckets.set(key, bucketStats);
   }
   const sorted = [...buckets.entries()].sort((a, b) =>
@@ -97,6 +109,7 @@ export function buildReportRows(
     productive: stats.productive,
     highly_productive: stats.highly,
     price_given: stats.priceGiven,
+    low_response_after_price: stats.lowResponseAfterPrice,
     qualified_rate: stats.total
       ? (stats.productive + stats.highly) / stats.total
       : 0,
@@ -113,10 +126,11 @@ export async function buildReportFromDb(options: {
 }) {
   let query = `SELECT id, page_id as pageId, platform, updated_time as updatedTime,
                      started_time as startedTime, last_message_at as lastMessageAt,
+                     low_response_after_price as lowResponseAfterPrice,
                      customer_count as customerCount,
                      business_count as businessCount, price_given as priceGiven
               FROM conversations
-              WHERE user_id = ?`;
+              WHERE conversations.user_id = ?`;
   const bindings: unknown[] = [options.userId];
   if (options.pageId) {
     query += ' AND page_id = ?';

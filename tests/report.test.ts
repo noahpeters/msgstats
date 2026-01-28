@@ -28,6 +28,7 @@ describe('report helpers', () => {
         updatedTime: '2026-01-10T12:00:00.000Z',
         startedTime: '2026-01-10T10:00:00.000Z',
         lastMessageAt: '2026-01-10T12:00:00.000Z',
+        lowResponseAfterPrice: 1,
         customerCount: 3,
         businessCount: 3,
         priceGiven: 1,
@@ -39,6 +40,7 @@ describe('report helpers', () => {
         updatedTime: '2026-01-11T12:00:00.000Z',
         startedTime: '2026-01-11T10:00:00.000Z',
         lastMessageAt: '2026-01-11T12:00:00.000Z',
+        lowResponseAfterPrice: 0,
         customerCount: 5,
         businessCount: 5,
         priceGiven: 0,
@@ -50,6 +52,7 @@ describe('report helpers', () => {
     expect(weekly[0]?.productive).toBe(1);
     expect(weekly[0]?.highly_productive).toBe(1);
     expect(weekly[0]?.price_given).toBe(1);
+    expect(weekly[0]?.low_response_after_price).toBe(1);
   });
 
   it('can bucket by last message date', () => {
@@ -61,6 +64,7 @@ describe('report helpers', () => {
         updatedTime: '2026-01-10T12:00:00.000Z',
         startedTime: '2026-01-01T10:00:00.000Z',
         lastMessageAt: '2026-01-20T10:00:00.000Z',
+        lowResponseAfterPrice: 0,
         customerCount: 1,
         businessCount: 1,
         priceGiven: 0,
