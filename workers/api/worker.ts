@@ -1033,23 +1033,23 @@ addRoute(
       pageId,
       platform: 'messenger',
     });
-    ctx.waitUntil(
-      runSync({
+    try {
+      await runSync({
         env,
         userId,
         pageId,
         platform: 'messenger',
         runId,
-      }).catch(async (error) => {
-        console.error(error);
-        await updateSyncRun(env, {
-          id: runId,
-          status: 'failed',
-          lastError: error instanceof Error ? error.message : 'Sync failed',
-          finishedAt: new Date().toISOString(),
-        });
-      }),
-    );
+      });
+    } catch (error) {
+      console.error(error);
+      await updateSyncRun(env, {
+        id: runId,
+        status: 'failed',
+        lastError: error instanceof Error ? error.message : 'Sync failed',
+        finishedAt: new Date().toISOString(),
+      });
+    }
     return json({ runId });
   },
 );
@@ -1073,24 +1073,24 @@ addRoute(
       platform: 'instagram',
       igBusinessId: igId,
     });
-    ctx.waitUntil(
-      runSync({
+    try {
+      await runSync({
         env,
         userId,
         pageId,
         platform: 'instagram',
         igId,
         runId,
-      }).catch(async (error) => {
-        console.error(error);
-        await updateSyncRun(env, {
-          id: runId,
-          status: 'failed',
-          lastError: error instanceof Error ? error.message : 'Sync failed',
-          finishedAt: new Date().toISOString(),
-        });
-      }),
-    );
+      });
+    } catch (error) {
+      console.error(error);
+      await updateSyncRun(env, {
+        id: runId,
+        status: 'failed',
+        lastError: error instanceof Error ? error.message : 'Sync failed',
+        finishedAt: new Date().toISOString(),
+      });
+    }
     return json({ runId });
   },
 );

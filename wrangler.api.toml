@@ -3,6 +3,9 @@ compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 main = "workers/api/worker.ts"
 
+[vars]
+META_REDIRECT_URI = "https://msgstats.from-trees.com/api/auth/callback"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "msgstats-db"
