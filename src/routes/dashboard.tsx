@@ -58,6 +58,13 @@ type SyncRun = {
   messages: number;
 };
 
+const formatSyncStatus = (status: string) => {
+  if (status === 'queued') return 'Queued';
+  if (status === 'running') return 'Syncing';
+  if (status === 'failed') return 'Last sync failed';
+  return 'Last sync';
+};
+
 export default function Dashboard(): React.ReactElement {
   const [auth, setAuth] = React.useState<AuthResponse | null>(null);
   const [permissions, setPermissions] =
@@ -404,8 +411,13 @@ export default function Dashboard(): React.ReactElement {
                   </div>
                   {run ? (
                     <div {...stylex.props(layout.note)}>
-                      {run.status === 'running' ? 'Syncing' : 'Last sync'} ·{' '}
-                      {run.conversations} convos · {run.messages} msgs
+                      {formatSyncStatus(run.status)}
+                      {run.status === 'queued' ? null : (
+                        <>
+                          {' '}
+                          · {run.conversations} convos · {run.messages} msgs
+                        </>
+                      )}
                     </div>
                   ) : null}
                   <div
@@ -444,11 +456,14 @@ export default function Dashboard(): React.ReactElement {
                                       color: colors.slate,
                                     }}
                                   >
-                                    {igRun.status === 'running'
-                                      ? 'Syncing'
-                                      : 'Last sync'}{' '}
-                                    · {igRun.conversations} convos ·{' '}
-                                    {igRun.messages} msgs
+                                    {formatSyncStatus(igRun.status)}
+                                    {igRun.status === 'queued' ? null : (
+                                      <>
+                                        {' '}
+                                        · {igRun.conversations} convos ·{' '}
+                                        {igRun.messages} msgs
+                                      </>
+                                    )}
                                   </span>
                                 ) : null}
                                 <button
