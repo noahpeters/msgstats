@@ -21,7 +21,7 @@
     "check:remote-migrations": "node scripts/check-remote-migrations.mjs",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --check .",
-    "format:write": "prettier \"**/*.{ts,js,json,md,mjs}\" --write",
+    "format:write": "prettier \"**/*.{ts,js,json,md,mjs,tsx,cjs}\" --write",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "verify": "npm run lint && npm run format && npm run typecheck && npm run test",
