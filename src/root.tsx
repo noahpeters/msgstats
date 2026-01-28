@@ -1,17 +1,7 @@
 import * as React from 'react';
-import * as stylex from '@stylexjs/stylex';
-import {
-  Links,
-  Meta,
-  Outlet,
-  Scripts,
-  ScrollRestoration,
-  type LinksFunction,
-} from 'react-router';
-
-export const links: LinksFunction = () => [
-  { rel: 'stylesheet', href: '/virtual:stylex.css' },
-];
+import stylex from './lib/stylex';
+import { Links, Meta, Outlet, Scripts, ScrollRestoration } from 'react-router';
+import './styles.css';
 
 const styles = stylex.create({
   body: {
@@ -29,10 +19,17 @@ export default function Root(): React.ReactElement {
       <head suppressHydrationWarning>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {import.meta.env.DEV && (
+          <link
+            rel="stylesheet"
+            href="/virtual:stylex.css"
+            suppressHydrationWarning
+          />
+        )}
         <Meta />
         <Links />
       </head>
-      <body {...stylex.props(styles.body)}>
+      <body className={stylex(styles.body)}>
         <Outlet />
         <ScrollRestoration
           getKey={(_location, matches) => matches[matches.length - 1]?.id ?? ''}

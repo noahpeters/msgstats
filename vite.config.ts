@@ -8,7 +8,7 @@ const isTest = process.env.VITEST === 'true';
 export default defineConfig({
   plugins: [
     stylex.vite({
-      importSources: ['@stylexjs/stylex', 'stylex'],
+      importSources: ['@stylexjs/stylex', 'stylex', './lib/stylex'],
       unstable_moduleResolution: {
         type: 'commonJS',
         rootDir: __dirname,
@@ -29,7 +29,7 @@ export default defineConfig({
     noExternal: ['@stylexjs/stylex'],
   },
   optimizeDeps: {
-    exclude: ['@stylexjs/stylex', 'virtual:stylex.css'],
+    exclude: ['@stylexjs/stylex'],
   },
   server: {
     proxy: {
