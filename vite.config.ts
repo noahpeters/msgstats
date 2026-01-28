@@ -7,20 +7,16 @@ const isTest = process.env.VITEST === 'true';
 
 export default defineConfig({
   plugins: [
-    ...(!isTest
-      ? [
-          stylex.vite({
-            importSources: ['@stylexjs/stylex', 'stylex'],
-            unstable_moduleResolution: {
-              type: 'commonJS',
-              rootDir: __dirname,
-            },
-            devMode: 'full',
-            devPersistToDisk: true,
-          }) as unknown as PluginOption,
-          reactRouter() as unknown as PluginOption,
-        ]
-      : []),
+    stylex.vite({
+      importSources: ['@stylexjs/stylex', 'stylex'],
+      unstable_moduleResolution: {
+        type: 'commonJS',
+        rootDir: __dirname,
+      },
+      devMode: 'full',
+      devPersistToDisk: true,
+    }) as unknown as PluginOption,
+    ...(isTest ? [] : [reactRouter() as unknown as PluginOption]),
   ],
   resolve: {
     alias: {
@@ -33,7 +29,7 @@ export default defineConfig({
     noExternal: ['@stylexjs/stylex'],
   },
   optimizeDeps: {
-    exclude: ['@stylexjs/stylex'],
+    exclude: ['@stylexjs/stylex', 'virtual:stylex.css'],
   },
   server: {
     proxy: {
