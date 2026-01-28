@@ -8,10 +8,9 @@ import {
   ScrollRestoration,
   type LinksFunction,
 } from 'react-router';
-import stylexCss from 'virtual:stylex.css?url';
 
 export const links: LinksFunction = () => [
-  { rel: 'stylesheet', href: stylexCss },
+  { rel: 'stylesheet', href: '/virtual:stylex.css' },
 ];
 
 const styles = stylex.create({
