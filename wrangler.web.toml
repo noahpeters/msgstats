@@ -1,0 +1,16 @@
+name = "msgstats-web"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+main = "workers/web/worker.ts"
+
+[assets]
+directory = "./build/client"
+
+[[services]]
+binding = "API"
+service = "msgstats-api"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

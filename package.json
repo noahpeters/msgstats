@@ -3,13 +3,19 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20 <24"
+    "node": ">=24.13.0 <25"
   },
+  "packageManager": "npm@11.8.0",
   "scripts": {
-    "dev": "DOTENV_CONFIG_PATH=.env.dev tsx server/index.ts",
-    "migrate": "DOTENV_CONFIG_PATH=.env.dev tsx server/scripts/migrate.ts",
-    "build": "vite build && vite build --ssr src/entry-server.tsx",
-    "start": "node dist/server/index.js",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "wrangler dev --config wrangler.api.toml",
+    "dev:web": "react-router dev",
+    "build": "react-router build",
+    "preview": "react-router preview",
+    "deploy:web": "npm run verify && react-router build && wrangler deploy --config wrangler.web.toml",
+    "deploy:api": "npm run verify && wrangler deploy --config wrangler.api.toml",
+    "db:migrations:local": "wrangler d1 migrations apply msgstats-db --local --config wrangler.api.toml",
+    "db:migrations:remote": "wrangler d1 migrations apply msgstats-db --remote --config wrangler.api.toml",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --check .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -17,36 +23,33 @@
     "verify": "npm run lint && npm run format && npm run typecheck && npm run test"
   },
   "dependencies": {
-    "@stylexjs/stylex": "0.6.1",
-    "better-sqlite3": "9.4.5",
-    "dotenv": "16.4.5",
-    "drizzle-orm": "0.30.10",
-    "express": "4.18.3",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "react-router-dom": "6.22.3"
+    "@react-router/cloudflare": "^7.0.0",
+    "@react-router/node": "^7.0.0",
+    "@stylexjs/stylex": "^0.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^7.0.0",
+    "react-router-dom": "^7.0.0"
   },
   "devDependencies": {
-    "@stylexjs/babel-plugin": "0.6.1",
-    "@stylexjs/rollup-plugin": "0.6.1",
-    "@types/express": "4.17.21",
-    "@types/better-sqlite3": "7.6.10",
+    "@cloudflare/workers-types": "^4.20240320.0",
+    "@react-router/dev": "^7.0.0",
+    "@stylexjs/unplugin": "^0.17.5",
     "@types/node": "20.11.30",
-    "@types/react": "18.2.64",
-    "@types/react-dom": "18.2.21",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "7.4.0",
     "@typescript-eslint/parser": "7.4.0",
-    "@vitejs/plugin-react": "4.2.1",
-    "drizzle-kit": "0.21.4",
     "eslint": "8.57.0",
     "eslint-config-prettier": "9.1.0",
     "eslint-plugin-react": "7.34.0",
     "eslint-plugin-react-hooks": "4.6.0",
-    "node-mocks-http": "1.14.1",
     "prettier": "3.2.5",
-    "tsx": "4.7.1",
     "typescript": "5.3.3",
-    "vite": "5.1.6",
-    "vitest": "1.3.1"
+    "vite": "^5.4.0",
+    "vitest": "1.3.1",
+    "wrangler": "^4.59.2",
+    "concurrently": "^9.0.1",
+    "miniflare": "^3.20250124.0"
   }
 }

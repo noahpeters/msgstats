@@ -1,0 +1,14 @@
+name = "msgstats-api"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+main = "workers/api/worker.ts"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "msgstats-db"
+database_id = "b1918df0-760c-41f1-9778-9d5f95ab9a41"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

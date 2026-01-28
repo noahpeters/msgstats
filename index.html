@@ -14,6 +14,9 @@
   </head>
   <body>
     <div id="root"><!--app-html--></div>
-    <script type="module" src="/src/entry-client.tsx"></script>
+    <script>
+      window.module = window.module || { exports: {} };
+    </script>
+    <script type="module" src="/src/entry.client.tsx"></script>
   </body>
 </html>
