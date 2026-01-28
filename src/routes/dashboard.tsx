@@ -129,7 +129,9 @@ export default function Dashboard(): React.ReactElement {
     return () => clearInterval(interval);
   }, [refreshSyncRuns]);
 
-  const loadBusinesses = async () => {
+  const [businessesLoaded, setBusinessesLoaded] = React.useState(false);
+
+  const loadBusinesses = React.useCallback(async () => {
     setLoading(true);
     setActionError(null);
     try {
@@ -151,6 +153,7 @@ export default function Dashboard(): React.ReactElement {
         }
       }
       setBusinessPages(pagesByBusiness);
+      setBusinessesLoaded(true);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'Failed to load businesses.',
@@ -158,7 +161,7 @@ export default function Dashboard(): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const loadClassicPages = async () => {
     try {
@@ -254,6 +257,16 @@ export default function Dashboard(): React.ReactElement {
     void loadClassicPages();
   }, []);
 
+  React.useEffect(() => {
+    if (businessesLoaded) {
+      return;
+    }
+    if (!auth?.authenticated || permissions?.missing?.length) {
+      return;
+    }
+    void loadBusinesses();
+  }, [auth?.authenticated, businessesLoaded, loadBusinesses, permissions]);
+
   const enabledPages = new Map(
     assets?.pages.map((page) => [page.id, page]) ?? [],
   );
@@ -300,19 +313,15 @@ export default function Dashboard(): React.ReactElement {
       <section {...stylex.props(layout.card)}>
         <h2>Businesses & Pages</h2>
         <p {...stylex.props(layout.note)}>
-          Load businesses to discover pages. Enable a page to store its token
-          securely.
+          Businesses and pages load automatically. Enable a page to store its
+          token securely.
         </p>
-        <button
-          {...stylex.props(layout.ghostButton)}
-          onClick={loadBusinesses}
-          disabled={loading}
-        >
-          {loading ? 'Loading…' : 'Load businesses'}
-        </button>
-        {businesses.length === 0 ? (
+        {loading ? (
+          <p {...stylex.props(layout.note)}>Loading businesses…</p>
+        ) : null}
+        {businesses.length === 0 && !loading ? (
           <p {...stylex.props(layout.note)}>
-            No businesses loaded yet. Connect Meta and load businesses.
+            No businesses loaded yet. Connect Meta to load businesses.
           </p>
         ) : null}
         {businesses.map((business) => (
