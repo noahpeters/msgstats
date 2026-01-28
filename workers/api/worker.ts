@@ -10,9 +10,10 @@ import {
   fetchPageName,
   fetchInstagramAssets,
   fetchPageIgDebug,
-  fetchConversations,
+  fetchConversationsPage,
   fetchConversationMessages,
   metaConfig,
+  type MetaConversation,
 } from './meta';
 import { buildReportFromDb } from './report';
 import {
@@ -41,6 +42,8 @@ type SyncJob = {
   platform: 'messenger' | 'instagram';
   igId?: string;
   runId: string;
+  cursor?: string | null;
+  newestUpdated?: string | null;
 };
 
 type RouteHandler = (
@@ -299,6 +302,42 @@ async function listSyncRuns(env: Env, userId: string) {
   return rows.results ?? [];
 }
 
+async function getSyncRunById(env: Env, id: string) {
+  return await env.DB.prepare(
+    `SELECT id, status, conversations, messages
+     FROM sync_runs
+     WHERE id = ?`,
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      status: string;
+      conversations: number;
+      messages: number;
+    }>();
+}
+
+async function getActiveSyncRun(
+  env: Env,
+  data: {
+    userId: string;
+    pageId: string;
+    platform: string;
+    igBusinessId?: string | null;
+  },
+) {
+  return await env.DB.prepare(
+    `SELECT id, status
+     FROM sync_runs
+     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
+       AND status IN ('queued', 'running')
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  )
+    .bind(data.userId, data.pageId, data.platform, data.igBusinessId ?? null)
+    .first<{ id: string; status: string }>();
+}
+
 async function createSyncRun(
   env: Env,
   data: {
@@ -421,8 +460,12 @@ async function runSync(options: {
   platform: 'messenger' | 'instagram';
   igId?: string;
   runId: string;
+  cursor?: string | null;
+  newestUpdated?: string | null;
 }) {
-  const { env, userId, pageId, platform, igId, runId } = options;
+  const { env, userId, pageId, platform, igId, runId, cursor, newestUpdated } =
+    options;
+  const existingRun = await getSyncRunById(env, runId);
   await updateSyncRun(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
   if (!page) {
@@ -461,19 +504,24 @@ async function runSync(options: {
     igBusinessId: igId ?? null,
   });
   const since = state?.lastSyncedAt ?? null;
-  const conversations = await fetchConversations({
+  const pageResult: {
+    conversations: MetaConversation[];
+    nextCursor: string | null;
+  } = await fetchConversationsPage({
     pageId,
     accessToken,
     version: getApiVersion(env),
     platform,
     since: since ?? undefined,
+    after: cursor ?? undefined,
+    limit: 20,
   });
 
-  let conversationCount = 0;
-  let messageCount = 0;
-  let newestUpdated: string | null = null;
+  let conversationCount = existingRun?.conversations ?? 0;
+  let messageCount = existingRun?.messages ?? 0;
+  let newestUpdatedValue: string | null = newestUpdated ?? null;
 
-  for (const convo of conversations) {
+  for (const convo of pageResult.conversations) {
     conversationCount += 1;
     const messages = await fetchConversationMessages({
       conversationId: convo.id,
@@ -531,9 +579,11 @@ async function runSync(options: {
     }
 
     const updatedTime = convo.updated_time;
-    const compareBase: string = newestUpdated ?? '';
-    newestUpdated =
-      !newestUpdated || updatedTime > compareBase ? updatedTime : newestUpdated;
+    const compareBase: string = newestUpdatedValue ?? '';
+    newestUpdatedValue =
+      !newestUpdatedValue || updatedTime > compareBase
+        ? updatedTime
+        : newestUpdatedValue;
 
     await env.DB.prepare(
       `INSERT INTO conversations
@@ -575,8 +625,26 @@ async function runSync(options: {
     }
   }
 
-  if (newestUpdated) {
-    const newestDate = parseDate(newestUpdated);
+  if (pageResult.nextCursor) {
+    await updateSyncRun(env, {
+      id: runId,
+      conversations: conversationCount,
+      messages: messageCount,
+    });
+    await env.SYNC_QUEUE.send({
+      userId,
+      pageId,
+      platform,
+      igId,
+      runId,
+      cursor: pageResult.nextCursor,
+      newestUpdated: newestUpdatedValue,
+    });
+    return;
+  }
+
+  if (newestUpdatedValue) {
+    const newestDate = parseDate(newestUpdatedValue);
     if (newestDate) {
       newestDate.setMinutes(newestDate.getMinutes() - 5);
       await upsertSyncState(env, {
@@ -1097,6 +1165,14 @@ addRoute(
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const active = await getActiveSyncRun(env, {
+      userId,
+      pageId,
+      platform: 'messenger',
+    });
+    if (active) {
+      return json({ runId: active.id, status: active.status });
+    }
     const runId = await createSyncRun(env, {
       userId,
       pageId,
@@ -1136,6 +1212,15 @@ addRoute(
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const active = await getActiveSyncRun(env, {
+      userId,
+      pageId,
+      platform: 'instagram',
+      igBusinessId: igId,
+    });
+    if (active) {
+      return json({ runId: active.id, status: active.status });
     }
     const runId = await createSyncRun(env, {
       userId,
@@ -1313,7 +1398,8 @@ export default {
   },
   async queue(batch: MessageBatch<SyncJob>, env: Env) {
     for (const message of batch.messages) {
-      const { userId, pageId, platform, igId, runId } = message.body;
+      const { userId, pageId, platform, igId, runId, cursor, newestUpdated } =
+        message.body;
       try {
         await runSync({
           env,
@@ -1322,6 +1408,8 @@ export default {
           platform,
           igId,
           runId,
+          cursor,
+          newestUpdated,
         });
       } catch (error) {
         console.error(error);

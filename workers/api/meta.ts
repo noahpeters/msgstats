@@ -364,6 +364,39 @@ export async function fetchConversations(options: {
   return await paginateList<MetaConversation>(url);
 }
 
+export async function fetchConversationsPage(options: {
+  pageId: string;
+  accessToken: string;
+  version: string;
+  platform: 'messenger' | 'instagram';
+  since?: string;
+  after?: string;
+  limit?: number;
+}) {
+  const params: Record<string, string> = {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.conversations.join(','),
+    limit: String(options.limit ?? 50),
+    platform: options.platform,
+  };
+  if (options.since) {
+    params.since = options.since;
+  }
+  if (options.after) {
+    params.after = options.after;
+  }
+  const url = buildUrl(
+    metaConfig.endpoints.conversations(options.pageId),
+    options.version,
+    params,
+  );
+  const payload = await fetchGraph<MetaConversation[]>(url);
+  return {
+    conversations: payload.data ?? [],
+    nextCursor: payload.paging?.cursors?.after ?? null,
+  };
+}
+
 export async function fetchConversationMessages(options: {
   conversationId: string;
   accessToken: string;
