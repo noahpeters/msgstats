@@ -32,13 +32,13 @@ export function getWeekStartUtc(date: Date) {
   const diff = (day + 6) % 7;
   utc.setUTCDate(utc.getUTCDate() - diff);
   utc.setUTCHours(0, 0, 0, 0);
-  return utc.toISOString();
+  return utc.toDateString();
 }
 
 export function getMonthStartUtc(date: Date) {
   return new Date(
     Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1),
-  ).toISOString();
+  ).toDateString();
 }
 
 export function classifyTier(customer: number, business: number) {
