@@ -42,8 +42,8 @@ export function getMonthStartUtc(date: Date) {
 }
 
 export function classifyTier(customer: number, business: number) {
-  const productive = customer >= 3 && business >= 3;
   const highly = customer >= 5 && business >= 5;
+  const productive = !highly && customer >= 3 && business >= 3;
   return { productive, highly };
 }
 

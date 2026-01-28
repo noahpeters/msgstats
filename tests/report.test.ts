@@ -10,7 +10,7 @@ describe('report helpers', () => {
   it('classifies tiers with thresholds 3/5', () => {
     expect(classifyTier(2, 3)).toEqual({ productive: false, highly: false });
     expect(classifyTier(3, 3)).toEqual({ productive: true, highly: false });
-    expect(classifyTier(5, 5)).toEqual({ productive: true, highly: true });
+    expect(classifyTier(5, 5)).toEqual({ productive: false, highly: true });
   });
 
   it('buckets by week and month in UTC', () => {
@@ -47,7 +47,7 @@ describe('report helpers', () => {
     const weekly = buildReportRows(rows, 'weekly', 'started');
     expect(weekly).toHaveLength(1);
     expect(weekly[0]?.total).toBe(2);
-    expect(weekly[0]?.productive).toBe(2);
+    expect(weekly[0]?.productive).toBe(1);
     expect(weekly[0]?.highly_productive).toBe(1);
     expect(weekly[0]?.price_given).toBe(1);
   });
