@@ -87,7 +87,7 @@ export function buildReportRows(
     buckets.set(key, bucketStats);
   }
   const sorted = [...buckets.entries()].sort((a, b) =>
-    a[0].localeCompare(b[0]),
+    b[0].localeCompare(a[0]),
   );
   return sorted.map(([periodStart, stats]) => ({
     periodStart,
