@@ -25,6 +25,7 @@ import {
 
 type Env = {
   DB: D1Database;
+  SYNC_QUEUE: Queue<SyncJob>;
   META_APP_ID: string;
   META_APP_SECRET: string;
   META_REDIRECT_URI: string;
@@ -32,6 +33,14 @@ type Env = {
   META_SCOPES?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
+};
+
+type SyncJob = {
+  userId: string;
+  pageId: string;
+  platform: 'messenger' | 'instagram';
+  igId?: string;
+  runId: string;
 };
 
 type RouteHandler = (
@@ -297,6 +306,7 @@ async function createSyncRun(
     pageId: string;
     platform: string;
     igBusinessId?: string | null;
+    status?: 'queued' | 'running';
   },
 ) {
   const id = crypto.randomUUID();
@@ -311,7 +321,7 @@ async function createSyncRun(
       data.pageId,
       data.platform,
       data.igBusinessId ?? null,
-      'running',
+      data.status ?? 'running',
       now,
       null,
       null,
@@ -413,6 +423,7 @@ async function runSync(options: {
   runId: string;
 }) {
   const { env, userId, pageId, platform, igId, runId } = options;
+  await updateSyncRun(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
   if (!page) {
     await updateSyncRun(env, {
@@ -1032,10 +1043,10 @@ addRoute(
       userId,
       pageId,
       platform: 'messenger',
+      status: 'queued',
     });
     try {
-      await runSync({
-        env,
+      await env.SYNC_QUEUE.send({
         userId,
         pageId,
         platform: 'messenger',
@@ -1046,7 +1057,8 @@ addRoute(
       await updateSyncRun(env, {
         id: runId,
         status: 'failed',
-        lastError: error instanceof Error ? error.message : 'Sync failed',
+        lastError:
+          error instanceof Error ? error.message : 'Sync enqueue failed',
         finishedAt: new Date().toISOString(),
       });
     }
@@ -1072,10 +1084,10 @@ addRoute(
       pageId,
       platform: 'instagram',
       igBusinessId: igId,
+      status: 'queued',
     });
     try {
-      await runSync({
-        env,
+      await env.SYNC_QUEUE.send({
         userId,
         pageId,
         platform: 'instagram',
@@ -1087,7 +1099,8 @@ addRoute(
       await updateSyncRun(env, {
         id: runId,
         status: 'failed',
-        lastError: error instanceof Error ? error.message : 'Sync failed',
+        lastError:
+          error instanceof Error ? error.message : 'Sync enqueue failed',
         finishedAt: new Date().toISOString(),
       });
     }
@@ -1222,5 +1235,28 @@ export default {
       }
     }
     return json({ error: 'Not found' }, { status: 404 });
+  },
+  async queue(batch: MessageBatch<SyncJob>, env: Env) {
+    for (const message of batch.messages) {
+      const { userId, pageId, platform, igId, runId } = message.body;
+      try {
+        await runSync({
+          env,
+          userId,
+          pageId,
+          platform,
+          igId,
+          runId,
+        });
+      } catch (error) {
+        console.error(error);
+        await updateSyncRun(env, {
+          id: runId,
+          status: 'failed',
+          lastError: error instanceof Error ? error.message : 'Sync failed',
+          finishedAt: new Date().toISOString(),
+        });
+      }
+    }
   },
 };
