@@ -32,6 +32,9 @@ export default defineConfig({
   ssr: {
     noExternal: ['@stylexjs/stylex'],
   },
+  optimizeDeps: {
+    exclude: ['@stylexjs/stylex'],
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:8787',
