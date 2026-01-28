@@ -16,12 +16,16 @@
     "deploy:api": "npm run verify && wrangler deploy --config wrangler.api.toml",
     "db:migrations:local": "wrangler d1 migrations apply msgstats-db --local --config wrangler.api.toml",
     "db:migrations:remote": "wrangler d1 migrations apply msgstats-db --remote --config wrangler.api.toml",
+    "fmt:check": "npm run format",
+    "check:migration-edits": "node scripts/check-migration-edits.mjs",
+    "check:remote-migrations": "node scripts/check-remote-migrations.mjs",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --check .",
-    "format:write": "prettier \"**/*.{ts,js,json,md}\" --write",
+    "format:write": "prettier \"**/*.{ts,js,json,md,mjs}\" --write",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "verify": "npm run lint && npm run format && npm run typecheck && npm run test"
+    "verify": "npm run lint && npm run format && npm run typecheck && npm run test",
+    "prepare": "simple-git-hooks"
   },
   "dependencies": {
     "@react-router/cloudflare": "^7.0.0",
@@ -51,6 +55,11 @@
     "vitest": "1.3.1",
     "wrangler": "^4.59.2",
     "concurrently": "^9.0.1",
-    "miniflare": "^3.20250124.0"
+    "miniflare": "^3.20250124.0",
+    "simple-git-hooks": "^2.11.1"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npm run fmt:check && npm run check:migration-edits",
+    "pre-push": "npm run verify && npm run check:remote-migrations"
   }
 }
