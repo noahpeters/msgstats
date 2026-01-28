@@ -11,8 +11,14 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node", "vitest/globals"],
+    "types": ["@cloudflare/workers-types", "vitest/globals", "node"],
     "baseUrl": "."
   },
-  "include": ["src", "server", "tests", "vite.config.ts", "drizzle.config.ts"]
+  "include": [
+    "src",
+    "workers",
+    "tests",
+    "vite.config.ts",
+    "react-router.config.ts"
+  ]
 }

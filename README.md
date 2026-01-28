@@ -1,53 +1,61 @@
 # msgstats
 
-Local, portable messaging analytics for Meta inboxes.
+Messenger + Instagram analytics deployed on Cloudflare Workers with a D1 database.
 
-## Setup
+## Architecture
 
-Node 20 LTS is required for `better-sqlite3` builds.
+- **Frontend Worker** serves React Router SSR and proxies `/api/*` to the private API Worker.
+- **API Worker** handles Facebook Login, Meta Graph calls, sync, reporting, and deletion callbacks.
+- **D1** stores multi-tenant data keyed by `user_id`. Tokens are stored in plaintext (D1 encrypts at rest).
+
+## Local setup
 
 1. Install dependencies:
    ```bash
-   nvm use
-   ```
-   ```bash
    npm install
    ```
-2. Copy env template:
+2. Create a D1 database and apply migrations:
    ```bash
-   cp .env.example .env
+   wrangler d1 create msgstats-db
+   npm run db:migrations:local
    ```
-3. Fill in `.env`.
-4. Start dev server:
+3. Configure secrets for the API Worker:
+   ```bash
+   wrangler secret put META_APP_ID --config wrangler.api.toml
+   wrangler secret put META_APP_SECRET --config wrangler.api.toml
+   wrangler secret put META_REDIRECT_URI --config wrangler.api.toml
+   wrangler secret put SESSION_SECRET --config wrangler.api.toml
+   ```
+4. Run the UI locally:
    ```bash
    npm run dev
    ```
 
-## Meta app setup notes
+## Meta app setup
 
-- Create a Meta app in the Facebook Developer dashboard.
-- Add Facebook Login and set the OAuth redirect URI to `META_REDIRECT_URI`.
-- Required permissions for v1 (Messenger read-only):
+- Create a Meta app and enable Facebook Login.
+- Add redirect URI to Facebook Login settings:
+  - `https://msgstats.from-trees.com/api/auth/callback` (production)
+  - `http://localhost:5173/api/auth/callback` (local dev)
+- Required scopes:
   - `pages_show_list`
   - `pages_manage_metadata`
   - `business_management`
   - `pages_messaging`
-- The app discovers Pages via the Business Portfolio (`owned_pages` first,
-  fallback to `client_pages`). You must be an admin of the Business.
-- Optional (future IG sync):
   - `instagram_basic`
   - `instagram_manage_messages`
 
+## Deployment
+
+```bash
+npm run deploy:api
+npm run deploy:web
+```
+
 ## Scripts
 
-- `npm run dev`: start server + Vite SSR
-- `npm run migrate`: run database migrations once
-- `npm run build`: build client + SSR bundle
-- `npm run start`: run production build
-- `npm run verify`: lint, format check, typecheck, tests
-
-## Notes
-
-- Tokens are encrypted at rest using `APP_ENCRYPTION_KEY`.
-- Read-only sync: no message sending is implemented.
-- Instagram sync is feature-flagged via `IG_ENABLED` and currently includes TODO placeholders.
+- `npm run dev` – local SSR via React Router dev
+- `npm run build` – build SSR + client assets
+- `npm run deploy:web` – deploy UI worker
+- `npm run deploy:api` – deploy API worker
+- `npm run verify` – lint + format + typecheck + test

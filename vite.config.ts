@@ -1,30 +1,35 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import stylex from '@stylexjs/rollup-plugin';
+import path from 'node:path';
+import { defineConfig, type PluginOption } from 'vite';
+import { reactRouter } from '@react-router/dev/vite';
+import stylex from '@stylexjs/unplugin';
 
-export default defineConfig((env) => {
-  const isSsrBuild = (env as { ssrBuild?: boolean }).ssrBuild ?? false;
-  return {
-    plugins: [
-      stylex({
-        dev: !isSsrBuild,
-        runtimeInjection: true,
-        treeshakeCompensation: true,
-        unstable_moduleResolution: {
-          type: 'commonJS',
-          rootDir: __dirname,
-        },
-      }),
-      react(),
-    ],
-    ssr: {
-      noExternal: ['@stylexjs/stylex'],
+export default defineConfig({
+  plugins: [
+    stylex.vite({
+      importSources: ['@stylexjs/stylex', 'stylex'],
+      unstable_moduleResolution: {
+        type: 'commonJS',
+        rootDir: __dirname,
+      },
+      devMode: 'full',
+      devPersistToDisk: true,
+    }) as unknown as PluginOption,
+    ...(process.env.VITEST ? [] : [reactRouter() as unknown as PluginOption]),
+  ],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+      '~': path.resolve(__dirname, 'src'),
     },
-    build: {
-      outDir: 'dist/client',
+    dedupe: ['react', 'react-dom'],
+  },
+  ssr: {
+    noExternal: ['@stylexjs/stylex'],
+  },
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8787',
+      '/auth/facebook/deletion': 'http://localhost:8787',
     },
-    server: {
-      port: 5173,
-    },
-  };
+  },
 });
