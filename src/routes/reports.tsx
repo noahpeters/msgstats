@@ -20,6 +20,7 @@ async function fetchReport(
   endpoint: string,
   pageId?: string,
   platform?: string,
+  bucket?: 'started' | 'last',
 ): Promise<ReportRow[]> {
   const params = new URLSearchParams();
   if (pageId) {
@@ -27,6 +28,9 @@ async function fetchReport(
   }
   if (platform) {
     params.set('platform', platform);
+  }
+  if (bucket) {
+    params.set('bucket', bucket);
   }
   const response = await fetch(
     params.toString() ? `${endpoint}?${params.toString()}` : endpoint,
@@ -85,6 +89,9 @@ export default function ReportsRoute(): React.ReactElement {
   const [pages, setPages] = React.useState<PageAsset[]>([]);
   const [pageId, setPageId] = React.useState('');
   const [platform, setPlatform] = React.useState('');
+  const [bucket, setBucket] = React.useState<'started' | 'last'>('started');
+  const [actionError, setActionError] = React.useState<string | null>(null);
+  const [recomputeRunning, setRecomputeRunning] = React.useState(false);
 
   const loadReports = React.useCallback(async () => {
     const [weeklyData, monthlyData] = await Promise.all([
@@ -92,16 +99,18 @@ export default function ReportsRoute(): React.ReactElement {
         '/api/reports/weekly',
         pageId || undefined,
         platform || undefined,
+        bucket,
       ),
       fetchReport(
         '/api/reports/monthly',
         pageId || undefined,
         platform || undefined,
+        bucket,
       ),
     ]);
     setWeekly(weeklyData);
     setMonthly(monthlyData);
-  }, [pageId, platform]);
+  }, [bucket, pageId, platform]);
 
   React.useEffect(() => {
     void (async () => {
@@ -113,6 +122,28 @@ export default function ReportsRoute(): React.ReactElement {
       await loadReports();
     })();
   }, [loadReports]);
+
+  const handleRecompute = async () => {
+    setActionError(null);
+    setRecomputeRunning(true);
+    try {
+      const response = await fetch('/api/reports/recompute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageId: pageId || null }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to recompute stats.');
+      }
+      await loadReports();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'Failed to recompute stats.',
+      );
+    } finally {
+      setRecomputeRunning(false);
+    }
+  };
 
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
@@ -150,7 +181,29 @@ export default function ReportsRoute(): React.ReactElement {
               <option value="instagram">Instagram</option>
             </select>
           </label>
+          <label {...stylex.props(layout.note)}>
+            <span style={{ marginRight: '8px' }}>Bucket by</span>
+            <select
+              value={bucket}
+              onChange={(event) =>
+                setBucket(event.target.value as 'started' | 'last')
+              }
+            >
+              <option value="started">First message date</option>
+              <option value="last">Last message date</option>
+            </select>
+          </label>
+          <button
+            {...stylex.props(layout.ghostButton)}
+            onClick={handleRecompute}
+            disabled={recomputeRunning}
+          >
+            {recomputeRunning ? 'Recomputing…' : 'Recompute stats'}
+          </button>
         </div>
+        {actionError ? (
+          <p style={{ marginTop: '8px', color: '#cc4a4a' }}>{actionError}</p>
+        ) : null}
       </section>
       <ReportTable title="Weekly report" rows={weekly} />
       <ReportTable title="Monthly report" rows={monthly} />

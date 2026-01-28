@@ -4,6 +4,7 @@ type ConversationRow = {
   platform: string;
   updatedTime: string;
   startedTime: string | null;
+  lastMessageAt: string | null;
   customerCount: number;
   businessCount: number;
   priceGiven: number;
@@ -49,37 +50,41 @@ export function classifyTier(customer: number, business: number) {
 export function buildReportRows(
   rows: ConversationRow[],
   interval: 'weekly' | 'monthly',
+  bucket: 'started' | 'last',
 ): ReportRow[] {
   const buckets = new Map<
     string,
     { total: number; productive: number; highly: number; priceGiven: number }
   >();
   for (const row of rows) {
-    const timestamp = row.startedTime ?? row.updatedTime;
+    const timestamp =
+      bucket === 'started'
+        ? row.startedTime ?? row.updatedTime
+        : row.lastMessageAt ?? row.updatedTime;
     const date = parseDate(timestamp);
     if (!date) {
       continue;
     }
     const key =
       interval === 'weekly' ? getWeekStartUtc(date) : getMonthStartUtc(date);
-    const bucket = buckets.get(key) ?? {
+    const bucketStats = buckets.get(key) ?? {
       total: 0,
       productive: 0,
       highly: 0,
       priceGiven: 0,
     };
-    bucket.total += 1;
+    bucketStats.total += 1;
     const tier = classifyTier(row.customerCount, row.businessCount);
     if (tier.productive) {
-      bucket.productive += 1;
+      bucketStats.productive += 1;
     }
     if (tier.highly) {
-      bucket.highly += 1;
+      bucketStats.highly += 1;
     }
     if (row.priceGiven) {
-      bucket.priceGiven += 1;
+      bucketStats.priceGiven += 1;
     }
-    buckets.set(key, bucket);
+    buckets.set(key, bucketStats);
   }
   const sorted = [...buckets.entries()].sort((a, b) =>
     a[0].localeCompare(b[0]),
@@ -100,11 +105,13 @@ export async function buildReportFromDb(options: {
   db: D1Database;
   userId: string;
   interval: 'weekly' | 'monthly';
+  bucket: 'started' | 'last';
   pageId?: string | null;
   platform?: string | null;
 }) {
   let query = `SELECT id, page_id as pageId, platform, updated_time as updatedTime,
-                     started_time as startedTime, customer_count as customerCount,
+                     started_time as startedTime, last_message_at as lastMessageAt,
+                     customer_count as customerCount,
                      business_count as businessCount, price_given as priceGiven
               FROM conversations
               WHERE user_id = ?`;
@@ -121,7 +128,7 @@ export async function buildReportFromDb(options: {
     .prepare(query)
     .bind(...bindings)
     .all<ConversationRow>();
-  return buildReportRows(rows.results ?? [], options.interval);
+  return buildReportRows(rows.results ?? [], options.interval, options.bucket);
 }
 
 export type { ConversationRow, ReportRow };
