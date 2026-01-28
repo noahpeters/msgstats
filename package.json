@@ -18,6 +18,7 @@
     "db:migrations:remote": "wrangler d1 migrations apply msgstats-db --remote --config wrangler.api.toml",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --check .",
+    "format:write": "prettier \"**/*.{ts,js,json,md}\" --write",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "verify": "npm run lint && npm run format && npm run typecheck && npm run test"

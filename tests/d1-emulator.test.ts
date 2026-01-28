@@ -21,7 +21,13 @@ describe('D1 emulator (CI only)', () => {
         path.join(process.cwd(), 'migrations', '0001_init.sql'),
         'utf8',
       );
-      await db.exec(migration);
+      const statements = migration
+        .split(';')
+        .map((statement) => statement.trim())
+        .filter(Boolean);
+      for (const statement of statements) {
+        await db.exec(statement);
+      }
       const row = await db
         .prepare('SELECT name FROM sqlite_master WHERE type = ? AND name = ?')
         .bind('table', 'meta_users')
