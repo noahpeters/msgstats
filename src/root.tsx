@@ -1,6 +1,18 @@
 import * as React from 'react';
 import * as stylex from '@stylexjs/stylex';
-import { Links, Meta, Outlet, Scripts, ScrollRestoration } from 'react-router';
+import {
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+  type LinksFunction,
+} from 'react-router';
+import stylexCss from 'virtual:stylex.css?url';
+
+export const links: LinksFunction = () => [
+  { rel: 'stylesheet', href: stylexCss },
+];
 
 const styles = stylex.create({
   body: {
@@ -18,13 +30,6 @@ export default function Root(): React.ReactElement {
       <head suppressHydrationWarning>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {import.meta.env.DEV ? (
-          <link
-            rel="stylesheet"
-            href="/virtual:stylex.css"
-            suppressHydrationWarning
-          />
-        ) : null}
         <Meta />
         <Links />
       </head>
