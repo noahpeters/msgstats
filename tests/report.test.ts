@@ -15,8 +15,8 @@ describe('report helpers', () => {
 
   it('buckets by week and month in UTC', () => {
     const date = new Date('2026-01-14T18:00:00.000Z'); // Wed
-    expect(getWeekStartUtc(date)).toBe('2026-01-12T00:00:00.000Z');
-    expect(getMonthStartUtc(date)).toBe('2026-01-01T00:00:00.000Z');
+    expect(getWeekStartUtc(date)).toBe('2026-01-12');
+    expect(getMonthStartUtc(date)).toBe('2026-01-01');
   });
 
   it('builds report rows from conversations', () => {
@@ -67,6 +67,6 @@ describe('report helpers', () => {
       },
     ];
     const monthly = buildReportRows(rows, 'monthly', 'last');
-    expect(monthly[0]?.periodStart).toBe('2026-01-01T00:00:00.000Z');
+    expect(monthly[0]?.periodStart).toBe('2026-01-01');
   });
 });
