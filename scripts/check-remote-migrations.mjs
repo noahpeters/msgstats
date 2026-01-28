@@ -20,7 +20,7 @@ let remoteListRaw = '';
 try {
   remoteListRaw = execSync(
     'npx wrangler d1 migrations list msgstats-db --remote --config wrangler.api.toml',
-    { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 } catch (error) {
   console.error(
@@ -30,6 +30,12 @@ try {
     console.error(error.message);
   }
   process.exit(1);
+}
+
+const normalizedOutput = remoteListRaw.toLowerCase();
+if (normalizedOutput.includes('no migrations to apply')) {
+  console.log('Remote migrations check passed (no migrations to apply).');
+  process.exit(0);
 }
 
 const remoteFiles = remoteListRaw
