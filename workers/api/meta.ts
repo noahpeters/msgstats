@@ -35,6 +35,7 @@ export const metaConfig = {
     mePermissions: '/me/permissions',
     meBusinesses: '/me/businesses',
     meAccounts: '/me/accounts',
+    meDetails: '/me',
     businessOwnedPages: (businessId: string) => `/${businessId}/owned_pages`,
     businessClientPages: (businessId: string) => `/${businessId}/client_pages`,
     pageDetails: (pageId: string) => `/${pageId}`,
@@ -49,6 +50,7 @@ export const metaConfig = {
     businesses: ['id', 'name'],
     pages: ['id', 'name'],
     pageWithToken: ['id', 'name', 'access_token'],
+    me: ['id', 'name'],
     conversations: ['id', 'updated_time'],
     messages: ['id', 'from', 'created_time', 'message'],
     igAccounts: ['id', 'name'],
@@ -73,6 +75,22 @@ function buildUrl(
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logRateLimitUsage(response: Response, context: string) {
+  const appUsage = response.headers.get('x-app-usage');
+  const pageUsage = response.headers.get('x-page-usage');
+  const businessUsage = response.headers.get('x-business-usage');
+  if (!appUsage && !pageUsage && !businessUsage) {
+    return;
+  }
+  console.warn('Meta rate limit usage', {
+    context,
+    status: response.status,
+    appUsage,
+    pageUsage,
+    businessUsage,
+  });
 }
 
 async function fetchWithRetry(
@@ -109,6 +127,7 @@ async function fetchForToken<T>(url: string, init?: RequestInit) {
   const response = await fetchWithRetry(url, init);
   const payload = (await response.json()) as T;
   if (!response.ok) {
+    logRateLimitUsage(response, 'fetchForToken');
     throw new Error('Meta API error');
   }
   return payload;
@@ -118,6 +137,7 @@ async function fetchGraph<T>(url: string, init?: RequestInit) {
   const response = await fetchWithRetry(url, init);
   const payload = (await response.json()) as GraphResponse<T>;
   if (!response.ok || payload.error) {
+    logRateLimitUsage(response, 'fetchGraph');
     throw new Error(payload.error?.message ?? 'Meta API error');
   }
   return payload;
@@ -149,6 +169,7 @@ export async function exchangeCodeForToken(options: {
   });
   const response = await fetchWithRetry(url);
   if (!response.ok) {
+    logRateLimitUsage(response, 'exchangeCodeForToken');
     throw new Error('OAuth token request failed');
   }
   const payload = (await response.json()) as {
@@ -177,6 +198,7 @@ export async function exchangeForLongLivedToken(options: {
   });
   const response = await fetchWithRetry(url);
   if (!response.ok) {
+    logRateLimitUsage(response, 'exchangeForLongLivedToken');
     throw new Error('Long-lived token request failed');
   }
   const payload = (await response.json()) as {
@@ -326,6 +348,17 @@ export async function fetchPageName(options: {
   );
   const payload = await fetchGraph<{ id: string; name: string }>(url);
   return payload.data;
+}
+
+export async function fetchUserProfile(options: {
+  accessToken: string;
+  version: string;
+}) {
+  const url = buildUrl(metaConfig.endpoints.meDetails, options.version, {
+    access_token: options.accessToken,
+    fields: metaConfig.fields.me.join(','),
+  });
+  return await fetchForToken<{ id: string; name?: string }>(url);
 }
 
 export type MetaConversation = {

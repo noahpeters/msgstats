@@ -14,6 +14,7 @@ import {
   fetchConversationMessages,
   metaConfig,
   type MetaConversation,
+  fetchUserProfile,
 } from './meta';
 import { buildReportFromDb } from './report';
 import {
@@ -830,11 +831,14 @@ addRoute('GET', '/api/auth/callback', async (req, env) => {
   });
 });
 
-addRoute('POST', '/api/auth/logout', () => {
+addRoute('POST', '/api/auth/logout', (req, env) => {
+  const isSecure =
+    new URL(req.url).protocol === 'https:' ||
+    (env.APP_ORIGIN?.startsWith('https://') ?? false);
   return new Response(null, {
     status: 204,
     headers: {
-      'set-cookie': clearSessionCookie(),
+      'set-cookie': clearSessionCookie({ secure: isSecure }),
     },
   });
 });
@@ -844,7 +848,21 @@ addRoute('GET', '/api/auth/me', async (req, env) => {
   if (!session?.userId) {
     return json({ authenticated: false });
   }
-  return json({ authenticated: true, userId: session.userId });
+  let name: string | null = null;
+  try {
+    const token = await getUserToken(env, session.userId);
+    if (token?.access_token) {
+      const profile = await fetchUserProfile({
+        accessToken: token.access_token,
+        version: getApiVersion(env),
+      });
+      name = profile?.name ?? null;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch user profile');
+    console.warn(error);
+  }
+  return json({ authenticated: true, userId: session.userId, name });
 });
 
 addRoute('GET', '/api/auth/config', async (_req, env) => {

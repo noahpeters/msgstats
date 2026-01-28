@@ -117,6 +117,8 @@ export function buildSessionCookie(
   )}`;
 }
 
-export function clearSessionCookie() {
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+export function clearSessionCookie(options?: { secure?: boolean }) {
+  const secure = options?.secure ?? true;
+  const securePart = secure ? '; Secure' : '';
+  return `${COOKIE_NAME}=; Path=/; HttpOnly${securePart}; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 }

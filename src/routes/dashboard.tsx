@@ -12,6 +12,7 @@ type PermissionResponse = {
 type AuthResponse = {
   authenticated: boolean;
   userId?: string;
+  name?: string | null;
 };
 
 type MetaBusiness = {
@@ -66,6 +67,68 @@ const formatSyncStatus = (status: string) => {
 };
 
 export default function Dashboard(): React.ReactElement {
+  const inflightRequests = React.useRef(
+    new Map<string, Promise<{ ok: boolean; data?: unknown }>>(),
+  );
+  const lastRequestAt = React.useRef(new Map<string, number>());
+  const debounceMs = 500;
+
+  const fetchJson = React.useCallback(
+    async <T,>(
+      url: string,
+      init?: RequestInit,
+      options?: { key?: string; force?: boolean },
+    ): Promise<{ ok: boolean; data?: T }> => {
+      const method = init?.method ?? 'GET';
+      const cacheKey = options?.key ?? `${method}:${url}`;
+      const isGet = method.toUpperCase() === 'GET';
+
+      if (isGet && !options?.force) {
+        const now = Date.now();
+        const last = lastRequestAt.current.get(cacheKey) ?? 0;
+        const existing = inflightRequests.current.get(cacheKey);
+        if (existing && now - last < debounceMs) {
+          return (await existing) as { ok: boolean; data?: T };
+        }
+        lastRequestAt.current.set(cacheKey, now);
+        const promise = (async () => {
+          const response = await fetch(url, init);
+          let data: T | undefined;
+          try {
+            if (
+              response.headers.get('content-type')?.includes('application/json')
+            ) {
+              data = (await response.json()) as T;
+            }
+          } catch {
+            data = undefined;
+          }
+          return { ok: response.ok, data };
+        })();
+        inflightRequests.current.set(cacheKey, promise);
+        try {
+          return (await promise) as { ok: boolean; data?: T };
+        } finally {
+          inflightRequests.current.delete(cacheKey);
+        }
+      }
+
+      const response = await fetch(url, init);
+      let data: T | undefined;
+      try {
+        if (
+          response.headers.get('content-type')?.includes('application/json')
+        ) {
+          data = (await response.json()) as T;
+        }
+      } catch {
+        data = undefined;
+      }
+      return { ok: response.ok, data };
+    },
+    [],
+  );
+
   const [auth, setAuth] = React.useState<AuthResponse | null>(null);
   const [permissions, setPermissions] =
     React.useState<PermissionResponse | null>(null);
@@ -81,39 +144,72 @@ export default function Dashboard(): React.ReactElement {
   >({});
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = React.useState(false);
 
-  const refreshAuth = React.useCallback(async () => {
-    const response = await fetch('/api/auth/me');
-    if (!response.ok) {
-      setAuth({ authenticated: false });
-      return;
-    }
-    setAuth(await response.json());
-  }, []);
+  const refreshAuth = React.useCallback(
+    async (force = false) => {
+      const { ok, data } = await fetchJson<AuthResponse>(
+        '/api/auth/me',
+        undefined,
+        {
+          force,
+        },
+      );
+      if (!ok) {
+        setAuth({ authenticated: false });
+        return;
+      }
+      setAuth(data ?? { authenticated: false });
+    },
+    [fetchJson],
+  );
 
-  const refreshPermissions = React.useCallback(async () => {
-    const response = await fetch('/api/meta/permissions');
-    if (!response.ok) {
-      return;
-    }
-    setPermissions(await response.json());
-  }, []);
+  const refreshPermissions = React.useCallback(
+    async (force = false) => {
+      const { ok, data } = await fetchJson<PermissionResponse>(
+        '/api/meta/permissions',
+        undefined,
+        { force },
+      );
+      if (!ok) {
+        return;
+      }
+      setPermissions(data ?? null);
+    },
+    [fetchJson],
+  );
 
-  const refreshAssets = React.useCallback(async () => {
-    const response = await fetch('/api/assets');
-    if (!response.ok) {
-      return;
-    }
-    setAssets(await response.json());
-  }, []);
+  const refreshAssets = React.useCallback(
+    async (force = false) => {
+      const { ok, data } = await fetchJson<AssetsResponse>(
+        '/api/assets',
+        undefined,
+        {
+          force,
+        },
+      );
+      if (!ok) {
+        return;
+      }
+      setAssets(data ?? null);
+    },
+    [fetchJson],
+  );
 
-  const refreshSyncRuns = React.useCallback(async () => {
-    const response = await fetch('/api/sync/runs');
-    if (!response.ok) {
-      return;
-    }
-    setSyncRuns(await response.json());
-  }, []);
+  const refreshSyncRuns = React.useCallback(
+    async (force = false) => {
+      const { ok, data } = await fetchJson<SyncRun[]>(
+        '/api/sync/runs',
+        undefined,
+        { force },
+      );
+      if (!ok) {
+        return;
+      }
+      setSyncRuns(data ?? []);
+    },
+    [fetchJson],
+  );
 
   React.useEffect(() => {
     void refreshAuth();
@@ -135,21 +231,22 @@ export default function Dashboard(): React.ReactElement {
     setLoading(true);
     setActionError(null);
     try {
-      const response = await fetch('/api/meta/businesses');
-      if (!response.ok) {
-        const data = (await response.json()) as { error?: string };
-        throw new Error(data?.error ?? 'Failed to load businesses.');
+      const { ok, data } = await fetchJson<MetaBusiness[]>(
+        '/api/meta/businesses',
+      );
+      if (!ok) {
+        const errorPayload = data as { error?: string } | undefined;
+        throw new Error(errorPayload?.error ?? 'Failed to load businesses.');
       }
-      const data = (await response.json()) as MetaBusiness[];
-      setBusinesses(data);
+      const businessesData = data ?? [];
+      setBusinesses(businessesData);
       const pagesByBusiness: Record<string, MetaPage[]> = {};
-      for (const business of data) {
-        const pageResponse = await fetch(
+      for (const business of businessesData) {
+        const { ok: pagesOk, data: pagesData } = await fetchJson<MetaPage[]>(
           `/api/meta/businesses/${business.id}/pages`,
         );
-        if (pageResponse.ok) {
-          pagesByBusiness[business.id] =
-            (await pageResponse.json()) as MetaPage[];
+        if (pagesOk) {
+          pagesByBusiness[business.id] = pagesData ?? [];
         }
       }
       setBusinessPages(pagesByBusiness);
@@ -161,19 +258,19 @@ export default function Dashboard(): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchJson]);
 
-  const loadClassicPages = async () => {
+  const loadClassicPages = React.useCallback(async () => {
     try {
-      const response = await fetch('/api/meta/accounts');
-      if (!response.ok) {
+      const { ok, data } = await fetchJson<MetaPage[]>('/api/meta/accounts');
+      if (!ok) {
         return;
       }
-      setClassicPages(await response.json());
+      setClassicPages(data ?? []);
     } catch {
       setClassicPages([]);
     }
-  };
+  }, [fetchJson]);
 
   const handleEnablePage = async (pageId: string, name: string) => {
     setActionError(null);
@@ -187,7 +284,7 @@ export default function Dashboard(): React.ReactElement {
         const data = (await response.json()) as { error?: string };
         throw new Error(data?.error ?? 'Failed to enable page.');
       }
-      await refreshAssets();
+      await refreshAssets(true);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'Enable page failed.',
@@ -204,7 +301,7 @@ export default function Dashboard(): React.ReactElement {
       if (!response.ok) {
         throw new Error('Sync failed to start.');
       }
-      await refreshSyncRuns();
+      await refreshSyncRuns(true);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Sync failed.');
     }
@@ -222,7 +319,7 @@ export default function Dashboard(): React.ReactElement {
       if (!response.ok) {
         throw new Error('Instagram sync failed.');
       }
-      await refreshSyncRuns();
+      await refreshSyncRuns(true);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'Instagram sync failed.',
@@ -230,19 +327,50 @@ export default function Dashboard(): React.ReactElement {
     }
   };
 
-  const loadIgAssets = React.useCallback(async (pageId: string) => {
-    const response = await fetch(`/api/meta/pages/${pageId}/ig-assets`, {
-      cache: 'no-store',
-    });
-    if (!response.ok) {
-      return;
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    setActionError(null);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      setAuth({ authenticated: false });
+      setPermissions(null);
+      setAssets(null);
+      setBusinesses([]);
+      setBusinessPages({});
+      setClassicPages([]);
+      setSyncRuns([]);
+      setIgAssetsByPage({});
+      await Promise.all([
+        refreshAuth(true),
+        refreshPermissions(true),
+        refreshAssets(true),
+        refreshSyncRuns(true),
+      ]);
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'Failed to log out.',
+      );
+    } finally {
+      setLoggingOut(false);
     }
-    const data = (await response.json()) as { igAssets: IgAsset[] };
-    setIgAssetsByPage((current) => ({
-      ...current,
-      [pageId]: data.igAssets,
-    }));
-  }, []);
+  };
+
+  const loadIgAssets = React.useCallback(
+    async (pageId: string) => {
+      const { ok, data } = await fetchJson<{ igAssets: IgAsset[] }>(
+        `/api/meta/pages/${pageId}/ig-assets`,
+        { cache: 'no-store' },
+      );
+      if (!ok) {
+        return;
+      }
+      setIgAssetsByPage((current) => ({
+        ...current,
+        [pageId]: data?.igAssets ?? [],
+      }));
+    },
+    [fetchJson],
+  );
 
   React.useEffect(() => {
     if (!assets?.pages.length) {
@@ -255,7 +383,7 @@ export default function Dashboard(): React.ReactElement {
 
   React.useEffect(() => {
     void loadClassicPages();
-  }, []);
+  }, [loadClassicPages]);
 
   React.useEffect(() => {
     if (businessesLoaded) {
@@ -269,6 +397,14 @@ export default function Dashboard(): React.ReactElement {
 
   const enabledPages = new Map(
     assets?.pages.map((page) => [page.id, page]) ?? [],
+  );
+  const businessPageIds = new Set(
+    businesses.flatMap((business) =>
+      (businessPages[business.id] ?? []).map((page) => page.id),
+    ),
+  );
+  const filteredClassicPages = classicPages.filter(
+    (page) => !businessPageIds.has(page.id),
   );
   const runByAsset = new Map<string, SyncRun>();
   for (const run of syncRuns) {
@@ -298,7 +434,25 @@ export default function Dashboard(): React.ReactElement {
             ) : null}
           </div>
         ) : (
-          <p {...stylex.props(layout.note)}>Connected as {auth.userId}</p>
+          <div
+            style={{
+              display: 'flex',
+              gap: '12px',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <p {...stylex.props(layout.note)}>
+              Connected as {auth.name || auth.userId}
+            </p>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={handleLogout}
+              disabled={loggingOut}
+            >
+              {loggingOut ? 'Logging out…' : 'Log out'}
+            </button>
+          </div>
         )}
         {permissions?.missing.length ? (
           <p style={{ color: colors.coral }}>
@@ -361,14 +515,14 @@ export default function Dashboard(): React.ReactElement {
         ))}
       </section>
 
-      <section {...stylex.props(layout.card)}>
-        <h2>Classic Pages</h2>
-        <p {...stylex.props(layout.note)}>
-          Pages discovered via /me/accounts (fallback for non-business pages).
-        </p>
-        {classicPages.length ? (
+      {filteredClassicPages.length ? (
+        <section {...stylex.props(layout.card)}>
+          <h2>Classic Pages</h2>
+          <p {...stylex.props(layout.note)}>
+            Pages discovered via /me/accounts (fallback for non-business pages).
+          </p>
           <ul>
-            {classicPages.map((page) => (
+            {filteredClassicPages.map((page) => (
               <li key={page.id}>
                 {page.name}{' '}
                 <span style={{ color: colors.slate }}>({page.id})</span>
@@ -382,10 +536,8 @@ export default function Dashboard(): React.ReactElement {
               </li>
             ))}
           </ul>
-        ) : (
-          <p {...stylex.props(layout.note)}>No classic pages found.</p>
-        )}
-      </section>
+        </section>
+      ) : null}
 
       <section {...stylex.props(layout.card)}>
         <h2>Enabled assets</h2>
