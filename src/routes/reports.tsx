@@ -47,9 +47,10 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
     <section {...stylex.props(layout.card)}>
       <h2>{title}</h2>
       <p {...stylex.props(layout.note)}>
-        Productive: customer ≥3 and business ≥3. Highly productive: customer ≥5
-        and business ≥5. Price given: any business message includes
-        &quot;$&quot;. Qualified rate: (productive + highly productive) / total.
+        Productive: customer ≥3 and business ≥3 (excludes highly productive).
+        Highly productive: customer ≥5 and business ≥5. Price given: any
+        business message includes &quot;$&quot;. Qualified rate: (productive +
+        highly productive) / total.
       </p>
       <table {...stylex.props(layout.table)}>
         <thead>
