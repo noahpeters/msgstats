@@ -598,6 +598,64 @@ async function runSync(options: {
   });
 }
 
+async function recomputeConversationStats(
+  env: Env,
+  data: { userId: string; pageId?: string | null },
+) {
+  let query = `SELECT conversation_id as conversationId, page_id as pageId,
+            MIN(created_time) as startedTime,
+            MAX(created_time) as lastMessageAt,
+            SUM(CASE WHEN sender_type = 'customer' THEN 1 ELSE 0 END) as customerCount,
+            SUM(CASE WHEN sender_type = 'business' THEN 1 ELSE 0 END) as businessCount,
+            MAX(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN 1 ELSE 0 END) as priceGiven
+     FROM messages
+     WHERE user_id = ?`;
+  const bindings: unknown[] = [data.userId];
+  if (data.pageId) {
+    query += ' AND page_id = ?';
+    bindings.push(data.pageId);
+  }
+  query += ' GROUP BY conversation_id, page_id';
+  const rows = await env.DB.prepare(query)
+    .bind(...bindings)
+    .all<{
+      conversationId: string;
+      pageId: string;
+      startedTime: string | null;
+      lastMessageAt: string | null;
+      customerCount: number;
+      businessCount: number;
+      priceGiven: number;
+    }>();
+
+  let updated = 0;
+  for (const row of rows.results ?? []) {
+    await env.DB.prepare(
+      `UPDATE conversations
+       SET started_time = ?,
+           last_message_at = ?,
+           customer_count = ?,
+           business_count = ?,
+           price_given = ?
+       WHERE user_id = ? AND id = ? AND page_id = ?`,
+    )
+      .bind(
+        row.startedTime,
+        row.lastMessageAt,
+        row.customerCount ?? 0,
+        row.businessCount ?? 0,
+        row.priceGiven ?? 0,
+        data.userId,
+        row.conversationId,
+        row.pageId,
+      )
+      .run();
+    updated += 1;
+  }
+
+  return { updated };
+}
+
 addRoute('GET', '/api/health', () => json({ status: 'ok' }));
 
 addRoute('GET', '/api/auth/login', async (req, env) => {
@@ -1125,12 +1183,15 @@ addRoute('GET', '/api/reports/weekly', async (req, env) => {
   const url = new URL(req.url);
   const pageId = url.searchParams.get('pageId');
   const platform = url.searchParams.get('platform');
+  const bucketParam = url.searchParams.get('bucket');
+  const bucket = bucketParam === 'last' ? 'last' : 'started';
   const data = await buildReportFromDb({
     db: env.DB,
     userId,
     interval: 'weekly',
-    pageId,
-    platform,
+    bucket,
+    pageId: pageId || null,
+    platform: platform || null,
   });
   return json({ data });
 });
@@ -1143,14 +1204,28 @@ addRoute('GET', '/api/reports/monthly', async (req, env) => {
   const url = new URL(req.url);
   const pageId = url.searchParams.get('pageId');
   const platform = url.searchParams.get('platform');
+  const bucketParam = url.searchParams.get('bucket');
+  const bucket = bucketParam === 'last' ? 'last' : 'started';
   const data = await buildReportFromDb({
     db: env.DB,
     userId,
     interval: 'monthly',
-    pageId,
-    platform,
+    bucket,
+    pageId: pageId || null,
+    platform: platform || null,
   });
   return json({ data });
+});
+
+addRoute('POST', '/api/reports/recompute', async (req, env) => {
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const body = await readJson<{ pageId?: string | null }>(req);
+  const pageId = body?.pageId ?? null;
+  const result = await recomputeConversationStats(env, { userId, pageId });
+  return json(result);
 });
 
 addRoute('POST', '/auth/facebook/deletion', async (req, env) => {

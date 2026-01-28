@@ -27,6 +27,7 @@ describe('report helpers', () => {
         platform: 'messenger',
         updatedTime: '2026-01-10T12:00:00.000Z',
         startedTime: '2026-01-10T10:00:00.000Z',
+        lastMessageAt: '2026-01-10T12:00:00.000Z',
         customerCount: 3,
         businessCount: 3,
         priceGiven: 1,
@@ -37,16 +38,35 @@ describe('report helpers', () => {
         platform: 'messenger',
         updatedTime: '2026-01-11T12:00:00.000Z',
         startedTime: '2026-01-11T10:00:00.000Z',
+        lastMessageAt: '2026-01-11T12:00:00.000Z',
         customerCount: 5,
         businessCount: 5,
         priceGiven: 0,
       },
     ];
-    const weekly = buildReportRows(rows, 'weekly');
+    const weekly = buildReportRows(rows, 'weekly', 'started');
     expect(weekly).toHaveLength(1);
     expect(weekly[0]?.total).toBe(2);
     expect(weekly[0]?.productive).toBe(2);
     expect(weekly[0]?.highly_productive).toBe(1);
     expect(weekly[0]?.price_given).toBe(1);
+  });
+
+  it('can bucket by last message date', () => {
+    const rows = [
+      {
+        id: 'c1',
+        pageId: 'p1',
+        platform: 'messenger',
+        updatedTime: '2026-01-10T12:00:00.000Z',
+        startedTime: '2026-01-01T10:00:00.000Z',
+        lastMessageAt: '2026-01-20T10:00:00.000Z',
+        customerCount: 1,
+        businessCount: 1,
+        priceGiven: 0,
+      },
+    ];
+    const monthly = buildReportRows(rows, 'monthly', 'last');
+    expect(monthly[0]?.periodStart).toBe('2026-01-01T00:00:00.000Z');
   });
 });
