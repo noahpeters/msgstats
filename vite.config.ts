@@ -3,18 +3,24 @@ import { defineConfig, type PluginOption } from 'vite';
 import { reactRouter } from '@react-router/dev/vite';
 import stylex from '@stylexjs/unplugin';
 
+const isTest = process.env.VITEST === 'true';
+
 export default defineConfig({
   plugins: [
-    stylex.vite({
-      importSources: ['@stylexjs/stylex', 'stylex'],
-      unstable_moduleResolution: {
-        type: 'commonJS',
-        rootDir: __dirname,
-      },
-      devMode: 'full',
-      devPersistToDisk: true,
-    }) as unknown as PluginOption,
-    ...(process.env.VITEST ? [] : [reactRouter() as unknown as PluginOption]),
+    ...(!isTest
+      ? [
+          stylex.vite({
+            importSources: ['@stylexjs/stylex', 'stylex'],
+            unstable_moduleResolution: {
+              type: 'commonJS',
+              rootDir: __dirname,
+            },
+            devMode: 'full',
+            devPersistToDisk: true,
+          }) as unknown as PluginOption,
+          reactRouter() as unknown as PluginOption,
+        ]
+      : []),
   ],
   resolve: {
     alias: {
