@@ -8,6 +8,7 @@ type ReportRow = {
   productive: number;
   highly_productive: number;
   price_given: number;
+  low_response_after_price: number;
   qualified_rate: number;
 };
 
@@ -49,8 +50,9 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
       <p {...stylex.props(layout.note)}>
         Productive: customer ≥3 and business ≥3 (excludes highly productive).
         Highly productive: customer ≥5 and business ≥5. Price given: any
-        business message includes &quot;$&quot;. Qualified rate: (productive +
-        highly productive) / total.
+        business message includes &quot;$&quot;. Low response after price:
+        customer sent 2 or fewer messages after the first price message.
+        Qualified rate: (productive + highly productive) / total.
       </p>
       <table {...stylex.props(layout.table)}>
         <thead>
@@ -60,6 +62,9 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
             <th {...stylex.props(layout.tableHead)}>Productive</th>
             <th {...stylex.props(layout.tableHead)}>Highly productive</th>
             <th {...stylex.props(layout.tableHead)}>Price given</th>
+            <th {...stylex.props(layout.tableHead)}>
+              Low response after price
+            </th>
             <th {...stylex.props(layout.tableHead)}>Qualified rate</th>
           </tr>
         </thead>
@@ -73,6 +78,9 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
                 {row.highly_productive}
               </td>
               <td {...stylex.props(layout.tableCell)}>{row.price_given}</td>
+              <td {...stylex.props(layout.tableCell)}>
+                {row.low_response_after_price}
+              </td>
               <td {...stylex.props(layout.tableCell)}>
                 {(row.qualified_rate * 100).toFixed(1)}%
               </td>

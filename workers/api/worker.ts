@@ -675,7 +675,23 @@ async function recomputeConversationStats(
             MAX(created_time) as lastMessageAt,
             SUM(CASE WHEN sender_type = 'customer' THEN 1 ELSE 0 END) as customerCount,
             SUM(CASE WHEN sender_type = 'business' THEN 1 ELSE 0 END) as businessCount,
-            MAX(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN 1 ELSE 0 END) as priceGiven
+            MAX(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN 1 ELSE 0 END) as priceGiven,
+            MIN(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN created_time END) as firstPriceAt,
+            SUM(
+              CASE
+                WHEN sender_type = 'customer'
+                 AND created_time > (
+                   SELECT MIN(m2.created_time)
+                   FROM messages m2
+                   WHERE m2.user_id = messages.user_id
+                     AND m2.conversation_id = messages.conversation_id
+                     AND m2.sender_type = 'business'
+                     AND m2.body LIKE '%$%'
+                 )
+                THEN 1
+                ELSE 0
+              END
+            ) as customerAfterPriceCount
      FROM messages
      WHERE user_id = ?`;
   const bindings: unknown[] = [data.userId];
@@ -694,17 +710,22 @@ async function recomputeConversationStats(
       customerCount: number;
       businessCount: number;
       priceGiven: number;
+      firstPriceAt: string | null;
+      customerAfterPriceCount: number;
     }>();
 
   let updated = 0;
   for (const row of rows.results ?? []) {
+    const lowResponseAfterPrice =
+      row.firstPriceAt && (row.customerAfterPriceCount ?? 0) <= 2 ? 1 : 0;
     await env.DB.prepare(
       `UPDATE conversations
        SET started_time = ?,
            last_message_at = ?,
            customer_count = ?,
            business_count = ?,
-           price_given = ?
+           price_given = ?,
+           low_response_after_price = ?
        WHERE user_id = ? AND id = ? AND page_id = ?`,
     )
       .bind(
@@ -713,6 +734,7 @@ async function recomputeConversationStats(
         row.customerCount ?? 0,
         row.businessCount ?? 0,
         row.priceGiven ?? 0,
+        lowResponseAfterPrice,
         data.userId,
         row.conversationId,
         row.pageId,
