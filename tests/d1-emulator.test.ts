@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Miniflare } from 'miniflare';
 
-const shouldRun = process.env.CI === 'true';
+const shouldRun = process.env.SKIP_D1_EMULATOR_TEST !== '1';
 
 describe('D1 emulator (CI only)', () => {
   it.skipIf(!shouldRun)(
@@ -26,7 +26,9 @@ describe('D1 emulator (CI only)', () => {
         .map((statement) => statement.trim())
         .filter(Boolean);
       for (const statement of statements) {
-        await db.exec(statement);
+        const normalized = statement.replace(/\s+/g, ' ').trim();
+        if (!normalized) continue;
+        await db.exec(normalized);
       }
       const row = await db
         .prepare('SELECT name FROM sqlite_master WHERE type = ? AND name = ?')
