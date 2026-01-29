@@ -38,6 +38,9 @@ type IgAsset = {
   id: string;
   name: string;
   pageId: string;
+  lastSyncedAt: string | null;
+  conversationCount: number;
+  messageCount: number;
 };
 
 type AssetsResponse = {
@@ -59,11 +62,79 @@ type SyncRun = {
   messages: number;
 };
 
+const formatRelativeTime = (value: string | null) => {
+  if (!value) {
+    return 'Never';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Never';
+  }
+  const diffMs = date.getTime() - Date.now();
+  const ranges: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ['year', 1000 * 60 * 60 * 24 * 365],
+    ['month', 1000 * 60 * 60 * 24 * 30],
+    ['week', 1000 * 60 * 60 * 24 * 7],
+    ['day', 1000 * 60 * 60 * 24],
+    ['hour', 1000 * 60 * 60],
+    ['minute', 1000 * 60],
+    ['second', 1000],
+  ];
+  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+  for (const [unit, range] of ranges) {
+    if (Math.abs(diffMs) >= range || unit === 'second') {
+      return formatter.format(Math.round(diffMs / range), unit);
+    }
+  }
+  return 'Just now';
+};
+
 const formatSyncStatus = (status: string) => {
   if (status === 'queued') return 'Queued';
-  if (status === 'running') return 'Syncing';
+  if (status === 'running') return 'Updating';
   if (status === 'failed') return 'Last sync failed';
   return 'Last sync';
+};
+
+const assetGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+  gap: '12px',
+  marginTop: '12px',
+};
+
+const assetTileStyle: React.CSSProperties = {
+  borderRadius: '16px',
+  border: '1px solid #f2f4f8',
+  backgroundColor: '#ffffff',
+  padding: '16px',
+  boxShadow: '0 12px 24px rgba(12, 27, 26, 0.08)',
+  display: 'grid',
+  gap: '8px',
+};
+
+const assetHeadingStyle: React.CSSProperties = {
+  fontSize: '20px',
+  margin: 0,
+};
+
+const assetBodyRowStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: '12px',
+  justifyContent: 'space-between',
+  flexWrap: 'wrap',
+};
+
+const assetFooterStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '12px',
+  flexWrap: 'wrap',
+};
+
+const updateButtonStyle: React.CSSProperties = {
+  padding: '6px 14px',
 };
 
 export default function Dashboard(): React.ReactElement {
@@ -139,9 +210,7 @@ export default function Dashboard(): React.ReactElement {
   >({});
   const [classicPages, setClassicPages] = React.useState<MetaPage[]>([]);
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
-  const [igAssetsByPage, setIgAssetsByPage] = React.useState<
-    Record<string, IgAsset[]>
-  >({});
+  const loadedIgAssets = React.useRef(new Set<string>());
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [loggingOut, setLoggingOut] = React.useState(false);
@@ -339,7 +408,7 @@ export default function Dashboard(): React.ReactElement {
       setBusinessPages({});
       setClassicPages([]);
       setSyncRuns([]);
-      setIgAssetsByPage({});
+      loadedIgAssets.current.clear();
       await Promise.all([
         refreshAuth(true),
         refreshPermissions(true),
@@ -357,19 +426,21 @@ export default function Dashboard(): React.ReactElement {
 
   const loadIgAssets = React.useCallback(
     async (pageId: string) => {
-      const { ok, data } = await fetchJson<{ igAssets: IgAsset[] }>(
+      if (loadedIgAssets.current.has(pageId)) {
+        return;
+      }
+      loadedIgAssets.current.add(pageId);
+      const { ok } = await fetchJson<{ igAssets: IgAsset[] }>(
         `/api/meta/pages/${pageId}/ig-assets`,
         { cache: 'no-store' },
       );
       if (!ok) {
+        loadedIgAssets.current.delete(pageId);
         return;
       }
-      setIgAssetsByPage((current) => ({
-        ...current,
-        [pageId]: data?.igAssets ?? [],
-      }));
+      await refreshAssets(true);
     },
-    [fetchJson],
+    [fetchJson, refreshAssets],
   );
 
   React.useEffect(() => {
@@ -416,6 +487,27 @@ export default function Dashboard(): React.ReactElement {
       runByAsset.set(key, run);
     }
   }
+
+  const enabledAssets = [
+    ...(assets?.pages.map((page) => ({
+      key: `page:${page.id}`,
+      name: page.name || `Page ${page.id}`,
+      conversationCount: page.conversationCount,
+      messageCount: page.messageCount,
+      lastSyncedAt: page.lastSyncedAt,
+      run: runByAsset.get(`${page.id}:messenger`),
+      onSync: () => handleSyncMessenger(page.id),
+    })) ?? []),
+    ...(assets?.igAssets.map((asset) => ({
+      key: `ig:${asset.id}`,
+      name: asset.name || `Instagram ${asset.id}`,
+      conversationCount: asset.conversationCount,
+      messageCount: asset.messageCount,
+      lastSyncedAt: asset.lastSyncedAt,
+      run: runByAsset.get(`${asset.pageId}:instagram:${asset.id}`),
+      onSync: () => handleSyncInstagram(asset.pageId, asset.id),
+    })) ?? []),
+  ];
 
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
@@ -547,106 +639,42 @@ export default function Dashboard(): React.ReactElement {
         {actionError ? (
           <p style={{ color: colors.coral }}>{actionError}</p>
         ) : null}
-        {assets?.pages.length ? (
-          <div style={{ display: 'grid', gap: '16px' }}>
-            {assets.pages.map((page) => {
-              const run = runByAsset.get(`${page.id}:messenger`);
+        {enabledAssets.length ? (
+          <div style={assetGridStyle}>
+            {enabledAssets.map((asset) => {
+              const run = asset.run;
+              const isSyncing =
+                run?.status === 'queued' || run?.status === 'running';
               return (
-                <div
-                  key={page.id}
-                  style={{
-                    borderTop: `1px solid ${colors.cloud}`,
-                    paddingTop: '12px',
-                  }}
-                >
-                  <strong>{page.name || `Page ${page.id}`}</strong>
-                  <div {...stylex.props(layout.note)}>
-                    Conversations: {page.conversationCount} · Messages:{' '}
-                    {page.messageCount}
+                <div key={asset.key} style={assetTileStyle}>
+                  <h3 style={assetHeadingStyle}>{asset.name}</h3>
+                  <div style={assetBodyRowStyle}>
+                    <span {...stylex.props(layout.note)}>
+                      Conversations: {asset.conversationCount}
+                    </span>
+                    <span {...stylex.props(layout.note)}>
+                      Messages: {asset.messageCount}
+                    </span>
                   </div>
-                  <div {...stylex.props(layout.note)}>
-                    Last sync:{' '}
-                    {page.lastSyncedAt
-                      ? new Date(page.lastSyncedAt).toLocaleString()
-                      : 'Never'}
-                  </div>
-                  {run ? (
+                  {isSyncing ? (
                     <div {...stylex.props(layout.note)}>
-                      {formatSyncStatus(run.status)}
-                      {run.status === 'queued' ? null : (
-                        <>
-                          {' '}
-                          · {run.conversations} convos · {run.messages} msgs
-                        </>
-                      )}
+                      {formatSyncStatus(run?.status ?? '')} · Conversations:{' '}
+                      {run?.conversations ?? 0}
                     </div>
-                  ) : null}
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '8px',
-                      flexWrap: 'wrap',
-                      marginTop: '8px',
-                    }}
-                  >
-                    <button
-                      {...stylex.props(layout.button)}
-                      onClick={() => handleSyncMessenger(page.id)}
-                    >
-                      Sync Messenger
-                    </button>
-                  </div>
-                  {assets.igEnabled ? (
-                    <div style={{ marginTop: '8px' }}>
-                      <div {...stylex.props(layout.note)}>
-                        Instagram accounts
-                      </div>
-                      {(igAssetsByPage[page.id] ?? []).length ? (
-                        <ul>
-                          {(igAssetsByPage[page.id] ?? []).map((asset) => {
-                            const igRun = runByAsset.get(
-                              `${page.id}:instagram:${asset.id}`,
-                            );
-                            return (
-                              <li key={asset.id}>
-                                {asset.name} ({asset.id})
-                                {igRun ? (
-                                  <span
-                                    style={{
-                                      marginLeft: '8px',
-                                      color: colors.slate,
-                                    }}
-                                  >
-                                    {formatSyncStatus(igRun.status)}
-                                    {igRun.status === 'queued' ? null : (
-                                      <>
-                                        {' '}
-                                        · {igRun.conversations} convos ·{' '}
-                                        {igRun.messages} msgs
-                                      </>
-                                    )}
-                                  </span>
-                                ) : null}
-                                <button
-                                  {...stylex.props(layout.ghostButton)}
-                                  style={{ marginLeft: '8px' }}
-                                  onClick={() =>
-                                    handleSyncInstagram(page.id, asset.id)
-                                  }
-                                >
-                                  Sync Instagram
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      ) : (
-                        <p {...stylex.props(layout.note)}>
-                          No IG assets found for this page.
-                        </p>
-                      )}
+                  ) : (
+                    <div style={assetFooterStyle}>
+                      <span {...stylex.props(layout.note)}>
+                        Last update: {formatRelativeTime(asset.lastSyncedAt)}
+                      </span>
+                      <button
+                        {...stylex.props(layout.ghostButton)}
+                        style={updateButtonStyle}
+                        onClick={asset.onSync}
+                      >
+                        Update
+                      </button>
                     </div>
-                  ) : null}
+                  )}
                 </div>
               );
             })}

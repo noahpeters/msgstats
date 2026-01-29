@@ -1190,7 +1190,37 @@ addRoute('GET', '/api/assets', async (req, env) => {
   )
     .bind(userId)
     .all<{ id: string; name: string; pageId: string }>();
-  return json({ pages, igAssets: igAssets.results ?? [], igEnabled: true });
+  const igStats = await env.DB.prepare(
+    `SELECT ig_business_id as igBusinessId,
+            COUNT(DISTINCT id) as conversations,
+            SUM(customer_count + business_count) as messages,
+            MAX(updated_time) as lastMessageAt
+     FROM conversations
+     WHERE user_id = ? AND platform = 'instagram'
+     GROUP BY ig_business_id`,
+  )
+    .bind(userId)
+    .all<{
+      igBusinessId: string | null;
+      conversations: number;
+      messages: number;
+      lastMessageAt: string | null;
+    }>();
+  const igStatsById = new Map(
+    (igStats.results ?? [])
+      .filter((row) => row.igBusinessId)
+      .map((row) => [row.igBusinessId as string, row]),
+  );
+  const igAssetsWithStats = (igAssets.results ?? []).map((asset) => {
+    const stats = igStatsById.get(asset.id);
+    return {
+      ...asset,
+      conversationCount: stats?.conversations ?? 0,
+      messageCount: stats?.messages ?? 0,
+      lastSyncedAt: stats?.lastMessageAt ?? null,
+    };
+  });
+  return json({ pages, igAssets: igAssetsWithStats, igEnabled: true });
 });
 
 addRoute(
