@@ -572,6 +572,16 @@ export default function Dashboard(): React.ReactElement {
     })) ?? []),
   ];
 
+  const businessPagesToShow = businesses
+    .map((business) => ({
+      business,
+      pages: (businessPages[business.id] ?? []).filter(
+        (page) => !enabledPages.has(page.id),
+      ),
+    }))
+    .filter((entry) => entry.pages.length > 0);
+  const showBusinessesCard = loading || businessPagesToShow.length > 0;
+
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
       <section {...stylex.props(layout.card)}>
@@ -619,27 +629,21 @@ export default function Dashboard(): React.ReactElement {
         ) : null}
       </section>
 
-      <section {...stylex.props(layout.card)}>
-        <h2>Businesses & Pages</h2>
-        <p {...stylex.props(layout.note)}>
-          Businesses and pages load automatically. Enable a page to store its
-          token securely.
-        </p>
-        {loading ? (
-          <p {...stylex.props(layout.note)}>Loading businesses…</p>
-        ) : null}
-        {businesses.length === 0 && !loading ? (
+      {showBusinessesCard ? (
+        <section {...stylex.props(layout.card)}>
+          <h2>Businesses & Pages</h2>
           <p {...stylex.props(layout.note)}>
-            No businesses loaded yet. Connect Meta to load businesses.
+            Businesses and pages load automatically. Enable a page to store its
+            token securely.
           </p>
-        ) : null}
-        {businesses.map((business) => (
-          <div key={business.id} style={{ marginTop: '12px' }}>
-            <strong>{business.name}</strong>
-            <div style={{ display: 'grid', gap: '10px', marginTop: '8px' }}>
-              {(businessPages[business.id] ?? []).map((page) => {
-                const enabled = enabledPages.has(page.id);
-                return (
+          {loading ? (
+            <p {...stylex.props(layout.note)}>Loading businesses…</p>
+          ) : null}
+          {businessPagesToShow.map(({ business, pages }) => (
+            <div key={business.id} style={{ marginTop: '12px' }}>
+              <strong>{business.name}</strong>
+              <div style={{ display: 'grid', gap: '10px', marginTop: '8px' }}>
+                {pages.map((page) => (
                   <div
                     key={page.id}
                     style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}
@@ -660,15 +664,15 @@ export default function Dashboard(): React.ReactElement {
                       {...stylex.props(layout.ghostButton)}
                       onClick={() => handleEnablePage(page.id, page.name)}
                     >
-                      {enabled ? 'Refresh token' : 'Enable page'}
+                      Enable page
                     </button>
                   </div>
-                );
-              })}
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
-      </section>
+          ))}
+        </section>
+      ) : null}
 
       {filteredClassicPages.length > 0 ? (
         <section {...stylex.props(layout.card)}>
