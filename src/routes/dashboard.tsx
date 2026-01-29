@@ -116,6 +116,9 @@ const assetTileStyle: React.CSSProperties = {
 const assetHeadingStyle: React.CSSProperties = {
   fontSize: '20px',
   margin: 0,
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
 };
 
 const assetBodyRowStyle: React.CSSProperties = {
@@ -135,6 +138,64 @@ const assetFooterStyle: React.CSSProperties = {
 
 const updateButtonStyle: React.CSSProperties = {
   padding: '6px 14px',
+};
+
+const assetIconStyle: React.CSSProperties = {
+  width: '18px',
+  height: '18px',
+  color: colors.slate,
+  flexShrink: 0,
+};
+
+const AssetPlatformIcon = ({
+  platform,
+}: {
+  platform: 'facebook' | 'instagram';
+}) => {
+  if (platform === 'instagram') {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        focusable="false"
+        style={assetIconStyle}
+      >
+        <rect
+          x="3.5"
+          y="3.5"
+          width="17"
+          height="17"
+          rx="5"
+          ry="5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          r="4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <circle cx="17" cy="7" r="1.2" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      style={assetIconStyle}
+    >
+      <path
+        fill="currentColor"
+        d="M13.5 8.5V7.1c0-.7.5-1.1 1.2-1.1H16V3.6c-.5-.1-1.4-.2-2.5-.2-2.5 0-4.2 1.5-4.2 4.3v1.8H7.5V12h1.8v8.4h3.3V12h2.2l.4-2.5h-2.6z"
+      />
+    </svg>
+  );
 };
 
 export default function Dashboard(): React.ReactElement {
@@ -492,6 +553,7 @@ export default function Dashboard(): React.ReactElement {
     ...(assets?.pages.map((page) => ({
       key: `page:${page.id}`,
       name: page.name || `Page ${page.id}`,
+      platform: 'facebook' as const,
       conversationCount: page.conversationCount,
       messageCount: page.messageCount,
       lastSyncedAt: page.lastSyncedAt,
@@ -501,6 +563,7 @@ export default function Dashboard(): React.ReactElement {
     ...(assets?.igAssets.map((asset) => ({
       key: `ig:${asset.id}`,
       name: asset.name || `Instagram ${asset.id}`,
+      platform: 'instagram' as const,
       conversationCount: asset.conversationCount,
       messageCount: asset.messageCount,
       lastSyncedAt: asset.lastSyncedAt,
@@ -648,7 +711,10 @@ export default function Dashboard(): React.ReactElement {
               const isFailed = run?.status === 'failed';
               return (
                 <div key={asset.key} style={assetTileStyle}>
-                  <h3 style={assetHeadingStyle}>{asset.name}</h3>
+                  <h3 style={assetHeadingStyle}>
+                    <AssetPlatformIcon platform={asset.platform} />
+                    <span>{asset.name}</span>
+                  </h3>
                   <div style={assetBodyRowStyle}>
                     <span {...stylex.props(layout.note)}>
                       Conversations: {asset.conversationCount}
