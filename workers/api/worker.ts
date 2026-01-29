@@ -13,6 +13,7 @@ import {
   fetchConversationsPage,
   fetchConversationMessages,
   metaConfig,
+  MetaApiError,
   type MetaConversation,
   fetchUserProfile,
 } from './meta';
@@ -1163,43 +1164,57 @@ addRoute(
       });
       return json({ id: page.id, name: resolvedName });
     } catch (error) {
-      // Always log structured, never tokens
-      // if (error instanceof MetaApiError) {
-      //   const fb = error.fb as MetaFbErrorPayload | undefined;
-      //   console.error('MetaApiError', {
-      //     status: error.status,
-      //     fb,
-      //     usage: error.usage,
-      //     pageId,
-      //     userId,
-      //   });
-
-      //   return json(
-      //     {
-      //       error: 'Meta API error',
-      //       meta: {
-      //         status: error.status,
-      //         fb: fb?.error
-      //           ? {
-      //               message: fb.error.message,
-      //               type: fb.error.type,
-      //               code: fb.error.code,
-      //               error_subcode: fb.error.error_subcode,
-      //               fbtrace_id: fb.error.fbtrace_id,
-      //             }
-      //           : undefined,
-      //         usage: error.usage,
-      //       },
-      //     },
-      //     {
-      //       status:
-      //         error.status >= 400 && error.status <= 599 ? error.status : 502,
-      //     },
-      //   );
-      // }
+      if (error instanceof MetaApiError) {
+        const meta =
+          typeof error.meta === 'object' && error.meta !== null
+            ? (error.meta as {
+                error?: {
+                  message?: string;
+                  type?: string;
+                  code?: number;
+                  error_subcode?: number;
+                  fbtrace_id?: string;
+                };
+              })
+            : undefined;
+        const fb = meta?.error;
+        console.error('MetaApiError', {
+          status: error.status,
+          fb,
+          usage: error.usage,
+          pageId,
+          userId,
+        });
+        const status =
+          error.status >= 400 && error.status < 500
+            ? error.status
+            : error.status === 429
+              ? 429
+              : error.status >= 500
+                ? 502
+                : 500;
+        return json(
+          {
+            error: 'Meta API error',
+            meta: {
+              status: error.status,
+              error: fb
+                ? {
+                    message: fb.message,
+                    type: fb.type,
+                    code: fb.code,
+                    error_subcode: fb.error_subcode,
+                    fbtrace_id: fb.fbtrace_id,
+                  }
+                : undefined,
+              usage: error.usage,
+            },
+          },
+          { status },
+        );
+      }
       const norm = normalizeUnknownError(error);
       console.error('Meta page token failed', { userId, pageId, ...norm });
-
       return json(
         { error: 'Meta page token failed', details: norm },
         { status: 500 },
