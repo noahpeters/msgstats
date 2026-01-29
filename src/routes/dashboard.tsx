@@ -645,6 +645,7 @@ export default function Dashboard(): React.ReactElement {
               const run = asset.run;
               const isSyncing =
                 run?.status === 'queued' || run?.status === 'running';
+              const isFailed = run?.status === 'failed';
               return (
                 <div key={asset.key} style={assetTileStyle}>
                   <h3 style={assetHeadingStyle}>{asset.name}</h3>
@@ -662,18 +663,28 @@ export default function Dashboard(): React.ReactElement {
                       {run?.conversations ?? 0}
                     </div>
                   ) : (
-                    <div style={assetFooterStyle}>
-                      <span {...stylex.props(layout.note)}>
-                        Last update: {formatRelativeTime(asset.lastSyncedAt)}
-                      </span>
-                      <button
-                        {...stylex.props(layout.ghostButton)}
-                        style={updateButtonStyle}
-                        onClick={asset.onSync}
-                      >
-                        Update
-                      </button>
-                    </div>
+                    <>
+                      {isFailed ? (
+                        <div {...stylex.props(layout.note)}>
+                          <span style={{ color: colors.coral }}>
+                            Last sync failed
+                          </span>
+                          {run?.lastError ? `: ${run.lastError}` : null}
+                        </div>
+                      ) : null}
+                      <div style={assetFooterStyle}>
+                        <span {...stylex.props(layout.note)}>
+                          Last update: {formatRelativeTime(asset.lastSyncedAt)}
+                        </span>
+                        <button
+                          {...stylex.props(layout.ghostButton)}
+                          style={updateButtonStyle}
+                          onClick={asset.onSync}
+                        >
+                          Update
+                        </button>
+                      </div>
+                    </>
                   )}
                 </div>
               );

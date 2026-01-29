@@ -33,6 +33,7 @@ type Env = {
   META_REDIRECT_URI: string;
   META_API_VERSION?: string;
   META_SCOPES?: string;
+  EARLIEST_MESSAGES_AT?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
 };
@@ -45,6 +46,7 @@ type SyncJob = {
   runId: string;
   cursor?: string | null;
   newestUpdated?: string | null;
+  attempt?: number;
 };
 
 type RouteHandler = (
@@ -80,7 +82,12 @@ async function readJson<T>(req: Request): Promise<T | null> {
   }
   try {
     return (await req.json()) as T;
-  } catch {
+  } catch (error) {
+    console.warn('Failed to parse JSON body', {
+      method: req.method,
+      url: req.url,
+      error: error instanceof Error ? error.message : error,
+    });
     return null;
   }
 }
@@ -102,6 +109,48 @@ function getApiVersion(env: Env) {
 function parseDate(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? null : date;
+}
+
+function parseEnvDate(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) {
+      return null;
+    }
+    const asMs = numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+    return parseDate(new Date(asMs).toISOString());
+  }
+  return parseDate(trimmed);
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Unknown error';
+  }
+}
+
+function isNetworkError(error: unknown) {
+  const message = errorMessage(error).toLowerCase();
+  return (
+    message.includes('network') ||
+    message.includes('connection') ||
+    message.includes('fetch')
+  );
 }
 
 async function requireSession(req: Request, env: Env) {
@@ -504,7 +553,13 @@ async function runSync(options: {
     platform,
     igBusinessId: igId ?? null,
   });
-  const since = state?.lastSyncedAt ?? null;
+  const stateDate = state?.lastSyncedAt ? parseDate(state.lastSyncedAt) : null;
+  const earliestDate = parseEnvDate(env.EARLIEST_MESSAGES_AT);
+  const sinceDate =
+    stateDate && earliestDate
+      ? new Date(Math.max(stateDate.getTime(), earliestDate.getTime()))
+      : stateDate ?? earliestDate;
+  const since = sinceDate ? sinceDate.toISOString() : null;
   const pageResult: {
     conversations: MetaConversation[];
     nextCursor: string | null;
@@ -1085,6 +1140,10 @@ addRoute(
         version: getApiVersion(env),
       });
     } catch (error) {
+      console.error('Failed to fetch Instagram assets', {
+        pageId,
+        error: error instanceof Error ? error.message : error,
+      });
       const message = error instanceof Error ? error.message : '';
       if (message.includes('Page Access Token')) {
         const token = await getUserToken(env, userId);
@@ -1461,7 +1520,16 @@ export default {
       }
       const match = route.pattern.exec({ pathname });
       if (match) {
-        return await route.handler(req, env, ctx, match.pathname.groups);
+        try {
+          return await route.handler(req, env, ctx, match.pathname.groups);
+        } catch (error) {
+          console.error('Unhandled route error', {
+            method,
+            pathname,
+            error: error instanceof Error ? error.message : error,
+          });
+          return json({ error: 'Internal server error' }, { status: 500 });
+        }
       }
     }
     return json({ error: 'Not found' }, { status: 404 });
@@ -1482,11 +1550,38 @@ export default {
           newestUpdated,
         });
       } catch (error) {
-        console.error(error);
+        const attempt = message.body.attempt ?? 0;
+        const messageText = errorMessage(error);
+        console.error('Sync job failed', {
+          pageId,
+          platform,
+          igId,
+          runId,
+          attempt,
+          error: messageText,
+        });
+        if (isNetworkError(error) && attempt < 3) {
+          await updateSyncRun(env, {
+            id: runId,
+            status: 'queued',
+            lastError: messageText,
+          });
+          await env.SYNC_QUEUE.send({
+            userId,
+            pageId,
+            platform,
+            igId,
+            runId,
+            cursor,
+            newestUpdated,
+            attempt: attempt + 1,
+          });
+          continue;
+        }
         await updateSyncRun(env, {
           id: runId,
           status: 'failed',
-          lastError: error instanceof Error ? error.message : 'Sync failed',
+          lastError: messageText || 'Sync failed',
           finishedAt: new Date().toISOString(),
         });
       }
