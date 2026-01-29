@@ -56,6 +56,29 @@ type RouteHandler = (
   params: Record<string, string>,
 ) => Promise<Response> | Response;
 
+class MetaApiError extends Error {
+  status: number;
+  fb?: any;
+  usage?: Record<string, string>;
+  constructor(message: string, opts: { status: number; fb?: any; usage?: Record<string, string> }) {
+    super(message);
+    this.name = "MetaApiError";
+    this.status = opts.status;
+    this.fb = opts.fb;
+    this.usage = opts.usage;
+  }
+}
+
+// function pickUsage(headers: Headers) {
+//   const keys = ["x-app-usage", "x-page-usage", "x-business-use-case-usage", "retry-after"];
+//   const out: Record<string, string> = {};
+//   for (const k of keys) {
+//     const v = headers.get(k);
+//     if (v) out[k] = v;
+//   }
+//   return out;
+// }
+
 const routes: Array<{
   method: string;
   pattern: URLPattern;
@@ -1104,15 +1127,40 @@ addRoute(
       });
       return json({ id: page.id, name: resolvedName });
     } catch (error) {
-      console.error(error);
-      return json(
-        {
-          error:
-            error instanceof Error ? error.message : 'Meta page token failed',
+      // Always log structured, never tokens
+  if (error instanceof MetaApiError) {
+    console.error("MetaApiError", {
+      status: error.status,
+      fb: error.fb,
+      usage: error.usage,
+      pageId,
+      userId,
+    });
+
+    return json(
+      {
+        error: "Meta API error",
+        meta: {
+          status: error.status,
+          fb: error.fb?.error
+            ? {
+                message: error.fb.error.message,
+                type: error.fb.error.type,
+                code: error.fb.error.code,
+                error_subcode: error.fb.error.error_subcode,
+                fbtrace_id: error.fb.error.fbtrace_id,
+              }
+            : undefined,
+          usage: error.usage,
         },
-        { status: 502 },
-      );
-    }
+      },
+      { status: error.status >= 400 && error.status <= 599 ? error.status : 502 },
+    );
+  }
+
+  console.error("Unhandled error", { pageId, userId, error });
+  return json({ error: "Meta page token failed" }, { status: 500 });
+}
   },
 );
 
