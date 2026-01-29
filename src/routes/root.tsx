@@ -11,6 +11,25 @@ const activeLink = stylex.create({
   },
 });
 
+const footerStyles = stylex.create({
+  footer: {
+    marginTop: '32px',
+    paddingTop: '16px',
+    borderTop: '1px solid rgba(12, 27, 26, 0.08)',
+    display: 'flex',
+    gap: '16px',
+    flexWrap: 'wrap',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontSize: '14px',
+    color: '#284b63',
+  },
+  footerLink: {
+    textDecoration: 'none',
+    color: '#0f766e',
+    fontWeight: 600,
+  },
+});
+
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
 
@@ -43,6 +62,14 @@ export default function RootRoute(): React.ReactElement {
           </Link>
         </nav>
         <Outlet />
+        <footer {...stylex.props(footerStyles.footer)}>
+          <Link to="/terms" {...stylex.props(footerStyles.footerLink)}>
+            Terms of Service
+          </Link>
+          <Link to="/privacy" {...stylex.props(footerStyles.footerLink)}>
+            Privacy Policy
+          </Link>
+        </footer>
       </div>
     </div>
   );
