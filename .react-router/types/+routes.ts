@@ -17,6 +17,12 @@ type Pages = {
   "/reports": {
     params: {};
   };
+  "/terms": {
+    params: {};
+  };
+  "/privacy": {
+    params: {};
+  };
   "/*": {
     params: {
       "*": string;
@@ -27,11 +33,11 @@ type Pages = {
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/reports" | "/*";
+    page: "/" | "/reports" | "/terms" | "/privacy" | "/*";
   };
   "routes/root.tsx": {
     id: "routes/root";
-    page: "/" | "/reports" | "/*";
+    page: "/" | "/reports" | "/terms" | "/privacy" | "/*";
   };
   "routes/dashboard.tsx": {
     id: "routes/dashboard";
@@ -40,6 +46,14 @@ type RouteFiles = {
   "routes/reports.tsx": {
     id: "routes/reports";
     page: "/reports";
+  };
+  "routes/terms.tsx": {
+    id: "routes/terms";
+    page: "/terms";
+  };
+  "routes/privacy.tsx": {
+    id: "routes/privacy";
+    page: "/privacy";
   };
   "routes/not-found.tsx": {
     id: "routes/not-found";
@@ -52,5 +66,7 @@ type RouteModules = {
   "routes/root": typeof import("./src/routes/root.tsx");
   "routes/dashboard": typeof import("./src/routes/dashboard.tsx");
   "routes/reports": typeof import("./src/routes/reports.tsx");
+  "routes/terms": typeof import("./src/routes/terms.tsx");
+  "routes/privacy": typeof import("./src/routes/privacy.tsx");
   "routes/not-found": typeof import("./src/routes/not-found.tsx");
 };
