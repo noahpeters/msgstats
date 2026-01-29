@@ -58,16 +58,29 @@ type RouteHandler = (
 
 class MetaApiError extends Error {
   status: number;
-  fb?: any;
+  fb?: unknown;
   usage?: Record<string, string>;
-  constructor(message: string, opts: { status: number; fb?: any; usage?: Record<string, string> }) {
+  constructor(
+    message: string,
+    opts: { status: number; fb?: unknown; usage?: Record<string, string> },
+  ) {
     super(message);
-    this.name = "MetaApiError";
+    this.name = 'MetaApiError';
     this.status = opts.status;
     this.fb = opts.fb;
     this.usage = opts.usage;
   }
 }
+
+type MetaFbErrorPayload = {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: number;
+    error_subcode?: number;
+    fbtrace_id?: string;
+  };
+};
 
 // function pickUsage(headers: Headers) {
 //   const keys = ["x-app-usage", "x-page-usage", "x-business-use-case-usage", "retry-after"];
@@ -1128,39 +1141,43 @@ addRoute(
       return json({ id: page.id, name: resolvedName });
     } catch (error) {
       // Always log structured, never tokens
-  if (error instanceof MetaApiError) {
-    console.error("MetaApiError", {
-      status: error.status,
-      fb: error.fb,
-      usage: error.usage,
-      pageId,
-      userId,
-    });
-
-    return json(
-      {
-        error: "Meta API error",
-        meta: {
+      if (error instanceof MetaApiError) {
+        const fb = error.fb as MetaFbErrorPayload | undefined;
+        console.error('MetaApiError', {
           status: error.status,
-          fb: error.fb?.error
-            ? {
-                message: error.fb.error.message,
-                type: error.fb.error.type,
-                code: error.fb.error.code,
-                error_subcode: error.fb.error.error_subcode,
-                fbtrace_id: error.fb.error.fbtrace_id,
-              }
-            : undefined,
+          fb,
           usage: error.usage,
-        },
-      },
-      { status: error.status >= 400 && error.status <= 599 ? error.status : 502 },
-    );
-  }
+          pageId,
+          userId,
+        });
 
-  console.error("Unhandled error", { pageId, userId, error });
-  return json({ error: "Meta page token failed" }, { status: 500 });
-}
+        return json(
+          {
+            error: 'Meta API error',
+            meta: {
+              status: error.status,
+              fb: fb?.error
+                ? {
+                    message: fb.error.message,
+                    type: fb.error.type,
+                    code: fb.error.code,
+                    error_subcode: fb.error.error_subcode,
+                    fbtrace_id: fb.error.fbtrace_id,
+                  }
+                : undefined,
+              usage: error.usage,
+            },
+          },
+          {
+            status:
+              error.status >= 400 && error.status <= 599 ? error.status : 502,
+          },
+        );
+      }
+
+      console.error('Unhandled error', { pageId, userId, error });
+      return json({ error: 'Meta page token failed' }, { status: 500 });
+    }
   },
 );
 
