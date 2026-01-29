@@ -469,14 +469,15 @@ export default function Dashboard(): React.ReactElement {
   const enabledPages = new Map(
     assets?.pages.map((page) => [page.id, page]) ?? [],
   );
-  const businessPageIds = new Set(
-    businesses.flatMap((business) =>
-      (businessPages[business.id] ?? []).map((page) => page.id),
-    ),
-  );
-  const filteredClassicPages = classicPages.filter(
-    (page) => !businessPageIds.has(page.id),
-  );
+  // const businessPageIds = new Set(
+  //   businesses.flatMap((business) =>
+  //     (businessPages[business.id] ?? []).map((page) => page.id),
+  //   ),
+  // );
+  // const filteredClassicPages = classicPages.filter(
+  //   (page) => !businessPageIds.has(page.id),
+  // );
+  const filteredClassicPages = classicPages;
   const runByAsset = new Map<string, SyncRun>();
   for (const run of syncRuns) {
     const key =
@@ -607,29 +608,27 @@ export default function Dashboard(): React.ReactElement {
         ))}
       </section>
 
-      {filteredClassicPages.length ? (
-        <section {...stylex.props(layout.card)}>
-          <h2>Classic Pages</h2>
-          <p {...stylex.props(layout.note)}>
-            Pages discovered via /me/accounts (fallback for non-business pages).
-          </p>
-          <ul>
-            {filteredClassicPages.map((page) => (
-              <li key={page.id}>
-                {page.name}{' '}
-                <span style={{ color: colors.slate }}>({page.id})</span>
-                <button
-                  {...stylex.props(layout.ghostButton)}
-                  style={{ marginLeft: '8px' }}
-                  onClick={() => handleEnablePage(page.id, page.name)}
-                >
-                  Enable page
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      <section {...stylex.props(layout.card)}>
+        <h2>Classic Pages</h2>
+        <p {...stylex.props(layout.note)}>
+          Pages discovered via /me/accounts (fallback for non-business pages).
+        </p>
+        <ul>
+          {filteredClassicPages.map((page) => (
+            <li key={page.id}>
+              {page.name}{' '}
+              <span style={{ color: colors.slate }}>({page.id})</span>
+              <button
+                {...stylex.props(layout.ghostButton)}
+                style={{ marginLeft: '8px' }}
+                onClick={() => handleEnablePage(page.id, page.name)}
+              >
+                Enable page
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
 
       <section {...stylex.props(layout.card)}>
         <h2>Enabled assets</h2>

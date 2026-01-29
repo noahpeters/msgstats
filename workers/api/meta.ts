@@ -3,6 +3,7 @@ type GraphError = {
   type: string;
   code: number;
   error_subcode?: number;
+  fbtrace_id?: string;
 };
 
 type GraphResponse<T> = {
@@ -25,6 +26,24 @@ const defaultRetry: RetryOptions = {
   minDelayMs: 400,
   maxDelayMs: 4000,
 };
+
+type MetaUsage = Record<string, string>;
+
+export class MetaApiError extends Error {
+  status: number;
+  meta?: unknown;
+  usage?: MetaUsage;
+  constructor(
+    message: string,
+    opts: { status: number; meta?: unknown; usage?: MetaUsage },
+  ) {
+    super(message);
+    this.name = 'MetaApiError';
+    this.status = opts.status;
+    this.meta = opts.meta;
+    this.usage = opts.usage;
+  }
+}
 
 export const metaConfig = {
   baseUrl: 'https://graph.facebook.com',
@@ -100,6 +119,41 @@ function logRateLimitUsage(response: Response, context: string) {
   });
 }
 
+function pickUsage(headers: Headers): MetaUsage | undefined {
+  const keys = [
+    'x-app-usage',
+    'x-page-usage',
+    'x-business-use-case-usage',
+    'retry-after',
+  ];
+  const usage: MetaUsage = {};
+  for (const key of keys) {
+    const value = headers.get(key);
+    if (value) {
+      usage[key] = value;
+    }
+  }
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function parseJsonSafe<T>(input: string): { parsed?: T; raw: string } {
+  try {
+    return { parsed: JSON.parse(input) as T, raw: input };
+  } catch {
+    return { raw: input };
+  }
+}
+
+function shouldRetryMetaError(status: number, error?: GraphError) {
+  if (status >= 500 || status === 429) {
+    return true;
+  }
+  if (error?.code === 4 || error?.code === 17) {
+    return true;
+  }
+  return false;
+}
+
 async function fetchWithRetry(
   input: string,
   init?: RequestInit,
@@ -138,24 +192,121 @@ async function fetchWithRetry(
   throw lastError ?? new Error('Request failed');
 }
 
+async function fetchMetaJson<T>(url: string, init?: RequestInit) {
+  const response = await fetch(url, init);
+  const text = await response.text();
+  const { parsed } = parseJsonSafe<T>(text);
+  return { response, raw: text, parsed };
+}
+
 async function fetchForToken<T>(url: string, init?: RequestInit) {
-  const response = await fetchWithRetry(url, init);
-  const payload = (await response.json()) as T;
-  if (!response.ok) {
-    logRateLimitUsage(response, 'fetchForToken');
-    throw new Error('Meta API error');
+  let attempt = 0;
+  let lastError: MetaApiError | undefined;
+  while (attempt <= defaultRetry.retries) {
+    try {
+      const { response, parsed, raw } = await fetchMetaJson<T>(url, init);
+      if (response.ok) {
+        if (parsed !== undefined) {
+          return parsed;
+        }
+        throw new MetaApiError('Meta API error', {
+          status: response.status,
+          meta: raw,
+          usage: pickUsage(response.headers),
+        });
+      }
+      const usage = pickUsage(response.headers);
+      logRateLimitUsage(response, 'fetchForToken');
+      const meta = parsed ?? raw;
+      const graphError = (parsed as GraphResponse<unknown> | undefined)?.error;
+      if (
+        attempt < defaultRetry.retries &&
+        shouldRetryMetaError(response.status, graphError)
+      ) {
+        attempt += 1;
+        const delay = Math.min(
+          defaultRetry.maxDelayMs,
+          defaultRetry.minDelayMs * 2 ** (attempt - 1),
+        );
+        await sleep(delay);
+        continue;
+      }
+      throw new MetaApiError('Meta API error', {
+        status: response.status,
+        meta,
+        usage,
+      });
+    } catch (error) {
+      if (error instanceof MetaApiError) {
+        lastError = error;
+        break;
+      }
+      if (attempt >= defaultRetry.retries) {
+        throw error;
+      }
+      attempt += 1;
+      const delay = Math.min(
+        defaultRetry.maxDelayMs,
+        defaultRetry.minDelayMs * 2 ** (attempt - 1),
+      );
+      await sleep(delay);
+    }
   }
-  return payload;
+  throw lastError ?? new MetaApiError('Meta API error', { status: 500 });
 }
 
 async function fetchGraph<T>(url: string, init?: RequestInit) {
-  const response = await fetchWithRetry(url, init);
-  const payload = (await response.json()) as GraphResponse<T>;
-  if (!response.ok || payload.error) {
-    logRateLimitUsage(response, 'fetchGraph');
-    throw new Error(payload.error?.message ?? 'Meta API error');
+  let attempt = 0;
+  let lastError: MetaApiError | undefined;
+  while (attempt <= defaultRetry.retries) {
+    try {
+      const { response, parsed, raw } = await fetchMetaJson<GraphResponse<T>>(
+        url,
+        init,
+      );
+      const payload = parsed;
+      if (response.ok && payload && !payload.error) {
+        return payload;
+      }
+      const usage = pickUsage(response.headers);
+      logRateLimitUsage(response, 'fetchGraph');
+      const graphError = payload?.error;
+      const meta = payload ?? raw;
+      const status = response.status || (payload?.error ? 400 : 500);
+      if (
+        attempt < defaultRetry.retries &&
+        shouldRetryMetaError(status, graphError)
+      ) {
+        attempt += 1;
+        const delay = Math.min(
+          defaultRetry.maxDelayMs,
+          defaultRetry.minDelayMs * 2 ** (attempt - 1),
+        );
+        await sleep(delay);
+        continue;
+      }
+      throw new MetaApiError(graphError?.message ?? 'Meta API error', {
+        status,
+        meta,
+        usage,
+      });
+    } catch (error) {
+      if (error instanceof MetaApiError) {
+        lastError = error;
+        break;
+      }
+      if (attempt >= defaultRetry.retries) {
+        throw error;
+      }
+      attempt += 1;
+      const delay = Math.min(
+        defaultRetry.maxDelayMs,
+        defaultRetry.minDelayMs * 2 ** (attempt - 1),
+      );
+      await sleep(delay);
+    }
   }
-  return payload;
+  throw lastError ?? new MetaApiError('Meta API error', { status: 500 });
 }
 
 async function paginateList<T>(firstUrl: string) {
