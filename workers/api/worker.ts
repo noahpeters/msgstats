@@ -56,32 +56,6 @@ type RouteHandler = (
   params: Record<string, string>,
 ) => Promise<Response> | Response;
 
-class MetaApiError extends Error {
-  status: number;
-  fb?: unknown;
-  usage?: Record<string, string>;
-  constructor(
-    message: string,
-    opts: { status: number; fb?: unknown; usage?: Record<string, string> },
-  ) {
-    super(message);
-    this.name = 'MetaApiError';
-    this.status = opts.status;
-    this.fb = opts.fb;
-    this.usage = opts.usage;
-  }
-}
-
-type MetaFbErrorPayload = {
-  error?: {
-    message?: string;
-    type?: string;
-    code?: number;
-    error_subcode?: number;
-    fbtrace_id?: string;
-  };
-};
-
 // function pickUsage(headers: Headers) {
 //   const keys = ["x-app-usage", "x-page-usage", "x-business-use-case-usage", "retry-after"];
 //   const out: Record<string, string> = {};
@@ -91,6 +65,55 @@ type MetaFbErrorPayload = {
 //   }
 //   return out;
 // }
+
+function normalizeUnknownError(err: unknown): {
+  name?: string;
+  message: string;
+  stack?: string;
+  rawType: string;
+  extra?: Record<string, unknown>;
+} {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      rawType: 'Error',
+    };
+  }
+
+  // Response thrown?
+  if (typeof err === 'object' && err && 'status' in err && 'headers' in err) {
+    // likely a Response
+    const responseLike = err as { status?: unknown; headers?: unknown };
+    const status =
+      typeof responseLike.status === 'number' ? responseLike.status : undefined;
+    return {
+      message: 'Non-Error thrown (Response-like)',
+      rawType: 'ResponseLike',
+      extra: {
+        status,
+        // don’t try to serialize headers directly; extract interesting ones
+      },
+    };
+  }
+
+  // Plain object
+  if (typeof err === 'object' && err) {
+    return {
+      message: 'Non-Error thrown (object)',
+      rawType: 'Object',
+      extra: Object.fromEntries(
+        Object.entries(err as Record<string, unknown>).slice(0, 50),
+      ),
+    };
+  }
+
+  return {
+    message: String(err),
+    rawType: typeof err,
+  };
+}
 
 const routes: Array<{
   method: string;
@@ -1141,42 +1164,46 @@ addRoute(
       return json({ id: page.id, name: resolvedName });
     } catch (error) {
       // Always log structured, never tokens
-      if (error instanceof MetaApiError) {
-        const fb = error.fb as MetaFbErrorPayload | undefined;
-        console.error('MetaApiError', {
-          status: error.status,
-          fb,
-          usage: error.usage,
-          pageId,
-          userId,
-        });
+      // if (error instanceof MetaApiError) {
+      //   const fb = error.fb as MetaFbErrorPayload | undefined;
+      //   console.error('MetaApiError', {
+      //     status: error.status,
+      //     fb,
+      //     usage: error.usage,
+      //     pageId,
+      //     userId,
+      //   });
 
-        return json(
-          {
-            error: 'Meta API error',
-            meta: {
-              status: error.status,
-              fb: fb?.error
-                ? {
-                    message: fb.error.message,
-                    type: fb.error.type,
-                    code: fb.error.code,
-                    error_subcode: fb.error.error_subcode,
-                    fbtrace_id: fb.error.fbtrace_id,
-                  }
-                : undefined,
-              usage: error.usage,
-            },
-          },
-          {
-            status:
-              error.status >= 400 && error.status <= 599 ? error.status : 502,
-          },
-        );
-      }
+      //   return json(
+      //     {
+      //       error: 'Meta API error',
+      //       meta: {
+      //         status: error.status,
+      //         fb: fb?.error
+      //           ? {
+      //               message: fb.error.message,
+      //               type: fb.error.type,
+      //               code: fb.error.code,
+      //               error_subcode: fb.error.error_subcode,
+      //               fbtrace_id: fb.error.fbtrace_id,
+      //             }
+      //           : undefined,
+      //         usage: error.usage,
+      //       },
+      //     },
+      //     {
+      //       status:
+      //         error.status >= 400 && error.status <= 599 ? error.status : 502,
+      //     },
+      //   );
+      // }
+      const norm = normalizeUnknownError(error);
+      console.error('Meta page token failed', { userId, pageId, ...norm });
 
-      console.error('Unhandled error', { pageId, userId, error });
-      return json({ error: 'Meta page token failed' }, { status: 500 });
+      return json(
+        { error: 'Meta page token failed', details: norm },
+        { status: 500 },
+      );
     }
   },
 );
