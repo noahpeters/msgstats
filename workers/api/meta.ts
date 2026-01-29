@@ -61,6 +61,13 @@ function withVersion(path: string, version: string) {
   return `${metaConfig.baseUrl}/${version}${path}`;
 }
 
+function redactURL(url: string) {
+  return url.replace(
+    /([&?])access_token=([^&]*)/g,
+    '$1access_token=<redacted>',
+  );
+}
+
 function buildUrl(
   path: string,
   version: string,
@@ -102,12 +109,20 @@ async function fetchWithRetry(
   let lastError: unknown;
   while (attempt <= retry.retries) {
     try {
+      console.info('Meta fetch request: %s', redactURL(input));
       const response = await fetch(input, init);
       if (response.status >= 500 || response.status === 429) {
         throw new Error(`Transient error: ${response.status}`);
       }
       return response;
     } catch (err) {
+      console.error('Meta API request failed', {
+        url: input,
+        method: init?.method ?? 'GET',
+        attempt: attempt + 1,
+        maxAttempts: retry.retries + 1,
+        error: err instanceof Error ? err.message : err,
+      });
       lastError = err;
       attempt += 1;
       if (attempt > retry.retries) {
@@ -276,7 +291,11 @@ export async function fetchBusinessPages(options: {
     if (owned.length) {
       return { source: 'owned_pages' as const, pages: owned };
     }
-  } catch {
+  } catch (error) {
+    console.warn('Failed to fetch owned pages', {
+      businessId: options.businessId,
+      error: error instanceof Error ? error.message : error,
+    });
     // fall through to client_pages
   }
   const clientUrl = buildUrl(
