@@ -19,7 +19,10 @@ type ReportRow = {
   price_given: number;
   low_response_after_price: number;
   qualified_rate: number;
+  histogram: Record<number, number>;
 };
+
+const HISTOGRAM_MAX_BUCKET = 30;
 
 function parseDate(value: string) {
   const date = new Date(value);
@@ -56,6 +59,13 @@ export function buildReportRows(
   interval: 'weekly' | 'monthly',
   bucket: 'started' | 'last',
 ): ReportRow[] {
+  const emptyHistogram = () => {
+    const histogram: Record<number, number> = {};
+    for (let i = 1; i <= HISTOGRAM_MAX_BUCKET; i += 1) {
+      histogram[i] = 0;
+    }
+    return histogram;
+  };
   const buckets = new Map<
     string,
     {
@@ -64,6 +74,7 @@ export function buildReportRows(
       highly: number;
       priceGiven: number;
       lowResponseAfterPrice: number;
+      histogram: Record<number, number>;
     }
   >();
   for (const row of rows) {
@@ -83,6 +94,7 @@ export function buildReportRows(
       highly: 0,
       priceGiven: 0,
       lowResponseAfterPrice: 0,
+      histogram: emptyHistogram(),
     };
     bucketStats.total += 1;
     const tier = classifyTier(row.customerCount, row.businessCount);
@@ -97,6 +109,14 @@ export function buildReportRows(
     }
     if (row.lowResponseAfterPrice) {
       bucketStats.lowResponseAfterPrice += 1;
+    }
+    const messageCount = row.customerCount + row.businessCount;
+    if (messageCount > 0) {
+      const bucketIndex =
+        messageCount >= HISTOGRAM_MAX_BUCKET
+          ? HISTOGRAM_MAX_BUCKET
+          : messageCount;
+      bucketStats.histogram[bucketIndex] += 1;
     }
     buckets.set(key, bucketStats);
   }
@@ -113,6 +133,7 @@ export function buildReportRows(
     qualified_rate: stats.total
       ? (stats.productive + stats.highly) / stats.total
       : 0,
+    histogram: stats.histogram,
   }));
 }
 
