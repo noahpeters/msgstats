@@ -155,7 +155,7 @@ async function readJson<T>(req: Request): Promise<T | null> {
 function getMetaScopes(env: Env) {
   return (
     env.META_SCOPES ??
-    'pages_show_list,pages_manage_metadata,business_management,pages_messaging,instagram_basic,instagram_manage_messages'
+    'pages_show_list,pages_manage_metadata,business_management,pages_messaging,instagram_basic,instagram_manage_messages,pages_read_engagement'
   )
     .split(',')
     .map((scope) => scope.trim())
