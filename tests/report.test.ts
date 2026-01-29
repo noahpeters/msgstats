@@ -53,6 +53,10 @@ describe('report helpers', () => {
     expect(weekly[0]?.highly_productive).toBe(1);
     expect(weekly[0]?.price_given).toBe(1);
     expect(weekly[0]?.low_response_after_price).toBe(1);
+    expect(Object.keys(weekly[0]?.histogram ?? {})).toHaveLength(30);
+    expect(weekly[0]?.histogram[6]).toBe(1);
+    expect(weekly[0]?.histogram[10]).toBe(1);
+    expect(weekly[0]?.histogram[30]).toBe(0);
   });
 
   it('can bucket by last message date', () => {

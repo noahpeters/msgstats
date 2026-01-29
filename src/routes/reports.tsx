@@ -1,6 +1,7 @@
 import * as React from 'react';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
+import Histogram from './Histogram';
 
 type ReportRow = {
   periodStart: string;
@@ -10,6 +11,7 @@ type ReportRow = {
   price_given: number;
   low_response_after_price: number;
   qualified_rate: number;
+  histogram: Record<number, number>;
 };
 
 type PageAsset = {
@@ -43,7 +45,21 @@ async function fetchReport(
   return payload.data ?? [];
 }
 
+function computeMaxY(rows: ReportRow[]): number {
+  let maxY = 0;
+  for (const row of rows) {
+    for (const count of Object.values(row.histogram)) {
+      if (count > maxY) {
+        maxY = count;
+      }
+    }
+  }
+  return maxY;
+}
+
 function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
+  const maxY = React.useMemo(() => computeMaxY(rows), [rows]);
+
   return (
     <section {...stylex.props(layout.card)}>
       <h2>{title}</h2>
@@ -66,6 +82,7 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
               Low response after price
             </th>
             <th {...stylex.props(layout.tableHead)}>Qualified rate</th>
+            <th {...stylex.props(layout.tableHead)}>Distribution</th>
           </tr>
         </thead>
         <tbody>
@@ -83,6 +100,9 @@ function ReportTable({ title, rows }: { title: string; rows: ReportRow[] }) {
               </td>
               <td {...stylex.props(layout.tableCell)}>
                 {(row.qualified_rate * 100).toFixed(1)}%
+              </td>
+              <td {...stylex.props(layout.tableCell)} style={{ width: 89 }}>
+                <Histogram histogram={row.histogram} maxY={maxY} height={24} />
               </td>
             </tr>
           ))}
