@@ -9,6 +9,32 @@ if (process.env.SKIP_REMOTE_MIGRATIONS_CHECK === '1') {
   process.exit(0);
 }
 
+const args = process.argv.slice(2);
+const envIndex = args.indexOf('--env');
+const envValue = envIndex >= 0 ? args[envIndex + 1] : 'production';
+
+const configByEnv = {
+  staging: {
+    db: 'msgstats-db-staging',
+    config: 'wrangler.api.staging.toml',
+    label: 'staging',
+    applyScript: 'db:migrations:staging',
+  },
+  production: {
+    db: 'msgstats-db',
+    config: 'wrangler.api.toml',
+    label: 'production',
+    applyScript: 'db:migrations:remote',
+  },
+};
+
+const target = configByEnv[envValue];
+if (!target) {
+  console.error('Unknown env for remote migrations check.');
+  console.error('Use --env staging or --env production.');
+  process.exit(1);
+}
+
 const root = process.cwd();
 const migrationsDir = path.join(root, 'migrations');
 const localFiles = fs
@@ -19,12 +45,12 @@ const localFiles = fs
 let remoteListRaw = '';
 try {
   remoteListRaw = execSync(
-    'npx wrangler d1 migrations list msgstats-db --remote --config wrangler.api.toml',
+    `npx wrangler d1 migrations list ${target.db} --remote --config ${target.config}`,
     { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 } catch (error) {
   console.error(
-    'Failed to list remote migrations. Ensure Wrangler auth is set.',
+    `Failed to list ${target.label} migrations. Ensure Wrangler auth is set.`,
   );
   if (error instanceof Error) {
     console.error(error.message);
@@ -34,7 +60,9 @@ try {
 
 const normalizedOutput = remoteListRaw.toLowerCase();
 if (normalizedOutput.includes('no migrations to apply')) {
-  console.log('Remote migrations check passed (no migrations to apply).');
+  console.log(
+    `${target.label} migrations check passed (no migrations to apply).`,
+  );
   process.exit(0);
 }
 
@@ -50,7 +78,7 @@ const remoteFiles = remoteListRaw
 
 if (remoteFiles.length === 0) {
   console.error(
-    'Failed to parse remote migrations list output. ' +
+    `Failed to parse ${target.label} migrations list output. ` +
       'If this is running in an environment without Wrangler auth, set SKIP_REMOTE_MIGRATIONS_CHECK=1.',
   );
   process.exit(1);
@@ -59,11 +87,11 @@ if (remoteFiles.length === 0) {
 const missing = localFiles.filter((name) => !remoteFiles.includes(name));
 if (missing.length > 0) {
   console.error(
-    'Remote database is missing migrations:\n' +
+    `${target.label} database is missing migrations:\n` +
       missing.map((name) => `- ${name}`).join('\n') +
-      '\nApply with: npm run db:migrations:remote',
+      `\nApply with: npm run ${target.applyScript}`,
   );
   process.exit(1);
 }
 
-console.log('Remote migrations check passed.');
+console.log(`${target.label} migrations check passed.`);

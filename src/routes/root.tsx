@@ -44,15 +44,39 @@ const bannerStyles = stylex.create({
   },
 });
 
+const parseBuildInfo = (raw: string) => {
+  const parts = raw
+    .split(' ')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const [key, ...rest] = segment.split('=');
+      return [key, rest.join('=')];
+    });
+  const map = Object.fromEntries(parts);
+  if (!map.env) return null;
+  return {
+    env: map.env,
+    ref: map.ref ?? 'unknown',
+    sha: map.sha ?? 'unknown',
+    ts: map.ts ?? 'unknown',
+  };
+};
+
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
-  const stagingInfo = import.meta.env.VITE_STAGING_INFO;
+  const buildInfoRaw = import.meta.env.VITE_STAGING_INFO;
+  const buildInfo = buildInfoRaw ? parseBuildInfo(buildInfoRaw) : null;
+  const showBanner = buildInfo && buildInfo.env !== 'prod';
 
   return (
     <div {...stylex.props(layout.page)}>
       <div {...stylex.props(layout.shell)}>
-        {stagingInfo ? (
-          <div {...stylex.props(bannerStyles.banner)}>{stagingInfo}</div>
+        {showBanner ? (
+          <div {...stylex.props(bannerStyles.banner)}>
+            Environment: {buildInfo.env} · ref {buildInfo.ref} · sha{' '}
+            {buildInfo.sha} · ts {buildInfo.ts}
+          </div>
         ) : null}
         <div {...stylex.props(layout.badge)}>Messaging insights</div>
         <h1 {...stylex.props(layout.title)}>msgstats</h1>
