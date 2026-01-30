@@ -9,13 +9,5 @@ const branch = execSync('git rev-parse --abbrev-ref HEAD', {
 }).trim();
 
 run('npm run verify');
-run('npm run check:remote-migrations');
-
-const isFeatureBranch =
-  branch.startsWith('feature/') || branch.startsWith('feat/');
-
-if (isFeatureBranch) {
-  run('npm run check:staging-migrations');
-} else {
-  console.log(`Skipping staging migrations check for branch "${branch}".`);
-}
+run('npm run check:remote-migrations:staging');
+run('npm run check:remote-migrations:prod');

@@ -55,17 +55,27 @@ npm run deploy:api
 npm run deploy:web
 ```
 
-## Staging
+## CI & deployments
 
-- Apply staging migrations:
-  ```bash
-  npm run db:migrations:staging
-  ```
-- Staging deploys automatically on pushes to `feature/*` or `feat/*` via GitHub Actions.
-- Staging pages show a banner with branch/SHA/timestamp from `VITE_STAGING_INFO`.
-- Required GitHub secrets for staging deploys:
+- **CI** runs on PRs and pushes. It includes `npm run verify`, migration edits check, and a staging remote migration guard when Cloudflare secrets are available.
+- **Staging** deploys on push to `main`. It applies staging migrations, deploys API + web, and sets `VITE_STAGING_INFO` for the build banner.
+- **Preview** deploys are manual via GitHub Actions. They deploy a web-only worker pointing at the staging API and set `VITE_STAGING_INFO`.
+- **Production** promotions are manual via GitHub Actions. They apply prod migrations, deploy API + web, and set `VITE_STAGING_INFO` (banner hidden in prod).
+- Required GitHub secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
+
+### Preview deploy
+
+Use the "Deploy Preview" workflow in GitHub Actions.
+
+Inputs:
+
+- `ref`: branch or SHA to deploy (default `main`)
+- `preview_name`: base worker name (default `msgstats-web-preview`)
+- `slot`: optional suffix (e.g. `pr-123` -> `msgstats-web-preview-pr-123`)
+
+The preview worker is web-only and points to the staging API service binding.
 
 ## Scripts
 

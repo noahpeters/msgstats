@@ -1,0 +1,55 @@
+name: Deploy Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or SHA to deploy
+        required: true
+        default: main
+      preview_name:
+        description: Base name for preview worker
+        required: true
+        default: msgstats-web-preview
+      slot:
+        description: Optional slot suffix (e.g. pr-123)
+        required: false
+        default: ''
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Resolve preview name
+        id: preview
+        run: |
+          NAME="${{ inputs.preview_name }}"
+          SLOT="${{ inputs.slot }}"
+          if [ -n "$SLOT" ]; then
+            NAME="${NAME}-${SLOT}"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+      - name: Set build info
+        run: node scripts/set-build-info.mjs --env preview --ref "${{ inputs.ref }}" --sha "$GITHUB_SHA" --out "$GITHUB_ENV" --var VITE_STAGING_INFO
+      - name: Verify
+        run: npm run verify
+      - name: Build web assets
+        run: npm run build
+      - name: Create preview wrangler config
+        run: node scripts/create-preview-config.mjs --name "${{ steps.preview.outputs.name }}" --out "$RUNNER_TEMP/wrangler.preview.toml"
+      - name: Deploy preview web
+        run: npx wrangler deploy --config "$RUNNER_TEMP/wrangler.preview.toml" --var VITE_STAGING_INFO:$VITE_STAGING_INFO
