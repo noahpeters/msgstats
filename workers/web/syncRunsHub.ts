@@ -8,43 +8,57 @@ export class SyncRunsHub {
   }
 
   async fetch(request: Request): Promise<Response> {
+    console.log('[sync-runs-hub] request', {
+      hasWs: Boolean(
+        (request as Request & { webSocket?: WebSocket }).webSocket,
+      ),
+      method: request.method,
+      path: new URL(request.url).pathname,
+    });
     const url = new URL(request.url);
-    const webSocket = (request as unknown as { webSocket?: WebSocket })
-      .webSocket;
-    if (webSocket) {
-      console.log('[sync-runs-hub] connect has ws', true);
-      webSocket.accept();
-      this.sockets.add(webSocket);
+
+    if (url.pathname === '/sync/runs/subscribe') {
+      if (
+        (request.headers.get('Upgrade') ?? '').toLowerCase() !== 'websocket'
+      ) {
+        return new Response('Expected WebSocket', { status: 426 });
+      }
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+
+      server.accept();
+      this.sockets.add(server);
+
       const sendLatest = () => {
         const messages = getLatestMessages(this.latestByKey);
         for (const message of messages) {
           try {
-            webSocket.send(message);
+            server.send(message);
           } catch {
-            this.sockets.delete(webSocket);
+            this.sockets.delete(server);
             break;
           }
         }
       };
+
       sendLatest();
-      webSocket.addEventListener('message', (event) => {
+
+      server.addEventListener('message', (event) => {
         try {
           const payload = JSON.parse(String(event.data)) as { type?: string };
-          if (payload.type === 'request_latest') {
-            sendLatest();
-          }
+          if (payload.type === 'request_latest') sendLatest();
         } catch {
-          // ignore malformed messages
+          // ignore
         }
       });
-      webSocket.addEventListener('close', () => {
-        this.sockets.delete(webSocket);
-      });
-      webSocket.addEventListener('error', () => {
-        this.sockets.delete(webSocket);
-      });
-      // Response must include webSocket for a successful 101 upgrade.
-      return new Response(null, { status: 101, webSocket });
+
+      server.addEventListener('close', () => this.sockets.delete(server));
+      server.addEventListener('error', () => this.sockets.delete(server));
+
+      console.log('[sync-runs-hub] connected', { sockets: this.sockets.size });
+
+      return new Response(null, { status: 101, webSocket: client });
     }
 
     if (url.pathname === '/notify' && request.method === 'POST') {
@@ -52,22 +66,38 @@ export class SyncRunsHub {
         type?: string;
         run?: Record<string, unknown>;
       };
-      const body = JSON.stringify(payload);
       const run = payload.run as
         | { pageId?: string; igBusinessId?: string | null; platform?: string }
         | undefined;
-      if (run) {
-        const key = buildSyncRunKey(run);
-        this.latestByKey.set(key, body);
+      const key = run ? buildSyncRunKey(run) : null;
+      if (!key) {
+        return new Response('Invalid run payload', { status: 400 });
       }
+
+      const message = JSON.stringify({ type: 'run_updated', run });
+      const prior = this.latestByKey.get(key);
+      if (prior === message) {
+        return new Response(null, { status: 204 });
+      }
+
+      this.latestByKey.set(key, message);
       for (const socket of [...this.sockets]) {
         try {
-          socket.send(body);
+          const doName =
+            (this.state as unknown as { id?: { name?: string } }).id?.name ??
+            'unknown';
+
+          console.log('[sync-runs-hub] /notify', {
+            doName,
+            sockets: this.sockets.size,
+            keyCount: this.latestByKey.size,
+          });
+          socket.send(message);
         } catch {
           this.sockets.delete(socket);
         }
       }
-      return new Response('ok');
+      return new Response(null, { status: 204 });
     }
 
     return new Response('Not found', { status: 404 });
@@ -79,8 +109,9 @@ const buildSyncRunKey = (run: {
   igBusinessId?: string | null;
   platform?: string;
 }) => {
-  const ig = run.igBusinessId ?? '∅';
-  return `${run.pageId ?? ''}::${ig}::${run.platform ?? ''}`;
+  if (!run.pageId || !run.platform) return null;
+  const ig = run.igBusinessId ?? 'null';
+  return `${run.pageId}::${ig}::${run.platform}`;
 };
 
 const getLatestMessages = (latestByKey: Map<string, string>) => {

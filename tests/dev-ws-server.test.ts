@@ -289,4 +289,159 @@ describe('dev ws server', () => {
       await server.close();
     }
   });
+
+  it('dedupes identical payloads per key', async () => {
+    const canListen = await canListenOnLoopback();
+    if (!canListen) {
+      console.warn('Skipping dev ws server test: listen not permitted.');
+      return;
+    }
+    const server = createDevWsServer({ port: 0 });
+    const { port } = await server.listen();
+    try {
+      const run = {
+        id: 'r1',
+        pageId: 'p9',
+        platform: 'instagram',
+        igBusinessId: null,
+      };
+      const publish = async () =>
+        fetch(`http://localhost:${port}/publish`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            userId: 'user-6',
+            payload: { type: 'run_updated', run },
+          }),
+        });
+      await publish();
+      await publish();
+
+      const socket = new WebSocket(`ws://localhost:${port}`);
+      await new Promise<void>((resolve) =>
+        socket.once('open', () => resolve()),
+      );
+      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-6' }));
+      const messages = await waitForMessages(socket, 1);
+      expect(messages).toHaveLength(1);
+      socket.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('broadcasts when payload changes for same key', async () => {
+    const canListen = await canListenOnLoopback();
+    if (!canListen) {
+      console.warn('Skipping dev ws server test: listen not permitted.');
+      return;
+    }
+    const server = createDevWsServer({ port: 0 });
+    const { port } = await server.listen();
+    try {
+      await fetch(`http://localhost:${port}/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'user-7',
+          payload: {
+            type: 'run_updated',
+            run: {
+              id: 'r1',
+              status: 'queued',
+              pageId: 'p10',
+              platform: 'instagram',
+              igBusinessId: null,
+            },
+          },
+        }),
+      });
+      await fetch(`http://localhost:${port}/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'user-7',
+          payload: {
+            type: 'run_updated',
+            run: {
+              id: 'r1',
+              status: 'completed',
+              pageId: 'p10',
+              platform: 'instagram',
+              igBusinessId: null,
+            },
+          },
+        }),
+      });
+
+      const socket = new WebSocket(`ws://localhost:${port}`);
+      await new Promise<void>((resolve) =>
+        socket.once('open', () => resolve()),
+      );
+      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-7' }));
+      const message = await waitForMessage(socket);
+      expect(JSON.parse(message).run.status).toBe('completed');
+      socket.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('sends one message per key on connect', async () => {
+    const canListen = await canListenOnLoopback();
+    if (!canListen) {
+      console.warn('Skipping dev ws server test: listen not permitted.');
+      return;
+    }
+    const server = createDevWsServer({ port: 0 });
+    const { port } = await server.listen();
+    try {
+      await fetch(`http://localhost:${port}/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'user-8',
+          payload: {
+            type: 'run_updated',
+            run: {
+              id: 'r1',
+              pageId: 'p11',
+              platform: 'instagram',
+              igBusinessId: null,
+              startedAt: '2026-01-02T00:00:00.000Z',
+            },
+          },
+        }),
+      });
+      await fetch(`http://localhost:${port}/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'user-8',
+          payload: {
+            type: 'run_updated',
+            run: {
+              id: 'r2',
+              pageId: 'p12',
+              platform: 'instagram',
+              igBusinessId: 'ig-2',
+              startedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        }),
+      });
+
+      const socket = new WebSocket(`ws://localhost:${port}`);
+      await new Promise<void>((resolve) =>
+        socket.once('open', () => resolve()),
+      );
+      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-8' }));
+      const messages = await waitForMessages(socket, 2);
+      const parsed = messages.map((item) => JSON.parse(item));
+      expect(parsed.map((item) => item.run.id).sort()).toEqual(['r1', 'r2']);
+      socket.close();
+    } finally {
+      await server.close();
+    }
+  });
 });

@@ -4,8 +4,8 @@ import { WebSocketServer } from 'ws';
 const defaultPort = Number(process.env.PORT ?? '8789');
 
 const buildSyncRunKey = (run) => {
-  const ig = run?.igBusinessId ?? '∅';
-  return `${run?.pageId ?? ''}::${ig}::${run?.platform ?? ''}`;
+  const ig = run?.igBusinessId ?? 'null';
+  return `${run?.pageId}::${ig}::${run?.platform}`;
 };
 
 export function createDevWsServer({ port = defaultPort } = {}) {
@@ -51,17 +51,20 @@ export function createDevWsServer({ port = defaultPort } = {}) {
         try {
           const payload = JSON.parse(body);
           const userId = payload?.userId;
-          const message = JSON.stringify(payload?.payload ?? {});
           const run = payload?.payload?.run;
           if (userId && run) {
             const key = buildSyncRunKey(run);
+            const message = JSON.stringify({ type: 'run_updated', run });
             const latestForUser = latestByUserId.get(userId) ?? new Map();
-            latestForUser.set(key, message);
-            latestByUserId.set(userId, latestForUser);
-            const clients = clientsByUserId.get(userId);
-            if (clients) {
-              for (const socket of clients) {
-                socket.send(message);
+            const previous = latestForUser.get(key);
+            if (previous !== message) {
+              latestForUser.set(key, message);
+              latestByUserId.set(userId, latestForUser);
+              const clients = clientsByUserId.get(userId);
+              if (clients) {
+                for (const socket of clients) {
+                  socket.send(message);
+                }
               }
             }
           }
