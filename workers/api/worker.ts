@@ -621,15 +621,6 @@ async function runSync(options: {
       : stateDate ?? earliestDate;
   const since = sinceDate ? sinceDate.toISOString() : null;
   const sinceDateMs = sinceDate?.getTime() ?? null;
-  console.info('Sync since debug', {
-    pageId,
-    platform,
-    igId,
-    stateDate: stateDate?.toISOString() ?? null,
-    earliestEnv: env.EARLIEST_MESSAGES_AT ?? null,
-    sinceDate: sinceDate?.toISOString() ?? null,
-    since,
-  });
   const pageResult: {
     conversations: MetaConversation[];
     nextCursor: string | null;
