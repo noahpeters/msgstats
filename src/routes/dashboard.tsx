@@ -271,6 +271,7 @@ export default function Dashboard(): React.ReactElement {
   >({});
   const [classicPages, setClassicPages] = React.useState<MetaPage[]>([]);
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
+  const syncRunStatuses = React.useRef(new Map<string, string>());
   const loadedIgAssets = React.useRef(new Set<string>());
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
@@ -354,6 +355,23 @@ export default function Dashboard(): React.ReactElement {
     }, 4000);
     return () => clearInterval(interval);
   }, [refreshSyncRuns]);
+
+  React.useEffect(() => {
+    let shouldRefresh = false;
+    for (const run of syncRuns) {
+      const prevStatus = syncRunStatuses.current.get(run.id);
+      const completedNow =
+        run.status === 'completed' && prevStatus !== 'completed';
+      const failedNow = run.status === 'failed' && prevStatus !== 'failed';
+      if (completedNow || failedNow) {
+        shouldRefresh = true;
+      }
+      syncRunStatuses.current.set(run.id, run.status);
+    }
+    if (shouldRefresh) {
+      void refreshAssets(true);
+    }
+  }, [refreshAssets, syncRuns]);
 
   const [businessesLoaded, setBusinessesLoaded] = React.useState(false);
 

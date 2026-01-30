@@ -99,6 +99,31 @@ function buildUrl(
   return url.toString();
 }
 
+function normalizeSince(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    return trimmed;
+  }
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) {
+    return Math.floor(parsed / 1000).toString();
+  }
+  return undefined;
+}
+
+function debugSince(label: string, since?: string) {
+  if (!since) {
+    return;
+  }
+  console.info('Meta since debug', { label, since });
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -556,8 +581,10 @@ export async function fetchConversations(options: {
     limit: '50',
     platform: options.platform,
   };
-  if (options.since) {
-    params.since = options.since;
+  const since = normalizeSince(options.since);
+  debugSince('fetchConversations', since);
+  if (since) {
+    params.since = since;
   }
   const url = buildUrl(
     metaConfig.endpoints.conversations(options.pageId),
@@ -582,8 +609,10 @@ export async function fetchConversationsPage(options: {
     limit: String(options.limit ?? 50),
     platform: options.platform,
   };
-  if (options.since) {
-    params.since = options.since;
+  const since = normalizeSince(options.since);
+  debugSince('fetchConversationsPage', since);
+  if (since) {
+    params.since = since;
   }
   if (options.after) {
     params.after = options.after;
