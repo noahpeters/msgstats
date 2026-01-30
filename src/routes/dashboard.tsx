@@ -1,6 +1,11 @@
 import * as React from 'react';
 import * as stylex from '@stylexjs/stylex';
 import { layout, colors } from '../app/styles';
+import {
+  buildSyncRunsWsUrl,
+  buildSyncRunKey,
+  sendSyncRunsSubscribe,
+} from '../utils/syncRunsWebsocket';
 
 type PermissionResponse = {
   hasToken: boolean;
@@ -327,34 +332,87 @@ export default function Dashboard(): React.ReactElement {
     [fetchJson],
   );
 
-  const refreshSyncRuns = React.useCallback(
-    async (force = false) => {
-      const { ok, data } = await fetchJson<SyncRun[]>(
-        '/api/sync/runs',
-        undefined,
-        { force },
-      );
-      if (!ok) {
-        return;
-      }
-      setSyncRuns(data ?? []);
-    },
-    [fetchJson],
-  );
-
   React.useEffect(() => {
     void refreshAuth();
     void refreshPermissions();
     void refreshAssets();
-    void refreshSyncRuns();
-  }, [refreshAssets, refreshAuth, refreshPermissions, refreshSyncRuns]);
+  }, [refreshAssets, refreshAuth, refreshPermissions]);
+
+  const mergeRunUpdate = React.useCallback((run: SyncRun) => {
+    setSyncRuns((prev) => {
+      const next = [...prev];
+      const hasKeyFields = Boolean(run.pageId && run.platform);
+      const targetKey = hasKeyFields ? buildSyncRunKey(run) : null;
+      const index = hasKeyFields
+        ? next.findIndex((existing) => buildSyncRunKey(existing) === targetKey)
+        : next.findIndex((existing) => existing.id === run.id);
+      if (index >= 0) {
+        next[index] = { ...next[index], ...run };
+      } else {
+        next.push(run);
+      }
+      next.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      return next;
+    });
+  }, []);
 
   React.useEffect(() => {
-    const interval = setInterval(() => {
-      void refreshSyncRuns();
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [refreshSyncRuns]);
+    if (!auth?.authenticated) {
+      return;
+    }
+    let retryTimer: number | undefined;
+    let socket: WebSocket | null = null;
+    let attempts = 0;
+    let cancelled = false;
+
+    const connect = () => {
+      if (socket) {
+        socket.close();
+      }
+      const wsUrl = buildSyncRunsWsUrl(
+        window.location.hostname,
+        window.location.protocol,
+        window.location.host,
+      );
+      const currentSocket = new WebSocket(wsUrl);
+      socket = currentSocket;
+      currentSocket.addEventListener('open', () => {
+        attempts = 0;
+        sendSyncRunsSubscribe(currentSocket, auth.userId);
+      });
+      currentSocket.addEventListener('message', (event) => {
+        try {
+          const payload = JSON.parse(event.data as string) as {
+            type?: string;
+            run?: SyncRun;
+          };
+          if (payload.type === 'run_updated' && payload.run) {
+            mergeRunUpdate(payload.run);
+          }
+        } catch {
+          // Ignore malformed payloads
+        }
+      });
+      currentSocket.addEventListener('close', () => {
+        if (cancelled || socket !== currentSocket) {
+          return;
+        }
+        const jitter = Math.floor(Math.random() * 250);
+        const delay = Math.min(1000 * 2 ** attempts, 10000) + jitter;
+        attempts += 1;
+        retryTimer = window.setTimeout(connect, delay);
+      });
+    };
+
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
+      socket?.close();
+    };
+  }, [auth?.authenticated, auth?.userId, mergeRunUpdate]);
 
   React.useEffect(() => {
     let shouldRefresh = false;
@@ -449,7 +507,6 @@ export default function Dashboard(): React.ReactElement {
       if (!response.ok) {
         throw new Error('Sync failed to start.');
       }
-      await refreshSyncRuns(true);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Sync failed.');
     }
@@ -467,7 +524,6 @@ export default function Dashboard(): React.ReactElement {
       if (!response.ok) {
         throw new Error('Instagram sync failed.');
       }
-      await refreshSyncRuns(true);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'Instagram sync failed.',
@@ -492,7 +548,6 @@ export default function Dashboard(): React.ReactElement {
         refreshAuth(true),
         refreshPermissions(true),
         refreshAssets(true),
-        refreshSyncRuns(true),
       ]);
     } catch (error) {
       setActionError(

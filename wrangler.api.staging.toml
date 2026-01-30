@@ -1,30 +1,31 @@
-name = "msgstats-api"
+name = "msgstats-api-staging"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 main = "workers/api/worker.ts"
 
 [vars]
-META_REDIRECT_URI = "https://msgstats.from-trees.com/api/auth/callback"
+META_REDIRECT_URI = "https://staging.msgstats.from-trees.com/api/auth/callback"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "msgstats-db"
-database_id = "b1918df0-760c-41f1-9778-9d5f95ab9a41"
+database_name = "msgstats-db-staging"
+database_id = "REPLACE_WITH_STAGING_DB_ID"
 
 [[durable_objects.bindings]]
 name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
-script_name = "msgstats-web"
+script_name = "msgstats-web-staging"
 
 [queues]
 
 [[queues.producers]]
 binding = "SYNC_QUEUE"
-queue = "msgstats-sync"
+queue = "msgstats-sync-staging"
 
 [[queues.consumers]]
-queue = "msgstats-sync"
+queue = "msgstats-sync-staging"
 max_batch_size = 1
+
 [observability]
 [observability.logs]
 enabled = true

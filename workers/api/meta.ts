@@ -117,7 +117,6 @@ function normalizeSince(value?: string) {
   return undefined;
 }
 
-
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
