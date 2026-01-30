@@ -620,6 +620,16 @@ async function runSync(options: {
       ? new Date(Math.max(stateDate.getTime(), earliestDate.getTime()))
       : stateDate ?? earliestDate;
   const since = sinceDate ? sinceDate.toISOString() : null;
+  const sinceDateMs = sinceDate?.getTime() ?? null;
+  console.info('Sync since debug', {
+    pageId,
+    platform,
+    igId,
+    stateDate: stateDate?.toISOString() ?? null,
+    earliestEnv: env.EARLIEST_MESSAGES_AT ?? null,
+    sinceDate: sinceDate?.toISOString() ?? null,
+    since,
+  });
   const pageResult: {
     conversations: MetaConversation[];
     nextCursor: string | null;
@@ -638,22 +648,34 @@ async function runSync(options: {
   let newestUpdatedValue: string | null = newestUpdated ?? null;
 
   for (const convo of pageResult.conversations) {
-    conversationCount += 1;
+    if (sinceDateMs) {
+      const updatedDate = parseDate(convo.updated_time);
+      if (updatedDate && updatedDate.getTime() < sinceDateMs) {
+        continue;
+      }
+    }
     const messages = await fetchConversationMessages({
       conversationId: convo.id,
       accessToken,
       version: getApiVersion(env),
     });
-    if (!messages.length) {
+    const filteredMessages = sinceDateMs
+      ? messages.filter((message) => {
+          const created = parseDate(message.created_time);
+          return created ? created.getTime() >= sinceDateMs : false;
+        })
+      : messages;
+    if (!filteredMessages.length) {
       continue;
     }
+    conversationCount += 1;
     let customerCount = 0;
     let businessCount = 0;
     let priceGiven = 0;
     let earliest: string | null = null;
     let latest: string | null = null;
 
-    for (const message of messages) {
+    for (const message of filteredMessages) {
       const senderId = message.from?.id;
       const isBusiness =
         platform === 'messenger'
