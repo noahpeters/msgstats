@@ -5,6 +5,7 @@ main = "workers/api/worker.ts"
 
 [vars]
 META_REDIRECT_URI = "https://msgstats.from-trees.com/api/auth/callback"
+META_SCOPES = "pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management,instagram_basic,instagram_manage_messages"
 
 [[d1_databases]]
 binding = "DB"

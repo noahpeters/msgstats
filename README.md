@@ -55,10 +55,23 @@ npm run deploy:api
 npm run deploy:web
 ```
 
+## Staging
+
+- Apply staging migrations:
+  ```bash
+  npm run db:migrations:staging
+  ```
+- Staging deploys automatically on pushes to `feature/*` or `feat/*` via GitHub Actions.
+- Staging pages show a banner with branch/SHA/timestamp from `VITE_STAGING_INFO`.
+- Required GitHub secrets for staging deploys:
+  - `CLOUDFLARE_API_TOKEN`
+  - `CLOUDFLARE_ACCOUNT_ID`
+
 ## Scripts
 
 - `npm run dev` – local dev via Wrangler (web worker on :5173, api worker on :8787) + build watch
 - `npm run build` – build SSR + client assets
 - `npm run deploy:web` – deploy UI worker
 - `npm run deploy:api` – deploy API worker
+- `npm run db:migrations:staging` – apply staging D1 migrations
 - `npm run verify` – lint + format + typecheck + test
