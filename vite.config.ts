@@ -35,10 +35,18 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['@stylexjs/stylex'],
   },
+  build: {
+    emptyOutDir: false,
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:8787',
       '/auth/facebook/deletion': 'http://localhost:8787',
+      // If you also proxy /api, keep that too (with ws if needed)
+      // '/api': {
+      //   target: 'http://localhost:8787',
+      //   changeOrigin: true,
+      // },
     },
   },
 });

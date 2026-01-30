@@ -1,4 +1,4 @@
-name = "msgstats-web"
+name = "msgstats-web-staging"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 main = "workers/web/worker.ts"
@@ -16,7 +16,7 @@ new_classes = ["SyncRunsHub"]
 
 [[services]]
 binding = "API"
-service = "msgstats-api"
+service = "msgstats-api-staging"
 
 [observability]
 [observability.logs]

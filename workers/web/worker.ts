@@ -1,5 +1,6 @@
 import { createRequestHandler } from '@react-router/cloudflare';
 import { handleApiProxyRequest } from './apiProxy';
+import { SyncRunsHub } from './syncRunsHub';
 import type {
   ExecutionContext,
   IncomingRequestCfProperties,
@@ -8,6 +9,8 @@ import type {
 type Env = {
   ASSETS: { fetch: typeof fetch };
   API?: { fetch: typeof fetch };
+  SYNC_RUNS_HUB: DurableObjectNamespace;
+  API_URL?: string;
 };
 
 let handlerPromise: Promise<ReturnType<typeof createRequestHandler>> | null =
@@ -17,11 +20,7 @@ async function loadBuild() {
   const virtualSpecifier = ['virtual:react-router/server-build'].join('');
   try {
     return await import(virtualSpecifier);
-  } catch (error) {
-    console.warn(
-      'Falling back to build/server/index.js for server build.',
-      error,
-    );
+  } catch {
     // @ts-expect-error build output is generated at runtime
     return await import('../../build/server/index.js');
   }
@@ -51,6 +50,47 @@ async function getHandler() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+    console.log('[web] incoming', {
+      method: request.method,
+      path: url.pathname,
+      upgrade: request.headers.get('Upgrade'),
+    });
+
+    if (url.pathname === '/sync/runs/subscribe') {
+      if (
+        (request.headers.get('Upgrade') ?? '').toLowerCase() !== 'websocket'
+      ) {
+        return new Response('Expected WebSocket', { status: 426 });
+      }
+      if (!env.API) {
+        // fall back to API_URL in local dev when service bindings are missing
+      }
+      const cookie = request.headers.get('cookie') ?? '';
+      const whoami = env.API
+        ? await env.API.fetch('http://internal/api/auth/whoami', {
+            headers: { cookie },
+          })
+        : await fetch(
+            `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
+            {
+              headers: { cookie },
+            },
+          );
+      console.log('[subscribe] whoami', whoami.status);
+      if (!whoami.ok) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const payload = (await whoami.json()) as { userId?: string };
+      if (!payload.userId) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const stub = env.SYNC_RUNS_HUB.get(
+        env.SYNC_RUNS_HUB.idFromName(payload.userId),
+      );
+      return stub.fetch(request);
+    }
+
     try {
       const proxyResponse = await handleApiProxyRequest(request, env);
       if (proxyResponse) {
@@ -84,3 +124,5 @@ export default {
     }
   },
 };
+
+export { SyncRunsHub };

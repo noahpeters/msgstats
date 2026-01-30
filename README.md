@@ -26,10 +26,13 @@ Messenger + Instagram analytics deployed on Cloudflare Workers with a D1 databas
    wrangler secret put META_REDIRECT_URI --config wrangler.api.toml
    wrangler secret put SESSION_SECRET --config wrangler.api.toml
    ```
-4. Run the UI locally:
+4. Run local dev (API + web workers + build watch):
    ```bash
    npm run dev
    ```
+   - Web worker serves on `http://localhost:5173` (includes `/sync/runs/subscribe`).
+   - API worker serves on `http://localhost:8787`.
+   - Client assets are built to `./build/client` via `react-router build --watch`.
 
 ## Meta app setup
 
@@ -54,7 +57,7 @@ npm run deploy:web
 
 ## Scripts
 
-- `npm run dev` – local SSR via React Router dev
+- `npm run dev` – local dev via Wrangler (web worker on :5173, api worker on :8787) + build watch
 - `npm run build` – build SSR + client assets
 - `npm run deploy:web` – deploy UI worker
 - `npm run deploy:api` – deploy API worker

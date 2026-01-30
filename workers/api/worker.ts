@@ -29,6 +29,8 @@ import {
 type Env = {
   DB: D1Database;
   SYNC_QUEUE: Queue<SyncJob>;
+  SYNC_RUNS_HUB: DurableObjectNamespace;
+  DEV_WS_PUBLISH_URL?: string;
   META_APP_ID: string;
   META_APP_SECRET: string;
   META_REDIRECT_URI: string;
@@ -56,6 +58,21 @@ type RouteHandler = (
   ctx: ExecutionContext,
   params: Record<string, string>,
 ) => Promise<Response> | Response;
+
+type SyncRunRow = {
+  id: string;
+  userId: string;
+  pageId: string;
+  platform: string;
+  igBusinessId: string | null;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  lastError: string | null;
+  conversations: number;
+  messages: number;
+  updatedAt: string;
+};
 
 // function pickUsage(headers: Headers) {
 //   const keys = ["x-app-usage", "x-page-usage", "x-business-use-case-usage", "retry-after"];
@@ -387,31 +404,6 @@ async function listPagesWithStats(env: Env, userId: string) {
   });
 }
 
-async function listSyncRuns(env: Env, userId: string) {
-  const rows = await env.DB.prepare(
-    `SELECT id, page_id as pageId, platform, ig_business_id as igBusinessId, status,
-            started_at as startedAt, finished_at as finishedAt, last_error as lastError,
-            conversations, messages
-     FROM sync_runs
-     WHERE user_id = ?
-     ORDER BY started_at DESC`,
-  )
-    .bind(userId)
-    .all<{
-      id: string;
-      pageId: string;
-      platform: string;
-      igBusinessId: string | null;
-      status: string;
-      startedAt: string;
-      finishedAt: string | null;
-      lastError: string | null;
-      conversations: number;
-      messages: number;
-    }>();
-  return rows.results ?? [];
-}
-
 async function getSyncRunById(env: Env, id: string) {
   return await env.DB.prepare(
     `SELECT id, status, conversations, messages
@@ -492,7 +484,7 @@ async function updateSyncRun(
     lastError?: string | null;
     finishedAt?: string | null;
   },
-) {
+): Promise<SyncRunRow | null> {
   const now = new Date().toISOString();
   await env.DB.prepare(
     `UPDATE sync_runs
@@ -514,6 +506,94 @@ async function updateSyncRun(
       data.id,
     )
     .run();
+  return await env.DB.prepare(
+    `SELECT id,
+            user_id as userId,
+            page_id as pageId,
+            platform,
+            ig_business_id as igBusinessId,
+            status,
+            started_at as startedAt,
+            finished_at as finishedAt,
+            last_error as lastError,
+            conversations,
+            messages,
+            updated_at as updatedAt
+     FROM sync_runs
+     WHERE id = ?`,
+  )
+    .bind(data.id)
+    .first<SyncRunRow>();
+}
+
+function sanitizeSyncRunForClient(run: SyncRunRow) {
+  return {
+    id: run.id,
+    pageId: run.pageId,
+    platform: run.platform,
+    igBusinessId: run.igBusinessId,
+    status: run.status,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    lastError: run.lastError,
+    conversations: run.conversations,
+    messages: run.messages,
+  };
+}
+
+async function notifySyncRunUpdated(env: Env, run: SyncRunRow) {
+  const payload = {
+    type: 'run_updated',
+    run: sanitizeSyncRunForClient(run),
+  };
+  try {
+    const stub = env.SYNC_RUNS_HUB.get(
+      env.SYNC_RUNS_HUB.idFromName(run.userId),
+    );
+    await stub.fetch('https://sync-runs/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error('Failed to notify sync run update', {
+      runId: run.id,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
+
+  if (env.DEV_WS_PUBLISH_URL) {
+    try {
+      await fetch(env.DEV_WS_PUBLISH_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: run.userId, payload }),
+      });
+    } catch (error) {
+      console.warn('Failed to publish dev ws update', {
+        runId: run.id,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+}
+
+async function updateSyncRunAndNotify(
+  env: Env,
+  data: {
+    id: string;
+    status?: string;
+    conversations?: number;
+    messages?: number;
+    lastError?: string | null;
+    finishedAt?: string | null;
+  },
+) {
+  const run = await updateSyncRun(env, data);
+  if (run) {
+    await notifySyncRunUpdated(env, run);
+  }
+  return run;
 }
 
 async function getSyncState(
@@ -576,10 +656,10 @@ async function runSync(options: {
   const { env, userId, pageId, platform, igId, runId, cursor, newestUpdated } =
     options;
   const existingRun = await getSyncRunById(env, runId);
-  await updateSyncRun(env, { id: runId, status: 'running' });
+  await updateSyncRunAndNotify(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
   if (!page) {
-    await updateSyncRun(env, {
+    await updateSyncRunAndNotify(env, {
       id: runId,
       status: 'failed',
       lastError: 'Page not enabled',
@@ -751,7 +831,7 @@ async function runSync(options: {
     });
 
     if (conversationCount % 5 === 0) {
-      await updateSyncRun(env, {
+      await updateSyncRunAndNotify(env, {
         id: runId,
         conversations: conversationCount,
         messages: messageCount,
@@ -760,7 +840,7 @@ async function runSync(options: {
   }
 
   if (pageResult.nextCursor) {
-    await updateSyncRun(env, {
+    await updateSyncRunAndNotify(env, {
       id: runId,
       conversations: conversationCount,
       messages: messageCount,
@@ -791,7 +871,7 @@ async function runSync(options: {
     }
   }
 
-  await updateSyncRun(env, {
+  await updateSyncRunAndNotify(env, {
     id: runId,
     status: 'completed',
     conversations: conversationCount,
@@ -1040,6 +1120,14 @@ addRoute('GET', '/api/auth/me', async (req, env) => {
     console.warn(error);
   }
   return json({ authenticated: true, userId: session.userId, name });
+});
+
+addRoute('GET', '/api/auth/whoami', async (req, env) => {
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  return json({ userId });
 });
 
 addRoute('GET', '/api/auth/config', async (_req, env) => {
@@ -1477,6 +1565,7 @@ addRoute(
       platform: 'messenger',
       status: 'queued',
     });
+    await updateSyncRunAndNotify(env, { id: runId });
     try {
       await env.SYNC_QUEUE.send({
         userId,
@@ -1486,7 +1575,7 @@ addRoute(
       });
     } catch (error) {
       console.error(error);
-      await updateSyncRun(env, {
+      await updateSyncRunAndNotify(env, {
         id: runId,
         status: 'failed',
         lastError:
@@ -1527,6 +1616,7 @@ addRoute(
       igBusinessId: igId,
       status: 'queued',
     });
+    await updateSyncRunAndNotify(env, { id: runId });
     try {
       await env.SYNC_QUEUE.send({
         userId,
@@ -1537,7 +1627,7 @@ addRoute(
       });
     } catch (error) {
       console.error(error);
-      await updateSyncRun(env, {
+      await updateSyncRunAndNotify(env, {
         id: runId,
         status: 'failed',
         lastError:
@@ -1548,15 +1638,6 @@ addRoute(
     return json({ runId });
   },
 );
-
-addRoute('GET', '/api/sync/runs', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json([]);
-  }
-  const runs = await listSyncRuns(env, userId);
-  return json(runs);
-});
 
 addRoute('GET', '/api/reports/weekly', async (req, env) => {
   const userId = await requireUser(req, env);
@@ -1730,7 +1811,7 @@ export default {
           error: messageText,
         });
         if (isNetworkError(error) && attempt < 3) {
-          await updateSyncRun(env, {
+          await updateSyncRunAndNotify(env, {
             id: runId,
             status: 'queued',
             lastError: messageText,
@@ -1747,7 +1828,7 @@ export default {
           });
           continue;
         }
-        await updateSyncRun(env, {
+        await updateSyncRunAndNotify(env, {
           id: runId,
           status: 'failed',
           lastError: messageText || 'Sync failed',
