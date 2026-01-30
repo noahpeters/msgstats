@@ -58,14 +58,7 @@ export default {
     });
 
     if (url.pathname === '/sync/runs/subscribe') {
-      if (
-        (request.headers.get('Upgrade') ?? '').toLowerCase() !== 'websocket'
-      ) {
-        return new Response('Expected WebSocket', { status: 426 });
-      }
-      if (!env.API) {
-        // fall back to API_URL in local dev when service bindings are missing
-      }
+      // auth gate only
       const cookie = request.headers.get('cookie') ?? '';
       const whoami = env.API
         ? await env.API.fetch('http://internal/api/auth/whoami', {
@@ -77,17 +70,18 @@ export default {
               headers: { cookie },
             },
           );
+
       console.log('[subscribe] whoami', whoami.status);
-      if (!whoami.ok) {
-        return new Response('Unauthorized', { status: 401 });
-      }
+      if (!whoami.ok) return new Response('Unauthorized', { status: 401 });
+
       const payload = (await whoami.json()) as { userId?: string };
-      if (!payload.userId) {
-        return new Response('Unauthorized', { status: 401 });
-      }
+      if (!payload.userId) return new Response('Unauthorized', { status: 401 });
+
       const stub = env.SYNC_RUNS_HUB.get(
         env.SYNC_RUNS_HUB.idFromName(payload.userId),
       );
+
+      // Pass the *original* request through unchanged so the DO can do the actual upgrade.
       return stub.fetch(request);
     }
 
