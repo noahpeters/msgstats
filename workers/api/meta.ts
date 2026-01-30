@@ -117,12 +117,6 @@ function normalizeSince(value?: string) {
   return undefined;
 }
 
-function debugSince(label: string, since?: string) {
-  if (!since) {
-    return;
-  }
-  console.info('Meta since debug', { label, since });
-}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -582,7 +576,6 @@ export async function fetchConversations(options: {
     platform: options.platform,
   };
   const since = normalizeSince(options.since);
-  debugSince('fetchConversations', since);
   if (since) {
     params.since = since;
   }
@@ -610,7 +603,6 @@ export async function fetchConversationsPage(options: {
     platform: options.platform,
   };
   const since = normalizeSince(options.since);
-  debugSince('fetchConversationsPage', since);
   if (since) {
     params.since = since;
   }
