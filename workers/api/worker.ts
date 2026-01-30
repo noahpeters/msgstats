@@ -753,6 +753,11 @@ async function runSync(options: {
         priceGiven,
       )
       .run();
+    await updateLowResponseAfterPrice(env, {
+      userId,
+      conversationId: convo.id,
+      pageId,
+    });
 
     if (conversationCount % 5 === 0) {
       await updateSyncRun(env, {
@@ -882,6 +887,50 @@ async function recomputeConversationStats(
   }
 
   return { updated };
+}
+
+async function updateLowResponseAfterPrice(
+  env: Env,
+  data: {
+    userId: string;
+    conversationId: string;
+    pageId: string;
+  },
+) {
+  const row = await env.DB.prepare(
+    `SELECT MIN(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN created_time END) as firstPriceAt,
+            SUM(
+              CASE
+                WHEN sender_type = 'customer'
+                 AND created_time > (
+                   SELECT MIN(m2.created_time)
+                   FROM messages m2
+                   WHERE m2.user_id = messages.user_id
+                     AND m2.conversation_id = messages.conversation_id
+                     AND m2.sender_type = 'business'
+                     AND m2.body LIKE '%$%'
+                 )
+                THEN 1
+                ELSE 0
+              END
+            ) as customerAfterPriceCount
+     FROM messages
+     WHERE user_id = ? AND conversation_id = ? AND page_id = ?`,
+  )
+    .bind(data.userId, data.conversationId, data.pageId)
+    .first<{
+      firstPriceAt: string | null;
+      customerAfterPriceCount: number | null;
+    }>();
+  const lowResponseAfterPrice =
+    row?.firstPriceAt && (row.customerAfterPriceCount ?? 0) <= 2 ? 1 : 0;
+  await env.DB.prepare(
+    `UPDATE conversations
+     SET low_response_after_price = ?
+     WHERE user_id = ? AND id = ? AND page_id = ?`,
+  )
+    .bind(lowResponseAfterPrice, data.userId, data.conversationId, data.pageId)
+    .run();
 }
 
 addRoute('GET', '/api/health', () => json({ status: 'ok' }));
