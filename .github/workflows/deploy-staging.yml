@@ -1,0 +1,51 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'feat/**'
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Compute staging info
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          TIMESTAMP="$(date -u +'%Y-%m-%d %H:%M:%SZ')"
+          echo "STAGING_INFO=staging • ${BRANCH} • ${SHORT_SHA} • ${TIMESTAMP}" >> "$GITHUB_ENV"
+
+      - name: Apply staging migrations
+        run: npm run db:migrations:staging
+
+      - name: Deploy web (staging)
+        env:
+          VITE_STAGING_INFO: ${{ env.STAGING_INFO }}
+        run: npm run deploy:web:staging
+
+      - name: Deploy api (staging)
+        run: npm run deploy:api:staging

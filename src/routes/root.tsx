@@ -30,12 +30,30 @@ const footerStyles = stylex.create({
   },
 });
 
+const bannerStyles = stylex.create({
+  banner: {
+    marginBottom: '16px',
+    padding: '8px 12px',
+    borderRadius: '12px',
+    backgroundColor: '#fff4d6',
+    color: '#7c3e00',
+    border: '1px solid rgba(124, 62, 0, 0.2)',
+    fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, monospace',
+    fontSize: '12px',
+    letterSpacing: '0.2px',
+  },
+});
+
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
+  const stagingInfo = import.meta.env.VITE_STAGING_INFO;
 
   return (
     <div {...stylex.props(layout.page)}>
       <div {...stylex.props(layout.shell)}>
+        {stagingInfo ? (
+          <div {...stylex.props(bannerStyles.banner)}>{stagingInfo}</div>
+        ) : null}
         <div {...stylex.props(layout.badge)}>Messaging insights</div>
         <h1 {...stylex.props(layout.title)}>msgstats</h1>
         <p {...stylex.props(layout.subtitle)}>
