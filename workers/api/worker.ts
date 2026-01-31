@@ -837,6 +837,12 @@ async function runSync(options: {
     let priceGiven = 0;
     let earliest: string | null = null;
     let latest: string | null = null;
+    const insert = env.DB.prepare(
+      `INSERT OR IGNORE INTO messages
+       (user_id, id, conversation_id, page_id, sender_type, body, created_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const statements: D1PreparedStatement[] = [];
 
     for (const message of filteredMessages) {
       const senderId = message.from?.id;
@@ -862,12 +868,8 @@ async function runSync(options: {
       if (!latest || created > latest) {
         latest = created;
       }
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO messages
-         (user_id, id, conversation_id, page_id, sender_type, body, created_time)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
+      statements.push(
+        insert.bind(
           userId,
           message.id,
           convo.id,
@@ -875,8 +877,14 @@ async function runSync(options: {
           isBusiness ? 'business' : 'customer',
           message.message ?? null,
           created,
-        )
-        .run();
+        ),
+      );
+    }
+
+    const batchSize = 50;
+    for (let i = 0; i < statements.length; i += batchSize) {
+      const batch = statements.slice(i, i + batchSize);
+      await env.DB.batch(batch);
     }
 
     const updatedTime = convo.updated_time;
