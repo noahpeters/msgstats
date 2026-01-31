@@ -41,16 +41,23 @@ type Env = {
   APP_ORIGIN?: string;
 };
 
-type SyncJob = {
-  userId: string;
-  pageId: string;
-  platform: 'messenger' | 'instagram';
-  igId?: string;
-  runId: string;
-  cursor?: string | null;
-  newestUpdated?: string | null;
-  attempt?: number;
-};
+type SyncJob =
+  | {
+      kind?: 'sync';
+      userId: string;
+      pageId: string;
+      platform: 'messenger' | 'instagram';
+      igId?: string;
+      runId: string;
+      cursor?: string | null;
+      newestUpdated?: string | null;
+      attempt?: number;
+    }
+  | {
+      kind: 'recompute_stats';
+      runId: string;
+      attempt?: number;
+    };
 
 type RouteHandler = (
   req: Request,
@@ -72,6 +79,10 @@ type SyncRunRow = {
   conversations: number;
   messages: number;
   updatedAt: string;
+  statsStatus: string | null;
+  statsStartedAt: string | null;
+  statsFinishedAt: string | null;
+  statsError: string | null;
 };
 
 // function pickUsage(headers: Headers) {
@@ -219,6 +230,13 @@ function errorMessage(error: unknown) {
   } catch {
     return 'Unknown error';
   }
+}
+
+function truncateErrorText(message: string, maxLength = 500) {
+  if (message.length <= maxLength) {
+    return message;
+  }
+  return message.slice(0, maxLength);
 }
 
 function isNetworkError(error: unknown) {
@@ -474,6 +492,31 @@ async function createSyncRun(
   return id;
 }
 
+async function getSyncRunRow(env: Env, id: string) {
+  return await env.DB.prepare(
+    `SELECT id,
+            user_id as userId,
+            page_id as pageId,
+            platform,
+            ig_business_id as igBusinessId,
+            status,
+            started_at as startedAt,
+            finished_at as finishedAt,
+            last_error as lastError,
+            conversations,
+            messages,
+            updated_at as updatedAt,
+            stats_status as statsStatus,
+            stats_started_at as statsStartedAt,
+            stats_finished_at as statsFinishedAt,
+            stats_error as statsError
+     FROM sync_runs
+     WHERE id = ?`,
+  )
+    .bind(id)
+    .first<SyncRunRow>();
+}
+
 async function updateSyncRun(
   env: Env,
   data: {
@@ -506,24 +549,7 @@ async function updateSyncRun(
       data.id,
     )
     .run();
-  return await env.DB.prepare(
-    `SELECT id,
-            user_id as userId,
-            page_id as pageId,
-            platform,
-            ig_business_id as igBusinessId,
-            status,
-            started_at as startedAt,
-            finished_at as finishedAt,
-            last_error as lastError,
-            conversations,
-            messages,
-            updated_at as updatedAt
-     FROM sync_runs
-     WHERE id = ?`,
-  )
-    .bind(data.id)
-    .first<SyncRunRow>();
+  return await getSyncRunRow(env, data.id);
 }
 
 function sanitizeSyncRunForClient(run: SyncRunRow) {
@@ -538,6 +564,10 @@ function sanitizeSyncRunForClient(run: SyncRunRow) {
     lastError: run.lastError,
     conversations: run.conversations,
     messages: run.messages,
+    statsStatus: run.statsStatus,
+    statsStartedAt: run.statsStartedAt,
+    statsFinishedAt: run.statsFinishedAt,
+    statsError: run.statsError,
   };
 }
 
@@ -590,6 +620,68 @@ async function updateSyncRunAndNotify(
   },
 ) {
   const run = await updateSyncRun(env, data);
+  if (run) {
+    await notifySyncRunUpdated(env, run);
+  }
+  return run;
+}
+
+async function updateSyncRunStats(
+  env: Env,
+  data: {
+    id: string;
+    statsStatus?: string | null;
+    statsStartedAt?: string | null;
+    statsFinishedAt?: string | null;
+    statsError?: string | null;
+  },
+): Promise<SyncRunRow | null> {
+  const setParts: string[] = [];
+  const bindings: unknown[] = [];
+
+  if ('statsStatus' in data) {
+    setParts.push('stats_status = ?');
+    bindings.push(data.statsStatus ?? null);
+  }
+  if ('statsStartedAt' in data) {
+    setParts.push('stats_started_at = ?');
+    bindings.push(data.statsStartedAt ?? null);
+  }
+  if ('statsFinishedAt' in data) {
+    setParts.push('stats_finished_at = ?');
+    bindings.push(data.statsFinishedAt ?? null);
+  }
+  if ('statsError' in data) {
+    setParts.push('stats_error = ?');
+    bindings.push(data.statsError ?? null);
+  }
+
+  const now = new Date().toISOString();
+  setParts.push('updated_at = ?');
+  bindings.push(now);
+
+  await env.DB.prepare(
+    `UPDATE sync_runs
+     SET ${setParts.join(', ')}
+     WHERE id = ?`,
+  )
+    .bind(...bindings, data.id)
+    .run();
+
+  return await getSyncRunRow(env, data.id);
+}
+
+async function updateSyncRunStatsAndNotify(
+  env: Env,
+  data: {
+    id: string;
+    statsStatus?: string | null;
+    statsStartedAt?: string | null;
+    statsFinishedAt?: string | null;
+    statsError?: string | null;
+  },
+) {
+  const run = await updateSyncRunStats(env, data);
   if (run) {
     await notifySyncRunUpdated(env, run);
   }
@@ -824,11 +916,6 @@ async function runSync(options: {
         priceGiven,
       )
       .run();
-    await updateLowResponseAfterPrice(env, {
-      userId,
-      conversationId: convo.id,
-      pageId,
-    });
 
     if (conversationCount % 5 === 0) {
       await updateSyncRunAndNotify(env, {
@@ -846,6 +933,7 @@ async function runSync(options: {
       messages: messageCount,
     });
     await env.SYNC_QUEUE.send({
+      kind: 'sync',
       userId,
       pageId,
       platform,
@@ -878,6 +966,156 @@ async function runSync(options: {
     messages: messageCount,
     finishedAt: new Date().toISOString(),
   });
+  await enqueueStatsRecomputeOnce(env, runId);
+}
+
+async function enqueueStatsRecomputeOnce(env: Env, runId: string) {
+  const now = new Date().toISOString();
+  const result = await env.DB.prepare(
+    `UPDATE sync_runs
+     SET stats_status = 'queued',
+         stats_started_at = NULL,
+         stats_finished_at = NULL,
+         stats_error = NULL,
+         updated_at = ?
+     WHERE id = ? AND stats_status IS NULL`,
+  )
+    .bind(now, runId)
+    .run();
+  const changes = result.meta?.changes ?? 0;
+  if (changes < 1) {
+    return false;
+  }
+
+  const run = await getSyncRunRow(env, runId);
+  if (run) {
+    await notifySyncRunUpdated(env, run);
+  }
+
+  try {
+    await env.SYNC_QUEUE.send({
+      kind: 'recompute_stats',
+      runId,
+    });
+  } catch (error) {
+    await updateSyncRunStatsAndNotify(env, {
+      id: runId,
+      statsStatus: 'failed',
+      statsFinishedAt: new Date().toISOString(),
+      statsError: truncateErrorText(errorMessage(error)),
+    });
+    return false;
+  }
+
+  return true;
+}
+
+async function recomputeStatsForRun(env: Env, runId: string) {
+  const run = await getSyncRunRow(env, runId);
+  if (!run) {
+    throw new Error('Sync run not found');
+  }
+
+  await updateSyncRunStatsAndNotify(env, {
+    id: runId,
+    statsStatus: 'running',
+    statsStartedAt: new Date().toISOString(),
+    statsFinishedAt: null,
+    statsError: null,
+  });
+
+  const result = await recomputeConversationStatsForRun(env, {
+    userId: run.userId,
+    pageId: run.pageId,
+    platform: run.platform,
+    igBusinessId: run.igBusinessId,
+  });
+
+  await updateSyncRunStatsAndNotify(env, {
+    id: runId,
+    statsStatus: 'completed',
+    statsFinishedAt: new Date().toISOString(),
+    statsError: null,
+  });
+
+  return result;
+}
+
+async function recomputeConversationStatsForRun(
+  env: Env,
+  data: {
+    userId: string;
+    pageId: string;
+    platform: string;
+    igBusinessId: string | null;
+  },
+) {
+  const bindings = [
+    data.userId,
+    data.pageId,
+    data.platform,
+    data.igBusinessId ?? null,
+    data.userId,
+    data.pageId,
+    data.userId,
+    data.pageId,
+    data.platform,
+    data.igBusinessId ?? null,
+  ];
+
+  const result = await env.DB.prepare(
+    `WITH scoped_conversations AS (
+       SELECT id
+       FROM conversations
+       WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
+     ),
+     stats AS (
+       SELECT m.conversation_id as conversation_id,
+              MIN(m.created_time) as started_time,
+              MAX(m.created_time) as last_message_at,
+              SUM(CASE WHEN m.sender_type = 'customer' THEN 1 ELSE 0 END) as customer_count,
+              SUM(CASE WHEN m.sender_type = 'business' THEN 1 ELSE 0 END) as business_count,
+              MAX(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN 1 ELSE 0 END) as price_given,
+              MIN(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN m.created_time END) as first_price_at,
+              SUM(
+                CASE
+                  WHEN m.sender_type = 'customer'
+                   AND m.created_time > (
+                     SELECT MIN(m2.created_time)
+                     FROM messages m2
+                     WHERE m2.user_id = m.user_id
+                       AND m2.conversation_id = m.conversation_id
+                       AND m2.sender_type = 'business'
+                       AND m2.body LIKE '%$%'
+                   )
+                  THEN 1
+                  ELSE 0
+                END
+              ) as customer_after_price_count
+       FROM messages m
+       JOIN scoped_conversations s ON s.id = m.conversation_id
+       WHERE m.user_id = ? AND m.page_id = ?
+       GROUP BY m.conversation_id
+     )
+     UPDATE conversations
+     SET started_time = (SELECT started_time FROM stats WHERE stats.conversation_id = conversations.id),
+         last_message_at = (SELECT last_message_at FROM stats WHERE stats.conversation_id = conversations.id),
+         customer_count = COALESCE((SELECT customer_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
+         business_count = COALESCE((SELECT business_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
+         price_given = COALESCE((SELECT price_given FROM stats WHERE stats.conversation_id = conversations.id), 0),
+         low_response_after_price = CASE
+           WHEN (SELECT first_price_at FROM stats WHERE stats.conversation_id = conversations.id) IS NOT NULL
+            AND COALESCE((SELECT customer_after_price_count FROM stats WHERE stats.conversation_id = conversations.id), 0) <= 2
+           THEN 1
+           ELSE 0
+         END
+     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
+       AND id IN (SELECT conversation_id FROM stats)`,
+  )
+    .bind(...bindings)
+    .run();
+
+  return { updated: result.meta?.changes ?? 0 };
 }
 
 async function recomputeConversationStats(
@@ -958,50 +1196,6 @@ async function recomputeConversationStats(
   }
 
   return { updated };
-}
-
-async function updateLowResponseAfterPrice(
-  env: Env,
-  data: {
-    userId: string;
-    conversationId: string;
-    pageId: string;
-  },
-) {
-  const row = await env.DB.prepare(
-    `SELECT MIN(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN created_time END) as firstPriceAt,
-            SUM(
-              CASE
-                WHEN sender_type = 'customer'
-                 AND created_time > (
-                   SELECT MIN(m2.created_time)
-                   FROM messages m2
-                   WHERE m2.user_id = messages.user_id
-                     AND m2.conversation_id = messages.conversation_id
-                     AND m2.sender_type = 'business'
-                     AND m2.body LIKE '%$%'
-                 )
-                THEN 1
-                ELSE 0
-              END
-            ) as customerAfterPriceCount
-     FROM messages
-     WHERE user_id = ? AND conversation_id = ? AND page_id = ?`,
-  )
-    .bind(data.userId, data.conversationId, data.pageId)
-    .first<{
-      firstPriceAt: string | null;
-      customerAfterPriceCount: number | null;
-    }>();
-  const lowResponseAfterPrice =
-    row?.firstPriceAt && (row.customerAfterPriceCount ?? 0) <= 2 ? 1 : 0;
-  await env.DB.prepare(
-    `UPDATE conversations
-     SET low_response_after_price = ?
-     WHERE user_id = ? AND id = ? AND page_id = ?`,
-  )
-    .bind(lowResponseAfterPrice, data.userId, data.conversationId, data.pageId)
-    .run();
 }
 
 addRoute('GET', '/api/health', () => json({ status: 'ok' }));
@@ -1568,6 +1762,7 @@ addRoute(
     await updateSyncRunAndNotify(env, { id: runId });
     try {
       await env.SYNC_QUEUE.send({
+        kind: 'sync',
         userId,
         pageId,
         platform: 'messenger',
@@ -1619,6 +1814,7 @@ addRoute(
     await updateSyncRunAndNotify(env, { id: runId });
     try {
       await env.SYNC_QUEUE.send({
+        kind: 'sync',
         userId,
         pageId,
         platform: 'instagram',
@@ -1786,9 +1982,15 @@ export default {
   },
   async queue(batch: MessageBatch<SyncJob>, env: Env) {
     for (const message of batch.messages) {
-      const { userId, pageId, platform, igId, runId, cursor, newestUpdated } =
-        message.body;
       try {
+        const kind = message.body.kind ?? 'sync';
+        if (kind === 'recompute_stats') {
+          await recomputeStatsForRun(env, message.body.runId);
+          continue;
+        }
+        const syncJob = message.body as Extract<SyncJob, { kind?: 'sync' }>;
+        const { userId, pageId, platform, igId, runId, cursor, newestUpdated } =
+          syncJob;
         await runSync({
           env,
           userId,
@@ -1800,36 +2002,54 @@ export default {
           newestUpdated,
         });
       } catch (error) {
-        const attempt = message.body.attempt ?? 0;
+        const kind = message.body.kind ?? 'sync';
+        if (kind === 'recompute_stats') {
+          const messageText = errorMessage(error);
+          console.error('Stats recompute failed', {
+            runId: message.body.runId,
+            error: messageText,
+          });
+          await updateSyncRunStatsAndNotify(env, {
+            id: message.body.runId,
+            statsStatus: 'failed',
+            statsFinishedAt: new Date().toISOString(),
+            statsError: truncateErrorText(messageText),
+          });
+          continue;
+        }
+
+        const syncJob = message.body as Extract<SyncJob, { kind?: 'sync' }>;
+        const attempt = syncJob.attempt ?? 0;
         const messageText = errorMessage(error);
         console.error('Sync job failed', {
-          pageId,
-          platform,
-          igId,
-          runId,
+          pageId: syncJob.pageId,
+          platform: syncJob.platform,
+          igId: syncJob.igId,
+          runId: syncJob.runId,
           attempt,
           error: messageText,
         });
         if (isNetworkError(error) && attempt < 3) {
           await updateSyncRunAndNotify(env, {
-            id: runId,
+            id: syncJob.runId,
             status: 'queued',
             lastError: messageText,
           });
           await env.SYNC_QUEUE.send({
-            userId,
-            pageId,
-            platform,
-            igId,
-            runId,
-            cursor,
-            newestUpdated,
+            kind: 'sync',
+            userId: syncJob.userId,
+            pageId: syncJob.pageId,
+            platform: syncJob.platform,
+            igId: syncJob.igId,
+            runId: syncJob.runId,
+            cursor: syncJob.cursor,
+            newestUpdated: syncJob.newestUpdated,
             attempt: attempt + 1,
           });
           continue;
         }
         await updateSyncRunAndNotify(env, {
-          id: runId,
+          id: syncJob.runId,
           status: 'failed',
           lastError: messageText || 'Sync failed',
           finishedAt: new Date().toISOString(),
