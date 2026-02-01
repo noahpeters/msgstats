@@ -2,6 +2,7 @@ import * as React from 'react';
 import stylex from './lib/stylex';
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from 'react-router';
 import './styles.css';
+import { KofiFloatingChat } from './app/components/KofiFloatingChat';
 
 const styles = stylex.create({
   body: {
@@ -30,6 +31,7 @@ export default function Root(): React.ReactElement {
         <Links />
       </head>
       <body className={stylex(styles.body)}>
+        <KofiFloatingChat />
         <Outlet />
         <ScrollRestoration
           getKey={(_location, matches) => matches[matches.length - 1]?.id ?? ''}
