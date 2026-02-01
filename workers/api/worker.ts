@@ -39,6 +39,7 @@ type Env = {
   META_SCOPES?: string;
   EARLIEST_MESSAGES_AT?: string;
   SYNC_MIN_INTERVAL_MINUTES?: string;
+  SYNC_CHECKPOINT_OVERLAP_SECONDS?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
 };
@@ -52,7 +53,6 @@ type SyncJob =
       igId?: string;
       runId: string;
       cursor?: string | null;
-      newestUpdated?: string | null;
       attempt?: number;
     }
   | {
@@ -262,6 +262,15 @@ function getSyncMinIntervalMinutes(env: Env) {
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return 55;
+  }
+  return parsed;
+}
+
+function getSyncCheckpointOverlapSeconds(env: Env) {
+  const raw = env.SYNC_CHECKPOINT_OVERLAP_SECONDS?.trim();
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 120;
   }
   return parsed;
 }
@@ -771,7 +780,6 @@ async function ensureSyncForScope(env: Env, scope: SyncScope, source: string) {
         : undefined,
     runId,
     cursor: null,
-    newestUpdated: null,
   });
 
   console.log('[sync-orchestrator] started', {
@@ -944,10 +952,8 @@ async function runSync(options: {
   igId?: string;
   runId: string;
   cursor?: string | null;
-  newestUpdated?: string | null;
 }) {
-  const { env, userId, pageId, platform, igId, runId, cursor, newestUpdated } =
-    options;
+  const { env, userId, pageId, platform, igId, runId, cursor } = options;
   const existingRun = await getSyncRunById(env, runId);
   await updateSyncRunAndNotify(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
@@ -1009,7 +1015,8 @@ async function runSync(options: {
 
   let conversationCount = existingRun?.conversations ?? 0;
   let messageCount = existingRun?.messages ?? 0;
-  let newestUpdatedValue: string | null = newestUpdated ?? null;
+  const overlapSeconds = getSyncCheckpointOverlapSeconds(env);
+  let runMaxMessageCreatedMs: number | null = null;
 
   for (const convo of pageResult.conversations) {
     if (sinceDateMs) {
@@ -1063,6 +1070,13 @@ async function runSync(options: {
       }
       messageCount += 1;
       const created = message.created_time;
+      const createdMs = Date.parse(created);
+      if (!Number.isNaN(createdMs)) {
+        runMaxMessageCreatedMs =
+          runMaxMessageCreatedMs === null
+            ? createdMs
+            : Math.max(runMaxMessageCreatedMs, createdMs);
+      }
       if (!earliest || created < earliest) {
         earliest = created;
       }
@@ -1088,13 +1102,6 @@ async function runSync(options: {
       await env.DB.batch(batch);
     }
 
-    const updatedTime = convo.updated_time;
-    const compareBase: string = newestUpdatedValue ?? '';
-    newestUpdatedValue =
-      !newestUpdatedValue || updatedTime > compareBase
-        ? updatedTime
-        : newestUpdatedValue;
-
     await env.DB.prepare(
       `INSERT INTO conversations
        (user_id, id, platform, page_id, ig_business_id, updated_time, started_time, last_message_at,
@@ -1117,7 +1124,7 @@ async function runSync(options: {
         platform,
         pageId,
         igId ?? null,
-        updatedTime,
+        convo.updated_time,
         earliest,
         latest,
         customerCount,
@@ -1149,21 +1156,20 @@ async function runSync(options: {
       igId,
       runId,
       cursor: pageResult.nextCursor,
-      newestUpdated: newestUpdatedValue,
     });
     return;
   }
 
-  if (newestUpdatedValue) {
-    const newestDate = parseDate(newestUpdatedValue);
-    if (newestDate) {
-      newestDate.setMinutes(newestDate.getMinutes() - 5);
+  if (runMaxMessageCreatedMs !== null) {
+    const checkpointMs = runMaxMessageCreatedMs - overlapSeconds * 1000;
+    const checkpointDate = new Date(checkpointMs);
+    if (!Number.isNaN(checkpointDate.getTime())) {
       await upsertSyncState(env, {
         userId,
         pageId,
         platform,
         igBusinessId: igId ?? null,
-        lastSyncedAt: newestDate.toISOString(),
+        lastSyncedAt: checkpointDate.toISOString(),
       });
     }
   }
@@ -2231,8 +2237,7 @@ export default {
           continue;
         }
         const syncJob = message.body as Extract<SyncJob, { kind?: 'sync' }>;
-        const { userId, pageId, platform, igId, runId, cursor, newestUpdated } =
-          syncJob;
+        const { userId, pageId, platform, igId, runId, cursor } = syncJob;
         await runSync({
           env,
           userId,
@@ -2241,7 +2246,6 @@ export default {
           igId,
           runId,
           cursor,
-          newestUpdated,
         });
       } catch (error) {
         const kind = message.body.kind ?? 'sync';
@@ -2285,7 +2289,6 @@ export default {
             igId: syncJob.igId,
             runId: syncJob.runId,
             cursor: syncJob.cursor,
-            newestUpdated: syncJob.newestUpdated,
             attempt: attempt + 1,
           });
           continue;
