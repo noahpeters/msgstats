@@ -30,6 +30,7 @@ type Env = {
   DB: D1Database;
   SYNC_QUEUE: Queue<SyncJob>;
   SYNC_RUNS_HUB: DurableObjectNamespace;
+  SYNC_SCOPE_ORCHESTRATOR: DurableObjectNamespace;
   DEV_WS_PUBLISH_URL?: string;
   META_APP_ID: string;
   META_APP_SECRET: string;
@@ -37,6 +38,7 @@ type Env = {
   META_API_VERSION?: string;
   META_SCOPES?: string;
   EARLIEST_MESSAGES_AT?: string;
+  SYNC_MIN_INTERVAL_MINUTES?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
 };
@@ -83,6 +85,13 @@ type SyncRunRow = {
   statsStartedAt: string | null;
   statsFinishedAt: string | null;
   statsError: string | null;
+};
+
+type SyncScope = {
+  userId: string;
+  pageId: string;
+  platform: 'messenger' | 'instagram';
+  igBusinessId: string | null;
 };
 
 // function pickUsage(headers: Headers) {
@@ -248,6 +257,15 @@ function isNetworkError(error: unknown) {
   );
 }
 
+function getSyncMinIntervalMinutes(env: Env) {
+  const raw = env.SYNC_MIN_INTERVAL_MINUTES?.trim();
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 55;
+  }
+  return parsed;
+}
+
 async function requireSession(req: Request, env: Env) {
   const token = getSessionCookie(req.headers);
   if (!token) {
@@ -396,8 +414,7 @@ async function listPagesWithStats(env: Env, userId: string) {
   const stats = await env.DB.prepare(
     `SELECT page_id as pageId,
             COUNT(DISTINCT id) as conversations,
-            SUM(customer_count + business_count) as messages,
-            MAX(updated_time) as lastMessageAt
+            SUM(customer_count + business_count) as messages
      FROM conversations
      WHERE user_id = ?
      GROUP BY page_id`,
@@ -407,17 +424,31 @@ async function listPagesWithStats(env: Env, userId: string) {
       pageId: string;
       conversations: number;
       messages: number;
-      lastMessageAt: string | null;
     }>();
   const statsByPage = new Map(stats.results.map((row) => [row.pageId, row]));
+
+  const runs = await env.DB.prepare(
+    `SELECT page_id as pageId,
+            MAX(finished_at) as lastSyncFinishedAt
+     FROM sync_runs
+     WHERE user_id = ? AND platform = 'messenger' AND status = 'completed' AND ig_business_id IS NULL
+     GROUP BY page_id`,
+  )
+    .bind(userId)
+    .all<{ pageId: string; lastSyncFinishedAt: string | null }>();
+  const runByPage = new Map(
+    (runs.results ?? []).map((row) => [row.pageId, row]),
+  );
+
   return pages.results.map((page) => {
     const stat = statsByPage.get(page.id);
+    const run = runByPage.get(page.id);
     return {
       id: page.id,
       name: page.name ?? 'Page',
       conversationCount: stat?.conversations ?? 0,
       messageCount: stat?.messages ?? 0,
-      lastSyncedAt: stat?.lastMessageAt ?? null,
+      lastSyncFinishedAt: run?.lastSyncFinishedAt ?? null,
     };
   });
 }
@@ -686,6 +717,176 @@ async function updateSyncRunStatsAndNotify(
     await notifySyncRunUpdated(env, run);
   }
   return run;
+}
+
+function buildSyncScopeKey(scope: SyncScope) {
+  const igPart = scope.igBusinessId ?? '';
+  return `${scope.userId}:${scope.pageId}:${scope.platform}:${igPart}`;
+}
+
+async function ensureSyncForScope(env: Env, scope: SyncScope, source: string) {
+  const active = await getActiveSyncRun(env, {
+    userId: scope.userId,
+    pageId: scope.pageId,
+    platform: scope.platform,
+    igBusinessId: scope.igBusinessId,
+  });
+  if (active) {
+    return { started: false, skipped: true, reason: 'active_run' };
+  }
+
+  const state = await getSyncState(env, {
+    userId: scope.userId,
+    pageId: scope.pageId,
+    platform: scope.platform,
+    igBusinessId: scope.igBusinessId,
+  });
+  const intervalMinutes = getSyncMinIntervalMinutes(env);
+  if (state?.lastSyncedAt) {
+    const last = parseDate(state.lastSyncedAt);
+    if (last) {
+      const threshold = Date.now() - intervalMinutes * 60 * 1000;
+      if (last.getTime() >= threshold) {
+        return { started: false, skipped: true, reason: 'freshness' };
+      }
+    }
+  }
+
+  const runId = await createSyncRun(env, {
+    userId: scope.userId,
+    pageId: scope.pageId,
+    platform: scope.platform,
+    igBusinessId: scope.igBusinessId,
+    status: 'queued',
+  });
+  await updateSyncRunAndNotify(env, { id: runId });
+  await env.SYNC_QUEUE.send({
+    kind: 'sync',
+    userId: scope.userId,
+    pageId: scope.pageId,
+    platform: scope.platform,
+    igId:
+      scope.platform === 'instagram'
+        ? scope.igBusinessId ?? undefined
+        : undefined,
+    runId,
+    cursor: null,
+    newestUpdated: null,
+  });
+
+  console.log('[sync-orchestrator] started', {
+    source,
+    runId,
+    scope,
+  });
+
+  return { started: true, skipped: false, runId };
+}
+
+async function callSyncScopeOrchestrator(
+  env: Env,
+  scope: SyncScope,
+  source: string,
+) {
+  const key = buildSyncScopeKey(scope);
+  const stub = env.SYNC_SCOPE_ORCHESTRATOR.get(
+    env.SYNC_SCOPE_ORCHESTRATOR.idFromName(key),
+  );
+  const response = await stub.fetch('https://sync-scope/ensure', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...scope,
+      source,
+    }),
+  });
+  const data = (await response.json().catch(() => null)) as {
+    started: boolean;
+    skipped: boolean;
+    reason?: string;
+    runId?: string;
+  } | null;
+  if (!data) {
+    return { started: false, skipped: true, reason: 'invalid_response' };
+  }
+  return data;
+}
+
+function chunk<T>(items: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+async function listCronScopes(env: Env): Promise<SyncScope[]> {
+  const pages = await env.DB.prepare(
+    'SELECT user_id as userId, id as pageId FROM meta_pages',
+  ).all<{ userId: string; pageId: string }>();
+  const igAssets = await env.DB.prepare(
+    `SELECT ig_assets.user_id as userId,
+            ig_assets.page_id as pageId,
+            ig_assets.id as igBusinessId
+     FROM ig_assets
+     INNER JOIN meta_pages
+       ON meta_pages.user_id = ig_assets.user_id
+      AND meta_pages.id = ig_assets.page_id`,
+  ).all<{ userId: string; pageId: string; igBusinessId: string }>();
+
+  const messengerScopes = (pages.results ?? []).map((row) => ({
+    userId: row.userId,
+    pageId: row.pageId,
+    platform: 'messenger' as const,
+    igBusinessId: null,
+  }));
+  const instagramScopes = (igAssets.results ?? []).map((row) => ({
+    userId: row.userId,
+    pageId: row.pageId,
+    platform: 'instagram' as const,
+    igBusinessId: row.igBusinessId,
+  }));
+  return [...messengerScopes, ...instagramScopes];
+}
+
+async function runCronSync(env: Env) {
+  const scopes = await listCronScopes(env);
+  const counts = {
+    scanned: scopes.length,
+    started: 0,
+    skipped: 0,
+    skippedByReason: {} as Record<string, number>,
+    errors: 0,
+  };
+  const batches = chunk(scopes, 25);
+  for (const batch of batches) {
+    const results = await Promise.all(
+      batch.map((scope) =>
+        callSyncScopeOrchestrator(env, scope, 'cron').catch((error) => {
+          console.error('Cron orchestrator call failed', {
+            scope,
+            error: errorMessage(error),
+          });
+          counts.errors += 1;
+          return { started: false, skipped: true, reason: 'error' };
+        }),
+      ),
+    );
+    for (const result of results) {
+      if (result.started) {
+        counts.started += 1;
+        continue;
+      }
+      if (result.skipped) {
+        counts.skipped += 1;
+        const reason = result.reason ?? 'unknown';
+        counts.skippedByReason[reason] =
+          (counts.skippedByReason[reason] ?? 0) + 1;
+      }
+    }
+  }
+
+  console.log('[cron-sync] summary', counts);
 }
 
 async function getSyncState(
@@ -1206,6 +1407,78 @@ async function recomputeConversationStats(
   return { updated };
 }
 
+class SyncScopeOrchestrator {
+  constructor(
+    private state: DurableObjectState,
+    private env: Env,
+  ) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method !== 'POST' || url.pathname !== '/ensure') {
+      return new Response('Not found', { status: 404 });
+    }
+
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return json(
+        { started: false, skipped: true, reason: 'invalid_body' },
+        { status: 400 },
+      );
+    }
+
+    const payload = body as {
+      userId?: string;
+      pageId?: string;
+      platform?: string;
+      igBusinessId?: string | null;
+      source?: string;
+    };
+
+    const userId = payload.userId;
+    const pageId = payload.pageId;
+    const platform = payload.platform;
+    const igBusinessId = payload.igBusinessId ?? null;
+
+    if (
+      !userId ||
+      !pageId ||
+      (platform !== 'messenger' && platform !== 'instagram')
+    ) {
+      return json(
+        { started: false, skipped: true, reason: 'invalid_scope' },
+        { status: 400 },
+      );
+    }
+    if (platform === 'messenger' && igBusinessId) {
+      return json(
+        { started: false, skipped: true, reason: 'invalid_scope' },
+        { status: 400 },
+      );
+    }
+    if (platform === 'instagram' && !igBusinessId) {
+      return json(
+        { started: false, skipped: true, reason: 'invalid_scope' },
+        { status: 400 },
+      );
+    }
+
+    const scope: SyncScope = {
+      userId,
+      pageId,
+      platform,
+      igBusinessId: platform === 'instagram' ? igBusinessId : null,
+    };
+
+    const result = await ensureSyncForScope(
+      this.env,
+      scope,
+      payload.source ?? 'unknown',
+    );
+    return json(result);
+  }
+}
+
 addRoute('GET', '/api/health', () => json({ status: 'ok' }));
 
 addRoute('GET', '/api/auth/login', async (req, env) => {
@@ -1711,8 +1984,7 @@ addRoute('GET', '/api/assets', async (req, env) => {
   const igStats = await env.DB.prepare(
     `SELECT ig_business_id as igBusinessId,
             COUNT(DISTINCT id) as conversations,
-            SUM(customer_count + business_count) as messages,
-            MAX(updated_time) as lastMessageAt
+            SUM(customer_count + business_count) as messages
      FROM conversations
      WHERE user_id = ? AND platform = 'instagram'
      GROUP BY ig_business_id`,
@@ -1722,20 +1994,34 @@ addRoute('GET', '/api/assets', async (req, env) => {
       igBusinessId: string | null;
       conversations: number;
       messages: number;
-      lastMessageAt: string | null;
     }>();
+  const igRuns = await env.DB.prepare(
+    `SELECT ig_business_id as igBusinessId,
+            MAX(finished_at) as lastSyncFinishedAt
+     FROM sync_runs
+     WHERE user_id = ? AND platform = 'instagram' AND status = 'completed'
+     GROUP BY ig_business_id`,
+  )
+    .bind(userId)
+    .all<{ igBusinessId: string | null; lastSyncFinishedAt: string | null }>();
   const igStatsById = new Map(
     (igStats.results ?? [])
       .filter((row) => row.igBusinessId)
       .map((row) => [row.igBusinessId as string, row]),
   );
+  const igRunsById = new Map(
+    (igRuns.results ?? [])
+      .filter((row) => row.igBusinessId)
+      .map((row) => [row.igBusinessId as string, row]),
+  );
   const igAssetsWithStats = (igAssets.results ?? []).map((asset) => {
     const stats = igStatsById.get(asset.id);
+    const run = igRunsById.get(asset.id);
     return {
       ...asset,
       conversationCount: stats?.conversations ?? 0,
       messageCount: stats?.messages ?? 0,
-      lastSyncedAt: stats?.lastMessageAt ?? null,
+      lastSyncFinishedAt: run?.lastSyncFinishedAt ?? null,
     };
   });
   return json({ pages, igAssets: igAssetsWithStats, igEnabled: true });
@@ -1753,40 +2039,12 @@ addRoute(
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    const active = await getActiveSyncRun(env, {
-      userId,
-      pageId,
-      platform: 'messenger',
-    });
-    if (active) {
-      return json({ runId: active.id, status: active.status });
-    }
-    const runId = await createSyncRun(env, {
-      userId,
-      pageId,
-      platform: 'messenger',
-      status: 'queued',
-    });
-    await updateSyncRunAndNotify(env, { id: runId });
-    try {
-      await env.SYNC_QUEUE.send({
-        kind: 'sync',
-        userId,
-        pageId,
-        platform: 'messenger',
-        runId,
-      });
-    } catch (error) {
-      console.error(error);
-      await updateSyncRunAndNotify(env, {
-        id: runId,
-        status: 'failed',
-        lastError:
-          error instanceof Error ? error.message : 'Sync enqueue failed',
-        finishedAt: new Date().toISOString(),
-      });
-    }
-    return json({ runId });
+    const result = await callSyncScopeOrchestrator(
+      env,
+      { userId, pageId, platform: 'messenger', igBusinessId: null },
+      'manual',
+    );
+    return json(result);
   },
 );
 
@@ -1803,43 +2061,12 @@ addRoute(
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    const active = await getActiveSyncRun(env, {
-      userId,
-      pageId,
-      platform: 'instagram',
-      igBusinessId: igId,
-    });
-    if (active) {
-      return json({ runId: active.id, status: active.status });
-    }
-    const runId = await createSyncRun(env, {
-      userId,
-      pageId,
-      platform: 'instagram',
-      igBusinessId: igId,
-      status: 'queued',
-    });
-    await updateSyncRunAndNotify(env, { id: runId });
-    try {
-      await env.SYNC_QUEUE.send({
-        kind: 'sync',
-        userId,
-        pageId,
-        platform: 'instagram',
-        igId,
-        runId,
-      });
-    } catch (error) {
-      console.error(error);
-      await updateSyncRunAndNotify(env, {
-        id: runId,
-        status: 'failed',
-        lastError:
-          error instanceof Error ? error.message : 'Sync enqueue failed',
-        finishedAt: new Date().toISOString(),
-      });
-    }
-    return json({ runId });
+    const result = await callSyncScopeOrchestrator(
+      env,
+      { userId, pageId, platform: 'instagram', igBusinessId: igId },
+      'manual',
+    );
+    return json(result);
   },
 );
 
@@ -1988,6 +2215,13 @@ export default {
     }
     return json({ error: 'Not found' }, { status: 404 });
   },
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    ctx.waitUntil(runCronSync(env));
+  },
   async queue(batch: MessageBatch<SyncJob>, env: Env) {
     for (const message of batch.messages) {
       try {
@@ -2066,3 +2300,5 @@ export default {
     }
   },
 };
+
+export { SyncScopeOrchestrator };
