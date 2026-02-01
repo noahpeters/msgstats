@@ -17,6 +17,14 @@ name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
 script_name = "msgstats-web-staging"
 
+[[durable_objects.bindings]]
+name = "SYNC_SCOPE_ORCHESTRATOR"
+class_name = "SyncScopeOrchestrator"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SyncScopeOrchestrator"]
+
 [queues]
 
 [[queues.producers]]
@@ -31,3 +39,6 @@ max_batch_size = 1
 [observability.logs]
 enabled = true
 invocation_logs = true
+
+[triggers]
+crons = ["0 * * * *"]

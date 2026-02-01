@@ -35,6 +35,7 @@ type PageAsset = {
   id: string;
   name: string;
   lastSyncedAt: string | null;
+  lastSyncFinishedAt: string | null;
   conversationCount: number;
   messageCount: number;
 };
@@ -44,6 +45,7 @@ type IgAsset = {
   name: string;
   pageId: string;
   lastSyncedAt: string | null;
+  lastSyncFinishedAt: string | null;
   conversationCount: number;
   messageCount: number;
 };
@@ -629,7 +631,7 @@ export default function Dashboard(): React.ReactElement {
       platform: 'facebook' as const,
       conversationCount: page.conversationCount,
       messageCount: page.messageCount,
-      lastSyncedAt: page.lastSyncedAt,
+      lastSyncedAt: page.lastSyncFinishedAt,
       run: runByAsset.get(`${page.id}:messenger`),
       onSync: () => handleSyncMessenger(page.id),
     })) ?? []),
@@ -639,7 +641,7 @@ export default function Dashboard(): React.ReactElement {
       platform: 'instagram' as const,
       conversationCount: asset.conversationCount,
       messageCount: asset.messageCount,
-      lastSyncedAt: asset.lastSyncedAt,
+      lastSyncedAt: asset.lastSyncFinishedAt,
       run: runByAsset.get(`${asset.pageId}:instagram:${asset.id}`),
       onSync: () => handleSyncInstagram(asset.pageId, asset.id),
     })) ?? []),
@@ -817,7 +819,7 @@ export default function Dashboard(): React.ReactElement {
                       ) : null}
                       <div style={assetFooterStyle}>
                         <span {...stylex.props(layout.note)}>
-                          Last update: {formatRelativeTime(asset.lastSyncedAt)}
+                          Last sync: {formatRelativeTime(asset.lastSyncedAt)}
                         </span>
                         <button
                           {...stylex.props(layout.ghostButton)}
