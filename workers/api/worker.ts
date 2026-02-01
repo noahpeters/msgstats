@@ -275,6 +275,59 @@ function getSyncCheckpointOverlapSeconds(env: Env) {
   return parsed;
 }
 
+function toHourBucket(date: Date) {
+  return new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      date.getUTCHours(),
+      0,
+      0,
+      0,
+    ),
+  ).toISOString();
+}
+
+async function opsIncrement(env: Env, key: string, delta: number) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO ops_counters (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = value + excluded.value,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(key, delta, now)
+    .run();
+}
+
+async function opsSet(env: Env, key: string, value: number) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO ops_counters (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(key, value, now)
+    .run();
+}
+
+async function opsIncrementHour(env: Env, hourIso: string, delta: number) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO ops_messages_hourly (hour, count, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(hour) DO UPDATE SET
+       count = count + excluded.count,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(hourIso, delta, now)
+    .run();
+}
+
 async function requireSession(req: Request, env: Env) {
   const token = getSessionCookie(req.headers);
   if (!token) {
@@ -314,14 +367,9 @@ async function upsertMetaUser(
   },
 ) {
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO meta_users (id, access_token, token_type, expires_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       access_token = excluded.access_token,
-       token_type = excluded.token_type,
-       expires_at = excluded.expires_at,
-       updated_at = excluded.updated_at`,
+  const insertResult = await env.DB.prepare(
+    `INSERT OR IGNORE INTO meta_users (id, access_token, token_type, expires_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       data.id,
@@ -330,6 +378,22 @@ async function upsertMetaUser(
       data.expiresAt ?? null,
       now,
       now,
+    )
+    .run();
+  if ((insertResult.meta?.changes ?? 0) > 0) {
+    await opsIncrement(env, 'users_total', 1);
+  }
+  await env.DB.prepare(
+    `UPDATE meta_users
+     SET access_token = ?, token_type = ?, expires_at = ?, updated_at = ?
+     WHERE id = ?`,
+  )
+    .bind(
+      data.accessToken,
+      data.tokenType ?? null,
+      data.expiresAt ?? null,
+      now,
+      data.id,
     )
     .run();
 }
@@ -344,15 +408,21 @@ async function upsertPage(
   },
 ) {
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO meta_pages (user_id, id, name, access_token, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(user_id, id) DO UPDATE SET
-       name = excluded.name,
-       access_token = excluded.access_token,
-       updated_at = excluded.updated_at`,
+  const insertResult = await env.DB.prepare(
+    `INSERT OR IGNORE INTO meta_pages (user_id, id, name, access_token, updated_at)
+     VALUES (?, ?, ?, ?, ?)`,
   )
     .bind(data.userId, data.pageId, data.name, data.accessToken, now)
+    .run();
+  if ((insertResult.meta?.changes ?? 0) > 0) {
+    await opsIncrement(env, 'assets_total', 1);
+  }
+  await env.DB.prepare(
+    `UPDATE meta_pages
+     SET name = ?, access_token = ?, updated_at = ?
+     WHERE user_id = ? AND id = ?`,
+  )
+    .bind(data.name, data.accessToken, now, data.userId, data.pageId)
     .run();
 }
 
@@ -393,15 +463,21 @@ async function upsertIgAsset(
   },
 ) {
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `INSERT INTO ig_assets (user_id, id, page_id, name, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(user_id, id) DO UPDATE SET
-       page_id = excluded.page_id,
-       name = excluded.name,
-       updated_at = excluded.updated_at`,
+  const insertResult = await env.DB.prepare(
+    `INSERT OR IGNORE INTO ig_assets (user_id, id, page_id, name, updated_at)
+     VALUES (?, ?, ?, ?, ?)`,
   )
     .bind(data.userId, data.id, data.pageId, data.name, now)
+    .run();
+  if ((insertResult.meta?.changes ?? 0) > 0) {
+    await opsIncrement(env, 'assets_total', 1);
+  }
+  await env.DB.prepare(
+    `UPDATE ig_assets
+     SET page_id = ?, name = ?, updated_at = ?
+     WHERE user_id = ? AND id = ?`,
+  )
+    .bind(data.pageId, data.name, now, data.userId, data.id)
     .run();
 }
 
@@ -857,6 +933,33 @@ async function listCronScopes(env: Env): Promise<SyncScope[]> {
   return [...messengerScopes, ...instagramScopes];
 }
 
+async function reconcileOpsMetrics(env: Env) {
+  const users = await env.DB.prepare(
+    'SELECT COUNT(*) as count FROM meta_users',
+  ).first<{ count: number }>();
+  const assets = await env.DB.prepare(
+    'SELECT (SELECT COUNT(*) FROM meta_pages) + (SELECT COUNT(*) FROM ig_assets) as count',
+  ).first<{ count: number }>();
+  const conversations = await env.DB.prepare(
+    'SELECT COUNT(*) as count FROM conversations',
+  ).first<{ count: number }>();
+  const messages = await env.DB.prepare(
+    'SELECT COUNT(*) as count FROM messages',
+  ).first<{ count: number }>();
+
+  await opsSet(env, 'users_total', users?.count ?? 0);
+  await opsSet(env, 'assets_total', assets?.count ?? 0);
+  await opsSet(env, 'conversations_total', conversations?.count ?? 0);
+  await opsSet(env, 'messages_total', messages?.count ?? 0);
+
+  const windowDays = 14;
+  const cutoffMs = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  const cutoffIso = toHourBucket(new Date(cutoffMs));
+  await env.DB.prepare('DELETE FROM ops_messages_hourly WHERE hour < ?')
+    .bind(cutoffIso)
+    .run();
+}
+
 async function runCronSync(env: Env) {
   const scopes = await listCronScopes(env);
   const counts = {
@@ -1099,24 +1202,27 @@ async function runSync(options: {
     const batchSize = 50;
     for (let i = 0; i < statements.length; i += batchSize) {
       const batch = statements.slice(i, i + batchSize);
-      await env.DB.batch(batch);
+      const results = await env.DB.batch(batch);
+      let insertedMessages = 0;
+      for (let index = 0; index < results.length; index += 1) {
+        const changes = results[index]?.meta?.changes ?? 0;
+        if (changes < 1) {
+          continue;
+        }
+        insertedMessages += changes;
+      }
+      if (insertedMessages > 0) {
+        await opsIncrement(env, 'messages_total', insertedMessages);
+        const ingestHour = toHourBucket(new Date());
+        await opsIncrementHour(env, ingestHour, insertedMessages);
+      }
     }
 
-    await env.DB.prepare(
-      `INSERT INTO conversations
+    const conversationInsert = await env.DB.prepare(
+      `INSERT OR IGNORE INTO conversations
        (user_id, id, platform, page_id, ig_business_id, updated_time, started_time, last_message_at,
         customer_count, business_count, price_given)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(user_id, id) DO UPDATE SET
-         platform = excluded.platform,
-         page_id = excluded.page_id,
-         ig_business_id = excluded.ig_business_id,
-         updated_time = excluded.updated_time,
-         started_time = excluded.started_time,
-         last_message_at = excluded.last_message_at,
-         customer_count = excluded.customer_count,
-         business_count = excluded.business_count,
-         price_given = excluded.price_given`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         userId,
@@ -1130,6 +1236,36 @@ async function runSync(options: {
         customerCount,
         businessCount,
         priceGiven,
+      )
+      .run();
+    if ((conversationInsert.meta?.changes ?? 0) > 0) {
+      await opsIncrement(env, 'conversations_total', 1);
+    }
+    await env.DB.prepare(
+      `UPDATE conversations
+       SET platform = ?,
+           page_id = ?,
+           ig_business_id = ?,
+           updated_time = ?,
+           started_time = ?,
+           last_message_at = ?,
+           customer_count = ?,
+           business_count = ?,
+           price_given = ?
+       WHERE user_id = ? AND id = ?`,
+    )
+      .bind(
+        platform,
+        pageId,
+        igId ?? null,
+        convo.updated_time,
+        earliest,
+        latest,
+        customerCount,
+        businessCount,
+        priceGiven,
+        userId,
+        convo.id,
       )
       .run();
 
@@ -2033,6 +2169,62 @@ addRoute('GET', '/api/assets', async (req, env) => {
   return json({ pages, igAssets: igAssetsWithStats, igEnabled: true });
 });
 
+addRoute('GET', '/api/ops/summary', async (_req, env) => {
+  const counters = await env.DB.prepare(
+    'SELECT key, value, updated_at as updatedAt FROM ops_counters',
+  ).all<{ key: string; value: number; updatedAt: string }>();
+  const map = new Map((counters.results ?? []).map((row) => [row.key, row]));
+  const updatedAt = (counters.results ?? []).reduce<string | null>(
+    (latest, row) => {
+      if (!latest) {
+        return row.updatedAt ?? null;
+      }
+      return row.updatedAt && row.updatedAt > latest ? row.updatedAt : latest;
+    },
+    null,
+  );
+  return json({
+    usersTotal: map.get('users_total')?.value ?? 0,
+    assetsTotal: map.get('assets_total')?.value ?? 0,
+    conversationsTotal: map.get('conversations_total')?.value ?? 0,
+    messagesTotal: map.get('messages_total')?.value ?? 0,
+    updatedAt,
+  });
+});
+
+addRoute('GET', '/api/ops/messages-per-hour', async (req, env) => {
+  const url = new URL(req.url);
+  const rawHours = url.searchParams.get('hours');
+  const parsed = rawHours ? Number.parseInt(rawHours, 10) : Number.NaN;
+  const clamped = Number.isFinite(parsed) ? parsed : 168;
+  const hours = Math.max(24, Math.min(720, clamped));
+
+  const now = new Date();
+  const endHourIso = toHourBucket(now);
+  const endMs = Date.parse(endHourIso);
+  const startMs = endMs - (hours - 1) * 60 * 60 * 1000;
+  const startIso = new Date(startMs).toISOString();
+
+  const rows = await env.DB.prepare(
+    `SELECT hour, count
+     FROM ops_messages_hourly
+     WHERE hour >= ? AND hour <= ?
+     ORDER BY hour ASC`,
+  )
+    .bind(startIso, endHourIso)
+    .all<{ hour: string; count: number }>();
+  const countsByHour = new Map(
+    (rows.results ?? []).map((row) => [row.hour, row.count]),
+  );
+
+  const points = Array.from({ length: hours }, (_, index) => {
+    const hour = new Date(startMs + index * 60 * 60 * 1000).toISOString();
+    return { hour, count: countsByHour.get(hour) ?? 0 };
+  });
+
+  return json({ hours, points });
+});
+
 addRoute(
   'POST',
   '/api/sync/pages/:pageId/messenger',
@@ -2227,6 +2419,7 @@ export default {
     ctx: ExecutionContext,
   ) {
     ctx.waitUntil(runCronSync(env));
+    ctx.waitUntil(reconcileOpsMetrics(env));
   },
   async queue(batch: MessageBatch<SyncJob>, env: Env) {
     for (const message of batch.messages) {
