@@ -664,14 +664,11 @@ export default function Dashboard(): React.ReactElement {
         <p {...stylex.props(layout.note)}>
           Sign in with Facebook to load your businesses and messaging assets.
         </p>
-        {!auth?.authenticated || permissions?.missing.length ? (
+        {!auth?.authenticated ? (
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <a href="/api/auth/login">
               <button {...stylex.props(layout.button)}>Connect Meta</button>
             </a>
-            {permissions?.missing.length ? (
-              <button {...stylex.props(layout.ghostButton)}>Reconnect</button>
-            ) : null}
           </div>
         ) : (
           <div
@@ -696,7 +693,8 @@ export default function Dashboard(): React.ReactElement {
         )}
         {permissions?.missing.length ? (
           <p style={{ color: colors.coral }}>
-            Missing permissions: {permissions.missing.join(', ')}
+            Missing permissions: {permissions.missing.join(', ')}. Log out and
+            connect again to grant them.
           </p>
         ) : null}
         {permissions?.error ? (
