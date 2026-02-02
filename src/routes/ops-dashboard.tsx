@@ -1,6 +1,9 @@
 import * as React from 'react';
+import * as d3 from 'd3';
 import * as stylex from '@stylexjs/stylex';
 import { layout, colors } from '../app/styles';
+import { ChartTooltip } from '../components/charts/ChartTooltip';
+import { useChartTooltip } from '../components/charts/useChartTooltip';
 
 type OpsSummary = {
   usersTotal: number;
@@ -69,6 +72,9 @@ export default function OpsDashboard(): React.ReactElement {
   const [points, setPoints] = React.useState<HourPoint[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const { tooltip, show, move, hide } = useChartTooltip();
+  const xAxisRef = React.useRef<SVGGElement | null>(null);
+  const yAxisRef = React.useRef<SVGGElement | null>(null);
 
   React.useEffect(() => {
     let active = true;
@@ -114,8 +120,71 @@ export default function OpsDashboard(): React.ReactElement {
 
   const width = 720;
   const height = 200;
-  const maxCount = Math.max(1, ...points.map((point) => point.count));
-  const barWidth = points.length ? width / points.length : width;
+  const margin = { top: 10, right: 12, bottom: 28, left: 44 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+
+  const parsedPoints = React.useMemo(
+    () =>
+      points.map((point) => ({
+        ...point,
+        date: new Date(point.hour),
+      })),
+    [points],
+  );
+  const maxCount = Math.max(1, ...parsedPoints.map((point) => point.count));
+  const extent = d3.extent(
+    parsedPoints,
+    (point: (typeof parsedPoints)[number]) => point.date,
+  );
+  const xScale = d3
+    .scaleTime()
+    .domain(
+      extent[0] && extent[1]
+        ? [extent[0], extent[1]]
+        : [new Date(), new Date()],
+    )
+    .range([0, innerWidth]);
+  const yScale = d3
+    .scaleLinear()
+    .domain([0, maxCount])
+    .nice()
+    .range([innerHeight, 0]);
+  const barWidth = parsedPoints.length
+    ? Math.max(1, innerWidth / parsedPoints.length)
+    : innerWidth;
+
+  React.useEffect(() => {
+    if (!parsedPoints.length) {
+      return;
+    }
+    const hours = parsedPoints.length;
+    const tickInterval =
+      hours <= 48
+        ? d3.timeHour.every(6)
+        : hours <= 168
+          ? d3.timeDay.every(1)
+          : d3.timeDay.every(2);
+    const tickFormat =
+      hours <= 48 ? d3.timeFormat('%I %p') : d3.timeFormat('%b %d');
+    const xAxis = d3
+      .axisBottom(xScale)
+      .ticks(tickInterval)
+      .tickFormat(tickFormat);
+    const yAxis = d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('~s'));
+    if (xAxisRef.current) {
+      d3.select(xAxisRef.current).call(xAxis);
+    }
+    if (yAxisRef.current) {
+      d3.select(yAxisRef.current).call(yAxis);
+    }
+  }, [parsedPoints, xScale, yScale]);
+
+  const hourFormatter = new Intl.DateTimeFormat('en', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+  });
 
   return (
     <div {...stylex.props(layout.page)}>
@@ -165,28 +234,47 @@ export default function OpsDashboard(): React.ReactElement {
               aria-label="Messages per hour"
             >
               <rect width={width} height={height} fill="#f8f5f2" rx="12" />
-              {points.map((point, index) => {
-                const barHeight = Math.round((point.count / maxCount) * 160);
-                const x = Math.floor(index * barWidth);
-                const y = height - barHeight - 12;
-                return (
-                  <g key={point.hour}>
+              <g transform={`translate(${margin.left}, ${margin.top})`}>
+                {parsedPoints.map((point) => {
+                  const x = xScale(point.date) - barWidth / 2;
+                  const y = yScale(point.count);
+                  const barHeight = innerHeight - y;
+                  const label = `${hourFormatter.format(
+                    point.date,
+                  )}: ${point.count} messages`;
+                  return (
                     <rect
+                      key={point.hour}
                       x={x}
                       y={y}
                       width={Math.max(1, barWidth - 1)}
                       height={barHeight}
                       fill="#0f766e"
                       opacity={0.85}
-                    >
-                      <title>
-                        {point.hour} · {point.count}
-                      </title>
-                    </rect>
-                  </g>
-                );
-              })}
+                      aria-label={label}
+                      onMouseEnter={(event) =>
+                        show(event, {
+                          title: hourFormatter.format(point.date),
+                          lines: [`${point.count} messages`, point.hour],
+                        })
+                      }
+                      onMouseMove={move}
+                      onMouseLeave={hide}
+                    />
+                  );
+                })}
+                <g
+                  ref={xAxisRef}
+                  transform={`translate(0, ${innerHeight})`}
+                  style={{ color: '#284b63', fontSize: '11px' }}
+                />
+                <g
+                  ref={yAxisRef}
+                  style={{ color: '#284b63', fontSize: '11px' }}
+                />
+              </g>
             </svg>
+            <ChartTooltip tooltip={tooltip} />
           </div>
         </div>
       </div>
