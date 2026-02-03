@@ -1,0 +1,85 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to promote
+        required: true
+        default: main
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Resolve SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Ensure CI succeeded on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_SHA: ${{ steps.sha.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = os.environ["REPO"]
+          sha = os.environ["CI_SHA"]
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/ci.yml/runs?per_page=20&branch=main"
+          req = urllib.request.Request(url, headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"})
+          data = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+          runs = [r for r in data.get("workflow_runs", []) if r.get("head_sha") == sha]
+          if not runs:
+            raise SystemExit("No successful CI run found on main for selected ref.")
+          if runs[0].get("conclusion") != "success":
+            raise SystemExit("Latest CI run for selected ref did not succeed.")
+          print("CI check passed.")
+          PY
+      - name: Ensure staging deploy succeeded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_SHA: ${{ steps.sha.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = os.environ["REPO"]
+          sha = os.environ["CI_SHA"]
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/deploy-staging.yml/runs?per_page=20"
+          req = urllib.request.Request(url, headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"})
+          data = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+          runs = [r for r in data.get("workflow_runs", []) if r.get("head_sha") == sha]
+          if not runs:
+            raise SystemExit("No staging deploy found for selected ref.")
+          if runs[0].get("conclusion") != "success":
+            raise SystemExit("Latest staging deploy for selected ref did not succeed.")
+          print("Staging deploy check passed.")
+          PY
+      - name: Set build info
+        run: node scripts/set-build-info.mjs --env prod --ref "${{ inputs.ref }}" --sha "${{ steps.sha.outputs.sha }}" --out "$GITHUB_ENV" --var VITE_STAGING_INFO
+      - name: Apply production migrations
+        run: npx wrangler d1 migrations apply DB --env production --remote --config wrangler.api.toml
+      - name: Deploy production API
+        run: npx wrangler deploy --config wrangler.api.toml --env production --var VITE_STAGING_INFO:$VITE_STAGING_INFO
+      - name: Build web assets
+        run: npm run build
+      - name: Deploy production web
+        run: npx wrangler deploy --config wrangler.web.toml --var VITE_STAGING_INFO:$VITE_STAGING_INFO

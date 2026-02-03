@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
   push:
+    branches: [main]
 
 jobs:
   verify:
@@ -13,11 +14,12 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
           cache: npm
       - name: Install
         run: npm ci
       - name: Verify
         run: npm run verify
+      - name: Build
+        run: npm run build
       - name: Check migration edits
         run: npm run check:migration-edits

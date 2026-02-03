@@ -1,8 +1,10 @@
 name: Deploy Staging
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ['CI']
+    types:
+      - completed
 
 concurrency:
   group: deploy-staging
@@ -10,6 +12,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -17,17 +20,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
           cache: npm
       - name: Install
         run: npm ci
       - name: Set build info
-        run: node scripts/set-build-info.mjs --env staging --ref "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" --out "$GITHUB_ENV" --var VITE_STAGING_INFO
-      - name: Verify
-        run: npm run verify
+        run: node scripts/set-build-info.mjs --env staging --ref "${{ github.event.workflow_run.head_branch }}" --sha "${{ github.event.workflow_run.head_sha }}" --out "$GITHUB_ENV" --var VITE_STAGING_INFO
       - name: Apply staging migrations
         run: npx wrangler d1 migrations apply DB --env staging --remote --config wrangler.api.toml
       - name: Deploy staging API
