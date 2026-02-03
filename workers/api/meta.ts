@@ -1,3 +1,5 @@
+import { metaFetch } from './observability/metaFetch';
+
 type GraphError = {
   message: string;
   type: string;
@@ -28,6 +30,23 @@ const defaultRetry: RetryOptions = {
 };
 
 type MetaUsage = Record<string, string>;
+
+export type MetaEnv = {
+  AE_META_CALLS: AnalyticsEngineDataset;
+};
+
+type MetaTelemetry = {
+  env: MetaEnv;
+  op: string;
+  route: string;
+  method?: string;
+  workspaceId?: string | null;
+  assetId?: string | null;
+};
+
+type MetaCallContext = {
+  telemetry?: MetaTelemetry;
+};
 
 export class MetaApiError extends Error {
   status: number;
@@ -75,6 +94,61 @@ export const metaConfig = {
     igAccounts: ['id', 'name'],
   },
 };
+
+const metaRouteLabels = {
+  oauthAccessToken: '/oauth/access_token',
+  debugToken: '/debug_token',
+  mePermissions: '/me/permissions',
+  meBusinesses: '/me/businesses',
+  meAccounts: '/me/accounts',
+  meDetails: '/me',
+  businessOwnedPages: '/:businessId/owned_pages',
+  businessClientPages: '/:businessId/client_pages',
+  pageDetails: '/:pageId',
+  conversations: '/:pageId/conversations',
+  conversationDetails: '/:conversationId',
+  conversationMessages: '/:conversationId/messages',
+  igAccounts: '/:pageId/instagram_accounts',
+};
+
+async function fetchWithTelemetry(
+  url: string,
+  init: RequestInit | undefined,
+  context?: MetaCallContext,
+): Promise<Response> {
+  if (!context?.telemetry) {
+    return fetch(url, init);
+  }
+  return metaFetch(context.telemetry.env, {
+    op: context.telemetry.op,
+    route: context.telemetry.route,
+    method: context.telemetry.method,
+    url,
+    init,
+    workspaceId: context.telemetry.workspaceId ?? undefined,
+    assetId: context.telemetry.assetId ?? undefined,
+  });
+}
+
+function buildTelemetry(options: {
+  env: MetaEnv;
+  op: string;
+  route: string;
+  method?: string;
+  workspaceId?: string | null;
+  assetId?: string | null;
+}): MetaCallContext {
+  return {
+    telemetry: {
+      env: options.env,
+      op: options.op,
+      route: options.route,
+      method: options.method,
+      workspaceId: options.workspaceId ?? null,
+      assetId: options.assetId ?? null,
+    },
+  };
+}
 
 function withVersion(path: string, version: string) {
   return `${metaConfig.baseUrl}/${version}${path}`;
@@ -176,13 +250,14 @@ async function fetchWithRetry(
   input: string,
   init?: RequestInit,
   retry: RetryOptions = defaultRetry,
+  context?: MetaCallContext,
 ): Promise<Response> {
   let attempt = 0;
   let lastError: unknown;
   while (attempt <= retry.retries) {
     try {
       console.info('Meta fetch request: %s', redactURL(input));
-      const response = await fetch(input, init);
+      const response = await fetchWithTelemetry(input, init, context);
       if (response.status >= 500 || response.status === 429) {
         throw new Error(`Transient error: ${response.status}`);
       }
@@ -210,19 +285,31 @@ async function fetchWithRetry(
   throw lastError ?? new Error('Request failed');
 }
 
-async function fetchMetaJson<T>(url: string, init?: RequestInit) {
-  const response = await fetch(url, init);
+async function fetchMetaJson<T>(
+  url: string,
+  init?: RequestInit,
+  context?: MetaCallContext,
+) {
+  const response = await fetchWithTelemetry(url, init, context);
   const text = await response.text();
   const { parsed } = parseJsonSafe<T>(text);
   return { response, raw: text, parsed };
 }
 
-async function fetchForToken<T>(url: string, init?: RequestInit) {
+async function fetchForToken<T>(
+  url: string,
+  init?: RequestInit,
+  context?: MetaCallContext,
+) {
   let attempt = 0;
   let lastError: MetaApiError | undefined;
   while (attempt <= defaultRetry.retries) {
     try {
-      const { response, parsed, raw } = await fetchMetaJson<T>(url, init);
+      const { response, parsed, raw } = await fetchMetaJson<T>(
+        url,
+        init,
+        context,
+      );
       if (response.ok) {
         if (parsed !== undefined) {
           return parsed;
@@ -273,7 +360,11 @@ async function fetchForToken<T>(url: string, init?: RequestInit) {
   throw lastError ?? new MetaApiError('Meta API error', { status: 500 });
 }
 
-async function fetchGraph<T>(url: string, init?: RequestInit) {
+async function fetchGraph<T>(
+  url: string,
+  init?: RequestInit,
+  context?: MetaCallContext,
+) {
   let attempt = 0;
   let lastError: MetaApiError | undefined;
   while (attempt <= defaultRetry.retries) {
@@ -281,6 +372,7 @@ async function fetchGraph<T>(url: string, init?: RequestInit) {
       const { response, parsed, raw } = await fetchMetaJson<GraphResponse<T>>(
         url,
         init,
+        context,
       );
       const payload = parsed;
       if (response.ok && payload && !payload.error) {
@@ -327,11 +419,15 @@ async function fetchGraph<T>(url: string, init?: RequestInit) {
   throw lastError ?? new MetaApiError('Meta API error', { status: 500 });
 }
 
-async function paginateList<T>(firstUrl: string) {
+async function paginateList<T>(firstUrl: string, context?: MetaCallContext) {
   const results: T[] = [];
   let nextUrl: string | undefined = firstUrl;
   while (nextUrl) {
-    const payload: GraphResponse<T[]> = await fetchGraph<T[]>(nextUrl);
+    const payload: GraphResponse<T[]> = await fetchGraph<T[]>(
+      nextUrl,
+      undefined,
+      context,
+    );
     results.push(...payload.data);
     nextUrl = payload.paging?.next;
   }
@@ -339,11 +435,13 @@ async function paginateList<T>(firstUrl: string) {
 }
 
 export async function exchangeCodeForToken(options: {
+  env: MetaEnv;
   appId: string;
   appSecret: string;
   redirectUri: string;
   code: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.oauthAccessToken, options.version, {
     client_id: options.appId,
@@ -351,7 +449,18 @@ export async function exchangeCodeForToken(options: {
     redirect_uri: options.redirectUri,
     code: options.code,
   });
-  const response = await fetchWithRetry(url);
+  const response = await fetchWithRetry(
+    url,
+    undefined,
+    defaultRetry,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.oauth_exchange',
+      route: metaRouteLabels.oauthAccessToken,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
   if (!response.ok) {
     logRateLimitUsage(response, 'exchangeCodeForToken');
     throw new Error('OAuth token request failed');
@@ -369,10 +478,12 @@ export async function exchangeCodeForToken(options: {
 }
 
 export async function exchangeForLongLivedToken(options: {
+  env: MetaEnv;
   appId: string;
   appSecret: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.oauthAccessToken, options.version, {
     client_id: options.appId,
@@ -380,7 +491,18 @@ export async function exchangeForLongLivedToken(options: {
     grant_type: 'fb_exchange_token',
     fb_exchange_token: options.accessToken,
   });
-  const response = await fetchWithRetry(url);
+  const response = await fetchWithRetry(
+    url,
+    undefined,
+    defaultRetry,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.oauth_long_lived',
+      route: metaRouteLabels.oauthAccessToken,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
   if (!response.ok) {
     logRateLimitUsage(response, 'exchangeForLongLivedToken');
     throw new Error('Long-lived token request failed');
@@ -398,9 +520,11 @@ export async function exchangeForLongLivedToken(options: {
 }
 
 export async function debugToken(options: {
+  env: MetaEnv;
   inputToken: string;
   appToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.debugToken, options.version, {
     input_token: options.inputToken,
@@ -412,38 +536,72 @@ export async function debugToken(options: {
     is_valid?: boolean;
     expires_at?: number;
     scopes?: string[];
-  }>(url);
+  }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.debug_token',
+      route: metaRouteLabels.debugToken,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
   return payload.data;
 }
 
 export async function fetchPermissions(options: {
+  env: MetaEnv;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.mePermissions, options.version, {
     access_token: options.accessToken,
   });
-  const payload =
-    await fetchGraph<{ permission: string; status: string }[]>(url);
+  const payload = await fetchGraph<{ permission: string; status: string }[]>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.permissions',
+      route: metaRouteLabels.mePermissions,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
   return payload.data;
 }
 
 export async function fetchBusinesses(options: {
+  env: MetaEnv;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.meBusinesses, options.version, {
     access_token: options.accessToken,
     fields: metaConfig.fields.businesses.join(','),
     limit: '200',
   });
-  return await paginateList<{ id: string; name: string }>(url);
+  return await paginateList<{ id: string; name: string }>(
+    url,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.businesses',
+      route: metaRouteLabels.meBusinesses,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
 }
 
 export async function fetchBusinessPages(options: {
+  env: MetaEnv;
   businessId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const params = {
     access_token: options.accessToken,
@@ -456,7 +614,16 @@ export async function fetchBusinessPages(options: {
     params,
   );
   try {
-    const owned = await paginateList<{ id: string; name: string }>(ownedUrl);
+    const owned = await paginateList<{ id: string; name: string }>(
+      ownedUrl,
+      buildTelemetry({
+        env: options.env,
+        op: 'meta.business_owned_pages',
+        route: metaRouteLabels.businessOwnedPages,
+        method: 'GET',
+        workspaceId: options.workspaceId,
+      }),
+    );
     if (owned.length) {
       return { source: 'owned_pages' as const, pages: owned };
     }
@@ -472,26 +639,48 @@ export async function fetchBusinessPages(options: {
     options.version,
     params,
   );
-  const client = await paginateList<{ id: string; name: string }>(clientUrl);
+  const client = await paginateList<{ id: string; name: string }>(
+    clientUrl,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.business_client_pages',
+      route: metaRouteLabels.businessClientPages,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
   return { source: 'client_pages' as const, pages: client };
 }
 
 export async function fetchClassicPages(options: {
+  env: MetaEnv;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.meAccounts, options.version, {
     access_token: options.accessToken,
     fields: metaConfig.fields.pages.join(','),
     limit: '200',
   });
-  return await paginateList<{ id: string; name: string }>(url);
+  return await paginateList<{ id: string; name: string }>(
+    url,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.classic_pages',
+      route: metaRouteLabels.meAccounts,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
 }
 
 export async function fetchPageToken(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(
     metaConfig.endpoints.pageDetails(options.pageId),
@@ -505,7 +694,18 @@ export async function fetchPageToken(options: {
     id: string;
     name: string;
     access_token?: string;
-  }>(url);
+  }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.page_token',
+      route: metaRouteLabels.pageDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   if (!payload) {
     throw new Error(
       `Meta page token response missing data (keys: ${Object.keys(payload).join(',')})`,
@@ -522,9 +722,11 @@ export async function fetchPageToken(options: {
 }
 
 export async function fetchPageName(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(
     metaConfig.endpoints.pageDetails(options.pageId),
@@ -534,19 +736,42 @@ export async function fetchPageName(options: {
       fields: 'id,name',
     },
   );
-  const payload = await fetchGraph<{ id: string; name: string }>(url);
+  const payload = await fetchGraph<{ id: string; name: string }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.page_name',
+      route: metaRouteLabels.pageDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   return payload.data;
 }
 
 export async function fetchUserProfile(options: {
+  env: MetaEnv;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(metaConfig.endpoints.meDetails, options.version, {
     access_token: options.accessToken,
     fields: metaConfig.fields.me.join(','),
   });
-  return await fetchForToken<{ id: string; name?: string }>(url);
+  return await fetchForToken<{ id: string; name?: string }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.user_profile',
+      route: metaRouteLabels.meDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+    }),
+  );
 }
 
 export type MetaConversation = {
@@ -562,11 +787,13 @@ export type MetaMessage = {
 };
 
 export async function fetchConversations(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
   platform: 'messenger' | 'instagram';
   since?: string;
+  workspaceId?: string | null;
 }) {
   const params: Record<string, string> = {
     access_token: options.accessToken,
@@ -583,10 +810,21 @@ export async function fetchConversations(options: {
     options.version,
     params,
   );
-  return await paginateList<MetaConversation>(url);
+  return await paginateList<MetaConversation>(
+    url,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.conversations',
+      route: metaRouteLabels.conversations,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
 }
 
 export async function fetchConversationsPage(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
@@ -594,6 +832,7 @@ export async function fetchConversationsPage(options: {
   since?: string;
   after?: string;
   limit?: number;
+  workspaceId?: string | null;
 }) {
   const params: Record<string, string> = {
     access_token: options.accessToken,
@@ -613,7 +852,18 @@ export async function fetchConversationsPage(options: {
     options.version,
     params,
   );
-  const payload = await fetchGraph<MetaConversation[]>(url);
+  const payload = await fetchGraph<MetaConversation[]>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.conversations_page',
+      route: metaRouteLabels.conversations,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   return {
     conversations: payload.data ?? [],
     nextCursor: payload.paging?.cursors?.after ?? null,
@@ -621,9 +871,12 @@ export async function fetchConversationsPage(options: {
 }
 
 export async function fetchConversationMessages(options: {
+  env: MetaEnv;
   conversationId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
+  assetId?: string | null;
 }) {
   const fields = `messages.limit(50){${metaConfig.fields.messages.join(',')}}`;
   const url = buildUrl(
@@ -633,7 +886,18 @@ export async function fetchConversationMessages(options: {
   );
   const payload = await fetchGraph<{
     messages?: { data: MetaMessage[]; paging?: { next?: string } };
-  }>(url);
+  }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.conversation_messages',
+      route: metaRouteLabels.conversationDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.assetId,
+    }),
+  );
   if (!payload.data?.messages) {
     const listUrl = buildUrl(
       metaConfig.endpoints.conversationMessages(options.conversationId),
@@ -644,12 +908,33 @@ export async function fetchConversationMessages(options: {
         limit: '50',
       },
     );
-    return await paginateList<MetaMessage>(listUrl);
+    return await paginateList<MetaMessage>(
+      listUrl,
+      buildTelemetry({
+        env: options.env,
+        op: 'meta.conversation_messages',
+        route: metaRouteLabels.conversationMessages,
+        method: 'GET',
+        workspaceId: options.workspaceId,
+        assetId: options.assetId,
+      }),
+    );
   }
   const results = [...payload.data.messages.data];
   let nextUrl = payload.data.messages.paging?.next;
   while (nextUrl) {
-    const page = await fetchGraph<MetaMessage[]>(nextUrl);
+    const page = await fetchGraph<MetaMessage[]>(
+      nextUrl,
+      undefined,
+      buildTelemetry({
+        env: options.env,
+        op: 'meta.conversation_messages',
+        route: metaRouteLabels.conversationMessages,
+        method: 'GET',
+        workspaceId: options.workspaceId,
+        assetId: options.assetId,
+      }),
+    );
     results.push(...page.data);
     nextUrl = page.paging?.next;
   }
@@ -662,9 +947,11 @@ export type MetaIgAsset = {
 };
 
 export async function fetchInstagramAssets(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(
     metaConfig.endpoints.igAccounts(options.pageId),
@@ -674,7 +961,18 @@ export async function fetchInstagramAssets(options: {
       fields: metaConfig.fields.igAccounts.join(','),
     },
   );
-  const payload = await fetchGraph<MetaIgAsset[]>(url);
+  const payload = await fetchGraph<MetaIgAsset[]>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.ig_accounts',
+      route: metaRouteLabels.igAccounts,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   if (payload.data.length) {
     return payload.data;
   }
@@ -698,7 +996,18 @@ export async function fetchInstagramAssets(options: {
       username?: string;
       name?: string;
     };
-  }>(pageUrl);
+  }>(
+    pageUrl,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.ig_fallback',
+      route: metaRouteLabels.pageDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   const fallback: MetaIgAsset[] = [];
   if (pagePayload.data.instagram_business_account?.id) {
     fallback.push({
@@ -720,9 +1029,11 @@ export async function fetchInstagramAssets(options: {
 }
 
 export async function fetchPageIgDebug(options: {
+  env: MetaEnv;
   pageId: string;
   accessToken: string;
   version: string;
+  workspaceId?: string | null;
 }) {
   const url = buildUrl(
     metaConfig.endpoints.pageDetails(options.pageId),
@@ -744,6 +1055,17 @@ export async function fetchPageIgDebug(options: {
       username?: string;
       name?: string;
     };
-  }>(url);
+  }>(
+    url,
+    undefined,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.ig_debug',
+      route: metaRouteLabels.pageDetails,
+      method: 'GET',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
   return payload.data;
 }
