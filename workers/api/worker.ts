@@ -17,6 +17,13 @@ import {
   type MetaConversation,
   fetchUserProfile,
 } from './meta';
+import { reportError } from './observability/reportError';
+import { queryAnalyticsEngine } from './observability/analyticsEngine';
+import {
+  parseMetricsWindow,
+  windowToSqlInterval,
+  type MetricsWindow,
+} from './observability/window';
 import { buildReportFromDb } from './report';
 import {
   buildSessionCookie,
@@ -32,6 +39,8 @@ type Env = {
   SYNC_RUNS_HUB: DurableObjectNamespace;
   SYNC_SCOPE_ORCHESTRATOR: DurableObjectNamespace;
   DEV_WS_PUBLISH_URL?: string;
+  AE_META_CALLS: AnalyticsEngineDataset;
+  AE_APP_ERRORS: AnalyticsEngineDataset;
   META_APP_ID: string;
   META_APP_SECRET: string;
   META_REDIRECT_URI: string;
@@ -42,6 +51,14 @@ type Env = {
   SYNC_CHECKPOINT_OVERLAP_SECONDS?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  RESEND_API_KEY?: string;
+  ALERT_EMAIL_TO?: string;
+  ALERT_EMAIL_FROM?: string;
+  META_ERROR_RATE_THRESHOLD?: string;
+  META_MIN_CALLS_THRESHOLD?: string;
+  APP_ERRORS_THRESHOLD?: string;
 };
 
 type SyncJob =
@@ -153,6 +170,29 @@ function normalizeUnknownError(err: unknown): {
   };
 }
 
+function classifyMetaErrorKey(error: MetaApiError): string {
+  const meta =
+    typeof error.meta === 'object' && error.meta !== null
+      ? (error.meta as { error?: { code?: number; type?: string } })
+      : undefined;
+  const fb = meta?.error;
+  if (error.status === 429 || fb?.code === 4 || fb?.code === 17) {
+    return 'meta.rate_limited';
+  }
+  if (fb?.type === 'OAuthException' || fb?.code === 190) {
+    return 'meta.oauth_exception';
+  }
+  return 'meta.unknown_error';
+}
+
+function parseNumberEnv(value: string | undefined, fallback: number) {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 const routes: Array<{
   method: string;
   pattern: URLPattern;
@@ -171,6 +211,27 @@ function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
   headers.set('content-type', 'application/json');
   return new Response(JSON.stringify(data), { ...init, headers });
+}
+
+async function cachedJson(
+  req: Request,
+  ctx: ExecutionContext,
+  cacheKey: string,
+  ttlSeconds: number,
+  builder: () => Promise<Response>,
+) {
+  const cache = await caches.open('ops-metrics');
+  const key = new Request(cacheKey, req);
+  const cached = await cache.match(key);
+  if (cached) {
+    return cached;
+  }
+  const response = await builder();
+  const cacheControl = `public, max-age=${ttlSeconds}`;
+  const cachedResponse = new Response(response.body, response);
+  cachedResponse.headers.set('cache-control', cacheControl);
+  ctx.waitUntil(cache.put(key, cachedResponse.clone()));
+  return cachedResponse;
 }
 
 async function readJson<T>(req: Request): Promise<T | null> {
@@ -960,6 +1021,250 @@ async function reconcileOpsMetrics(env: Env) {
     .run();
 }
 
+// AE_META_CALLS blobs:
+// 1 service, 2 api, 3 op, 4 route, 5 method, 6 status_class, 7 http_status,
+// 8 meta_error_code, 9 meta_error_subcode, 10 workspace_id, 11 asset_id
+// doubles: 1 count, 2 ok, 3 duration_ms
+async function getMetaMetrics(
+  env: Env,
+  window: MetricsWindow,
+): Promise<{
+  overall: {
+    total: number;
+    errors: number;
+    errorRate: number;
+    avgDurationMs: number | null;
+  };
+  byOp: Array<{
+    op: string;
+    total: number;
+    errors: number;
+    errorRate: number;
+    avgDurationMs: number | null;
+  }>;
+  topRoutes: Array<{
+    route: string;
+    status: string;
+    metaErrorCode: string;
+    metaErrorSubcode: string;
+    count: number;
+  }>;
+}> {
+  const interval = windowToSqlInterval(window);
+  const overallRows = await queryAnalyticsEngine<{
+    total: number;
+    ok: number;
+    avg_duration_ms: number | null;
+  }>(
+    env as Required<Env>,
+    `SELECT sum(double1) as total, sum(double2) as ok, avg(double3) as avg_duration_ms\n     FROM AE_META_CALLS\n     WHERE timestamp >= now() - ${interval}`,
+  );
+  const overall = overallRows[0] ?? {
+    total: 0,
+    ok: 0,
+    avg_duration_ms: null,
+  };
+  const total = Number(overall.total ?? 0);
+  const ok = Number(overall.ok ?? 0);
+  const errors = Math.max(0, total - ok);
+  const errorRate = total > 0 ? errors / total : 0;
+  const avgDurationMs =
+    typeof overall.avg_duration_ms === 'number'
+      ? overall.avg_duration_ms
+      : null;
+
+  const byOpRows = await queryAnalyticsEngine<{
+    op: string;
+    total: number;
+    ok: number;
+    avg_duration_ms: number | null;
+  }>(
+    env as Required<Env>,
+    `SELECT blob3 as op, sum(double1) as total, sum(double2) as ok, avg(double3) as avg_duration_ms\n     FROM AE_META_CALLS\n     WHERE timestamp >= now() - ${interval}\n     GROUP BY op\n     ORDER BY (sum(double1) - sum(double2)) DESC, total DESC\n     LIMIT 25`,
+  );
+  const byOp = byOpRows.map((row) => {
+    const rowTotal = Number(row.total ?? 0);
+    const rowOk = Number(row.ok ?? 0);
+    const rowErrors = Math.max(0, rowTotal - rowOk);
+    return {
+      op: row.op,
+      total: rowTotal,
+      errors: rowErrors,
+      errorRate: rowTotal > 0 ? rowErrors / rowTotal : 0,
+      avgDurationMs:
+        typeof row.avg_duration_ms === 'number' ? row.avg_duration_ms : null,
+    };
+  });
+
+  const topRoutesRows = await queryAnalyticsEngine<{
+    route: string;
+    status: string;
+    meta_error_code: string;
+    meta_error_subcode: string;
+    count: number;
+  }>(
+    env as Required<Env>,
+    `SELECT blob4 as route,\n            blob7 as status,\n            blob8 as meta_error_code,\n            blob9 as meta_error_subcode,\n            sum(double1) as count\n     FROM AE_META_CALLS\n     WHERE timestamp >= now() - ${interval}\n       AND blob6 != '2xx'\n     GROUP BY route, status, meta_error_code, meta_error_subcode\n     ORDER BY count DESC\n     LIMIT 20`,
+  );
+  const topRoutes = topRoutesRows.map((row) => ({
+    route: row.route,
+    status: row.status,
+    metaErrorCode: row.meta_error_code ?? '',
+    metaErrorSubcode: row.meta_error_subcode ?? '',
+    count: Number(row.count ?? 0),
+  }));
+
+  return {
+    overall: { total, errors, errorRate, avgDurationMs },
+    byOp,
+    topRoutes,
+  };
+}
+
+// AE_APP_ERRORS blobs:
+// 1 service, 2 kind, 3 severity, 4 error_key, 5 route, 6 workspace_id, 7 asset_id
+// doubles: 1 count
+async function getAppErrorMetrics(
+  env: Env,
+  window: MetricsWindow,
+): Promise<{
+  overall: { totalErrors: number };
+  byMinute: Array<{ minuteISO: string; errors: number }>;
+  topKeys: Array<{
+    errorKey: string;
+    kind: string;
+    severity: string;
+    count: number;
+  }>;
+}> {
+  const interval = windowToSqlInterval(window);
+  const totalRows = await queryAnalyticsEngine<{ total: number }>(
+    env as Required<Env>,
+    `SELECT sum(double1) as total\n     FROM AE_APP_ERRORS\n     WHERE timestamp >= now() - ${interval}`,
+  );
+  const totalErrors = Number(totalRows[0]?.total ?? 0);
+
+  const byMinuteRows = await queryAnalyticsEngine<{
+    minute: string;
+    count: number;
+  }>(
+    env as Required<Env>,
+    `SELECT toStartOfMinute(timestamp) as minute, sum(double1) as count\n     FROM AE_APP_ERRORS\n     WHERE timestamp >= now() - ${interval}\n     GROUP BY minute\n     ORDER BY minute ASC`,
+  );
+  const byMinute = byMinuteRows.map((row) => ({
+    minuteISO: row.minute,
+    errors: Number(row.count ?? 0),
+  }));
+
+  const topKeyRows = await queryAnalyticsEngine<{
+    error_key: string;
+    kind: string;
+    severity: string;
+    count: number;
+  }>(
+    env as Required<Env>,
+    `SELECT blob4 as error_key, blob2 as kind, blob3 as severity, sum(double1) as count\n     FROM AE_APP_ERRORS\n     WHERE timestamp >= now() - ${interval}\n     GROUP BY error_key, kind, severity\n     ORDER BY count DESC\n     LIMIT 10`,
+  );
+  const topKeys = topKeyRows.map((row) => ({
+    errorKey: row.error_key,
+    kind: row.kind,
+    severity: row.severity,
+    count: Number(row.count ?? 0),
+  }));
+
+  return { overall: { totalErrors }, byMinute, topKeys };
+}
+
+async function sendAlertEmail(
+  env: Env,
+  options: { subject: string; html: string; text: string },
+) {
+  const apiKey = env.RESEND_API_KEY;
+  const to = env.ALERT_EMAIL_TO;
+  const from = env.ALERT_EMAIL_FROM;
+  if (!apiKey || !to || !from) {
+    console.warn('Alert email not configured');
+    return;
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to,
+      subject: options.subject,
+      html: options.html,
+      text: options.text,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    console.error('Failed to send alert email', {
+      status: response.status,
+      body,
+    });
+  }
+}
+
+async function getAlertState(env: Env, key: string) {
+  return await env.DB.prepare(
+    'SELECT key, last_sent_at as lastSentAt, last_value as lastValue, last_payload as lastPayload FROM ops_alert_state WHERE key = ?',
+  )
+    .bind(key)
+    .first<{
+      key: string;
+      lastSentAt: number | null;
+      lastValue: number | null;
+      lastPayload: string | null;
+    }>();
+}
+
+async function setAlertState(
+  env: Env,
+  key: string,
+  value: number,
+  payload: string,
+) {
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO ops_alert_state (key, last_sent_at, last_value, last_payload)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at,
+       last_value = excluded.last_value,
+       last_payload = excluded.last_payload`,
+  )
+    .bind(key, now, value, payload)
+    .run();
+}
+
+function shouldSendAlert(params: {
+  lastSentAt: number | null;
+  lastValue: number | null;
+  currentValue: number;
+  threshold: number;
+}) {
+  const now = Date.now();
+  const lastSentAt = params.lastSentAt ?? 0;
+  const lastValue = params.lastValue ?? 0;
+  const minutesSince = (now - lastSentAt) / (1000 * 60);
+  if (params.currentValue < params.threshold) {
+    return false;
+  }
+  const lastBand = Math.floor(lastValue / params.threshold);
+  const currentBand = Math.floor(params.currentValue / params.threshold);
+  if (
+    minutesSince < 30 &&
+    params.currentValue <= lastValue * 1.5 &&
+    currentBand <= lastBand
+  ) {
+    return false;
+  }
+  return true;
+}
+
 async function runCronSync(env: Env) {
   const scopes = await listCronScopes(env);
   const counts = {
@@ -998,6 +1303,135 @@ async function runCronSync(env: Env) {
   }
 
   console.log('[cron-sync] summary', counts);
+}
+
+async function runOpsAlerts(env: Env) {
+  const window: MetricsWindow = '5m';
+  const metaThreshold = parseNumberEnv(env.META_ERROR_RATE_THRESHOLD, 0.02);
+  const metaMinCalls = parseNumberEnv(env.META_MIN_CALLS_THRESHOLD, 50);
+  const appThreshold = parseNumberEnv(env.APP_ERRORS_THRESHOLD, 10);
+
+  try {
+    const metaMetrics = await getMetaMetrics(env, window);
+    const { total, errors, errorRate } = metaMetrics.overall;
+    if (total >= metaMinCalls && errorRate >= metaThreshold) {
+      const state = await getAlertState(env, 'meta_error_rate_5m');
+      if (
+        shouldSendAlert({
+          lastSentAt: state?.lastSentAt ?? null,
+          lastValue: state?.lastValue ?? null,
+          currentValue: errorRate,
+          threshold: metaThreshold,
+        })
+      ) {
+        const topOps = metaMetrics.byOp.slice(0, 5);
+        const topRoutes = metaMetrics.topRoutes.slice(0, 5);
+        const subject = `Meta API error rate ${
+          Math.round(errorRate * 1000) / 10
+        }% in last ${window}`;
+        const html = `<h1>Meta API health alert</h1>\n<p>Window: ${window}</p>\n<p>Total calls: ${total}</p>\n<p>Errors: ${errors}</p>\n<p>Error rate: ${(
+          errorRate * 100
+        ).toFixed(
+          2,
+        )}% (threshold ${(metaThreshold * 100).toFixed(2)}%)</p>\n<h2>Top ops</h2>\n<ul>${topOps
+          .map(
+            (op) =>
+              `<li>${op.op}: ${op.errors} errors (${(
+                op.errorRate * 100
+              ).toFixed(2)}%)</li>`,
+          )
+          .join('')}</ul>\n<h2>Top routes</h2>\n<ul>${topRoutes
+          .map(
+            (route) =>
+              `<li>${route.route} ${route.status} code ${route.metaErrorCode}/${route.metaErrorSubcode}: ${route.count}</li>`,
+          )
+          .join('')}</ul>`;
+        const text = `Meta API health alert\nWindow: ${window}\nTotal calls: ${total}\nErrors: ${errors}\nError rate: ${(
+          errorRate * 100
+        ).toFixed(2)}% (threshold ${(metaThreshold * 100).toFixed(
+          2,
+        )}%)\nTop ops:\n${topOps
+          .map(
+            (op) =>
+              `- ${op.op}: ${op.errors} errors (${(op.errorRate * 100).toFixed(
+                2,
+              )}%)`,
+          )
+          .join('\n')}\nTop routes:\n${topRoutes
+          .map(
+            (route) =>
+              `- ${route.route} ${route.status} code ${route.metaErrorCode}/${route.metaErrorSubcode}: ${route.count}`,
+          )
+          .join('\n')}`;
+        await sendAlertEmail(env, { subject, html, text });
+        await setAlertState(
+          env,
+          'meta_error_rate_5m',
+          errorRate,
+          JSON.stringify({
+            window,
+            total,
+            errors,
+            errorRate,
+            topOps,
+            topRoutes,
+          }),
+        );
+      }
+    }
+  } catch (error) {
+    reportError(env, {
+      errorKey: 'meta.alert_failed',
+      kind: 'meta',
+      route: 'cron.alert.meta',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const errorMetrics = await getAppErrorMetrics(env, window);
+    const totalErrors = errorMetrics.overall.totalErrors;
+    if (totalErrors >= appThreshold) {
+      const state = await getAlertState(env, 'app_errors_5m');
+      if (
+        shouldSendAlert({
+          lastSentAt: state?.lastSentAt ?? null,
+          lastValue: state?.lastValue ?? null,
+          currentValue: totalErrors,
+          threshold: appThreshold,
+        })
+      ) {
+        const topKeys = errorMetrics.topKeys.slice(0, 10);
+        const subject = `App errors ${totalErrors} in last ${window}`;
+        const html = `<h1>App errors alert</h1>\n<p>Window: ${window}</p>\n<p>Total errors: ${totalErrors}</p>\n<p>Threshold: ${appThreshold}</p>\n<h2>Top error keys</h2>\n<ul>${topKeys
+          .map(
+            (entry) =>
+              `<li>${entry.errorKey} (${entry.kind}/${entry.severity}): ${entry.count}</li>`,
+          )
+          .join('')}</ul>`;
+        const text = `App errors alert\nWindow: ${window}\nTotal errors: ${totalErrors}\nThreshold: ${appThreshold}\nTop error keys:\n${topKeys
+          .map(
+            (entry) =>
+              `- ${entry.errorKey} (${entry.kind}/${entry.severity}): ${entry.count}`,
+          )
+          .join('\n')}`;
+        await sendAlertEmail(env, { subject, html, text });
+        await setAlertState(
+          env,
+          'app_errors_5m',
+          totalErrors,
+          JSON.stringify({ window, totalErrors, topKeys }),
+        );
+      }
+    }
+  } catch (error) {
+    reportError(env, {
+      errorKey: 'app.alert_failed',
+      kind: 'exception',
+      route: 'cron.alert.app',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function getSyncState(
@@ -1074,9 +1508,11 @@ async function runSync(options: {
   if (!normalizedName || normalizedName === 'page') {
     try {
       const pageName = await fetchPageName({
+        env,
         pageId,
         accessToken,
         version: getApiVersion(env),
+        workspaceId: userId,
       });
       await updatePageNameIfPlaceholder(env, {
         userId,
@@ -1107,6 +1543,7 @@ async function runSync(options: {
     conversations: MetaConversation[];
     nextCursor: string | null;
   } = await fetchConversationsPage({
+    env,
     pageId,
     accessToken,
     version: getApiVersion(env),
@@ -1114,6 +1551,7 @@ async function runSync(options: {
     since: since ?? undefined,
     after: cursor ?? undefined,
     limit: 20,
+    workspaceId: userId,
   });
 
   let conversationCount = existingRun?.conversations ?? 0;
@@ -1129,9 +1567,12 @@ async function runSync(options: {
       }
     }
     const messages = await fetchConversationMessages({
+      env,
       conversationId: convo.id,
       accessToken,
       version: getApiVersion(env),
+      workspaceId: userId,
+      assetId: igId ?? pageId,
     });
     const filteredMessages = sinceDateMs
       ? messages.filter((message) => {
@@ -1643,6 +2084,7 @@ addRoute('GET', '/api/auth/callback', async (req, env) => {
   }
 
   const shortToken = await exchangeCodeForToken({
+    env,
     appId: env.META_APP_ID,
     appSecret: env.META_APP_SECRET,
     redirectUri: env.META_REDIRECT_URI,
@@ -1650,6 +2092,7 @@ addRoute('GET', '/api/auth/callback', async (req, env) => {
     version: getApiVersion(env),
   });
   const longToken = await exchangeForLongLivedToken({
+    env,
     appId: env.META_APP_ID,
     appSecret: env.META_APP_SECRET,
     accessToken: shortToken.accessToken,
@@ -1658,6 +2101,7 @@ addRoute('GET', '/api/auth/callback', async (req, env) => {
 
   const appToken = `${env.META_APP_ID}|${env.META_APP_SECRET}`;
   const debug = await debugToken({
+    env,
     inputToken: longToken.accessToken,
     appToken,
     version: getApiVersion(env),
@@ -1727,8 +2171,10 @@ addRoute('GET', '/api/auth/me', async (req, env) => {
     const token = await getUserToken(env, session.userId);
     if (token?.access_token) {
       const profile = await fetchUserProfile({
+        env,
         accessToken: token.access_token,
         version: getApiVersion(env),
+        workspaceId: session.userId,
       });
       name = profile?.name ?? null;
     }
@@ -1774,8 +2220,10 @@ addRoute('GET', '/api/meta/permissions', async (req, env) => {
   }
   try {
     const permissions = await fetchPermissions({
+      env,
       accessToken: token.access_token,
       version: getApiVersion(env),
+      workspaceId: userId,
     });
     const granted = permissions
       .filter((perm) => perm.status === 'granted')
@@ -1786,6 +2234,12 @@ addRoute('GET', '/api/meta/permissions', async (req, env) => {
     return json({ hasToken: true, permissions, missing });
   } catch (error) {
     console.error(error);
+    reportError(env, {
+      errorKey: 'meta.permissions_failed',
+      kind: 'meta',
+      route: 'GET /api/meta/permissions',
+      message: error instanceof Error ? error.message : String(error),
+    });
     return json(
       {
         hasToken: true,
@@ -1810,12 +2264,20 @@ addRoute('GET', '/api/meta/businesses', async (req, env) => {
   }
   try {
     const businesses = await fetchBusinesses({
+      env,
       accessToken: token.access_token,
       version: getApiVersion(env),
+      workspaceId: userId,
     });
     return json(businesses);
   } catch (error) {
     console.error(error);
+    reportError(env, {
+      errorKey: 'meta.businesses_failed',
+      kind: 'meta',
+      route: 'GET /api/meta/businesses',
+      message: error instanceof Error ? error.message : String(error),
+    });
     return json(
       {
         error:
@@ -1844,9 +2306,11 @@ addRoute(
     }
     try {
       const result = await fetchBusinessPages({
+        env,
         businessId,
         accessToken: token.access_token,
         version: getApiVersion(env),
+        workspaceId: userId,
       });
       return json(
         result.pages.map((page) => ({
@@ -1857,6 +2321,12 @@ addRoute(
       );
     } catch (error) {
       console.error(error);
+      reportError(env, {
+        errorKey: 'meta.pages_failed',
+        kind: 'meta',
+        route: 'GET /api/meta/businesses/:businessId/pages',
+        message: error instanceof Error ? error.message : String(error),
+      });
       return json(
         {
           error:
@@ -1879,12 +2349,20 @@ addRoute('GET', '/api/meta/accounts', async (req, env) => {
   }
   try {
     const pages = await fetchClassicPages({
+      env,
       accessToken: token.access_token,
       version: getApiVersion(env),
+      workspaceId: userId,
     });
     return json(pages);
   } catch (error) {
     console.error(error);
+    reportError(env, {
+      errorKey: 'meta.accounts_failed',
+      kind: 'meta',
+      route: 'GET /api/meta/accounts',
+      message: error instanceof Error ? error.message : String(error),
+    });
     return json(
       {
         error:
@@ -1915,9 +2393,11 @@ addRoute(
     const rawName = body?.name ?? '';
     try {
       const page = await fetchPageToken({
+        env,
         pageId,
         accessToken: token.access_token,
         version: getApiVersion(env),
+        workspaceId: userId,
       });
       const trimmed = rawName.trim();
       const normalized = trimmed.toLowerCase();
@@ -1960,6 +2440,14 @@ addRoute(
               : error.status >= 500
                 ? 502
                 : 500;
+        reportError(env, {
+          errorKey: classifyMetaErrorKey(error),
+          kind: 'meta',
+          route: 'POST /api/meta/pages/:pageId/token',
+          workspaceId: userId,
+          assetId: pageId,
+          message: error.message,
+        });
         return json(
           {
             error: 'Meta API error',
@@ -1982,6 +2470,14 @@ addRoute(
       }
       const norm = normalizeUnknownError(error);
       console.error('Meta page token failed', { userId, pageId, ...norm });
+      reportError(env, {
+        errorKey: 'meta.page_token_failed',
+        kind: 'meta',
+        route: 'POST /api/meta/pages/:pageId/token',
+        workspaceId: userId,
+        assetId: pageId,
+        message: norm.message,
+      });
       return json(
         { error: 'Meta page token failed', details: norm },
         { status: 500 },
@@ -2009,23 +2505,35 @@ addRoute(
     let assets: { id: string; name?: string }[] = [];
     try {
       assets = await fetchInstagramAssets({
+        env,
         pageId,
         accessToken: page.access_token,
         version: getApiVersion(env),
+        workspaceId: userId,
       });
     } catch (error) {
       console.error('Failed to fetch Instagram assets', {
         pageId,
         error: error instanceof Error ? error.message : error,
       });
+      reportError(env, {
+        errorKey: 'meta.ig_assets_failed',
+        kind: 'meta',
+        route: 'GET /api/meta/pages/:pageId/ig-assets',
+        workspaceId: userId,
+        assetId: pageId,
+        message: error instanceof Error ? error.message : String(error),
+      });
       const message = error instanceof Error ? error.message : '';
       if (message.includes('Page Access Token')) {
         const token = await getUserToken(env, userId);
         if (token) {
           const refreshed = await fetchPageToken({
+            env,
             pageId,
             accessToken: token.access_token,
             version: getApiVersion(env),
+            workspaceId: userId,
           });
           await upsertPage(env, {
             userId,
@@ -2034,9 +2542,11 @@ addRoute(
             accessToken: refreshed.accessToken,
           });
           assets = await fetchInstagramAssets({
+            env,
             pageId,
             accessToken: refreshed.accessToken,
             version: getApiVersion(env),
+            workspaceId: userId,
           });
         }
       } else {
@@ -2083,15 +2593,19 @@ addRoute(
     const token = await getUserToken(env, userId);
     try {
       const pageData = await fetchPageIgDebug({
+        env,
         pageId,
         accessToken: page.access_token,
         version: getApiVersion(env),
+        workspaceId: userId,
       });
       const userData = token
         ? await fetchPageIgDebug({
+            env,
             pageId,
             accessToken: token.access_token,
             version: getApiVersion(env),
+            workspaceId: userId,
           })
         : null;
       return json({
@@ -2101,6 +2615,14 @@ addRoute(
       });
     } catch (error) {
       console.error(error);
+      reportError(env, {
+        errorKey: 'meta.ig_debug_failed',
+        kind: 'meta',
+        route: 'GET /api/meta/pages/:pageId/ig-debug',
+        workspaceId: userId,
+        assetId: pageId,
+        message: error instanceof Error ? error.message : String(error),
+      });
       return json(
         {
           error:
@@ -2223,6 +2745,40 @@ addRoute('GET', '/api/ops/messages-per-hour', async (req, env) => {
   });
 
   return json({ hours, points });
+});
+
+addRoute('GET', '/api/ops/metrics/meta', async (req, env, ctx) => {
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const url = new URL(req.url);
+  const parsed = parseMetricsWindow(url.searchParams.get('window'), '15m');
+  if (!parsed) {
+    return json({ error: 'Invalid window' }, { status: 400 });
+  }
+  const cacheKey = `https://cache.msgstats/ops/meta?window=${parsed}`;
+  return cachedJson(req, ctx, cacheKey, 45, async () => {
+    const metrics = await getMetaMetrics(env, parsed);
+    return json({ window: parsed, ...metrics });
+  });
+});
+
+addRoute('GET', '/api/ops/metrics/errors', async (req, env, ctx) => {
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const url = new URL(req.url);
+  const parsed = parseMetricsWindow(url.searchParams.get('window'), '60m');
+  if (!parsed) {
+    return json({ error: 'Invalid window' }, { status: 400 });
+  }
+  const cacheKey = `https://cache.msgstats/ops/errors?window=${parsed}`;
+  return cachedJson(req, ctx, cacheKey, 45, async () => {
+    const metrics = await getAppErrorMetrics(env, parsed);
+    return json({ window: parsed, ...metrics });
+  });
 });
 
 addRoute(
@@ -2407,6 +2963,12 @@ export default {
             pathname,
             error: error instanceof Error ? error.message : error,
           });
+          reportError(env, {
+            errorKey: 'route.unhandled_error',
+            kind: 'exception',
+            route: `${method} ${pathname}`,
+            message: error instanceof Error ? error.message : String(error),
+          });
           return json({ error: 'Internal server error' }, { status: 500 });
         }
       }
@@ -2420,6 +2982,7 @@ export default {
   ) {
     ctx.waitUntil(runCronSync(env));
     ctx.waitUntil(reconcileOpsMetrics(env));
+    ctx.waitUntil(runOpsAlerts(env));
   },
   async queue(batch: MessageBatch<SyncJob>, env: Env) {
     for (const message of batch.messages) {
@@ -2448,6 +3011,12 @@ export default {
             runId: message.body.runId,
             error: messageText,
           });
+          reportError(env, {
+            errorKey: 'sync.recompute_failed',
+            kind: 'sync',
+            route: 'queue.recompute_stats',
+            message: messageText,
+          });
           await updateSyncRunStatsAndNotify(env, {
             id: message.body.runId,
             statsStatus: 'failed',
@@ -2467,6 +3036,14 @@ export default {
           runId: syncJob.runId,
           attempt,
           error: messageText,
+        });
+        reportError(env, {
+          errorKey: 'sync.run_failed',
+          kind: 'sync',
+          route: 'queue.sync',
+          workspaceId: syncJob.userId,
+          assetId: syncJob.igId ?? syncJob.pageId,
+          message: messageText,
         });
         if (isNetworkError(error) && attempt < 3) {
           await updateSyncRunAndNotify(env, {

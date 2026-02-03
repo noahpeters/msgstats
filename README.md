@@ -25,8 +25,19 @@ Messenger + Instagram analytics deployed on Cloudflare Workers with a D1 databas
    wrangler secret put META_APP_SECRET --config wrangler.api.toml
    wrangler secret put META_REDIRECT_URI --config wrangler.api.toml
    wrangler secret put SESSION_SECRET --config wrangler.api.toml
+   wrangler secret put CLOUDFLARE_ACCOUNT_ID --config wrangler.api.toml
+   wrangler secret put CLOUDFLARE_API_TOKEN --config wrangler.api.toml
+   wrangler secret put RESEND_API_KEY --config wrangler.api.toml
    ```
-4. Run local dev (API + web workers + build watch):
+4. Optional alerting config (non-secrets):
+   ```bash
+   wrangler secret put ALERT_EMAIL_TO --config wrangler.api.toml
+   wrangler secret put ALERT_EMAIL_FROM --config wrangler.api.toml
+   wrangler secret put META_ERROR_RATE_THRESHOLD --config wrangler.api.toml
+   wrangler secret put META_MIN_CALLS_THRESHOLD --config wrangler.api.toml
+   wrangler secret put APP_ERRORS_THRESHOLD --config wrangler.api.toml
+   ```
+5. Run local dev (API + web workers + build watch):
    ```bash
    npm run dev
    ```
@@ -64,6 +75,16 @@ npm run deploy:web
 - Required GitHub secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
+
+## Ops dashboard + alerting
+
+- Ops metrics and telemetry are shown on `/ops-dashboard` (requires auth).
+- Analytics Engine datasets:
+  - `AE_META_CALLS` for Meta API outbound telemetry.
+  - `AE_APP_ERRORS` for app error counters.
+- `/api/ops/metrics/meta?window=15m` and `/api/ops/metrics/errors?window=60m` serve aggregated AE metrics.
+- Cron runs every 5 minutes to evaluate alert thresholds and email via Resend.
+- Alert state is deduped in D1 (`ops_alert_state`) to avoid repeated emails.
 
 ### Preview deploy
 
