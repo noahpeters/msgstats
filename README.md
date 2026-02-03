@@ -57,10 +57,11 @@ npm run deploy:web
 
 ## CI & deployments
 
-- **CI** runs on PRs and pushes. It includes `npm run verify`, migration edits check, and a staging remote migration guard when Cloudflare secrets are available.
-- **Staging** deploys on push to `main`. It applies staging migrations, deploys API + web, and sets `VITE_STAGING_INFO` for the build banner.
+- **CI** runs on PRs and pushes. It includes `npm run verify` and the migration edits guard.
+- **Staging** deploys on push to `main`. It applies staging migrations automatically before deploying API + web, and sets `VITE_STAGING_INFO` for the build banner.
 - **Preview** deploys are manual via GitHub Actions. They deploy a web-only worker pointing at the staging API and set `VITE_STAGING_INFO`.
-- **Production** promotions are manual via GitHub Actions. They apply prod migrations, deploy API + web, and set `VITE_STAGING_INFO` (banner hidden in prod).
+- **Production** promotions are manual via GitHub Actions. They apply prod migrations automatically before deploying API + web, and set `VITE_STAGING_INFO` (banner hidden in prod).
+- Manual migration scripts (`db:migrations:staging`, `db:migrations:remote`) are for exceptional ops only; normal releases rely on the deploy workflows to apply migrations.
 - Required GitHub secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
@@ -83,5 +84,5 @@ The preview worker is web-only and points to the staging API service binding.
 - `npm run build` – build SSR + client assets
 - `npm run deploy:web` – deploy UI worker
 - `npm run deploy:api` – deploy API worker
-- `npm run db:migrations:staging` – apply staging D1 migrations
+- `npm run db:migrations:staging` – apply staging D1 migrations (exceptional/manual)
 - `npm run verify` – lint + format + typecheck + test
