@@ -19,7 +19,7 @@ const localFiles = fs
 let remoteListRaw = '';
 try {
   remoteListRaw = execSync(
-    'npx wrangler d1 migrations list msgstats-db-staging --remote --config wrangler.api.staging.toml',
+    'npx wrangler d1 migrations list DB --remote --config wrangler.api.toml --env staging',
     { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 } catch (error) {

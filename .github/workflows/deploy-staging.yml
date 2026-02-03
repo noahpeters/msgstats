@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -25,9 +29,9 @@ jobs:
       - name: Verify
         run: npm run verify
       - name: Apply staging migrations
-        run: npx wrangler d1 migrations apply msgstats-db-staging --remote --config wrangler.api.staging.toml
+        run: npx wrangler d1 migrations apply DB --env staging --remote --config wrangler.api.toml
       - name: Deploy staging API
-        run: npx wrangler deploy --config wrangler.api.staging.toml --var VITE_STAGING_INFO:$VITE_STAGING_INFO
+        run: npx wrangler deploy --config wrangler.api.toml --env staging --var VITE_STAGING_INFO:$VITE_STAGING_INFO
       - name: Build web assets
         run: npm run build
       - name: Deploy staging web

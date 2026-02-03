@@ -15,14 +15,16 @@ const envValue = envIndex >= 0 ? args[envIndex + 1] : 'production';
 
 const configByEnv = {
   staging: {
-    db: 'msgstats-db-staging',
-    config: 'wrangler.api.staging.toml',
+    db: 'DB',
+    config: 'wrangler.api.toml',
+    env: 'staging',
     label: 'staging',
     applyScript: 'db:migrations:staging',
   },
   production: {
-    db: 'msgstats-db',
+    db: 'DB',
     config: 'wrangler.api.toml',
+    env: 'production',
     label: 'production',
     applyScript: 'db:migrations:remote',
   },
@@ -45,7 +47,7 @@ const localFiles = fs
 let remoteListRaw = '';
 try {
   remoteListRaw = execSync(
-    `npx wrangler d1 migrations list ${target.db} --remote --config ${target.config}`,
+    `npx wrangler d1 migrations list ${target.db} --remote --config ${target.config} --env ${target.env}`,
     { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 } catch (error) {
