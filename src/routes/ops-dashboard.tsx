@@ -146,8 +146,8 @@ export default function OpsDashboard(): React.ReactElement {
     )
     .range([0, innerWidth]);
   const yScale = d3
-    .scaleLinear()
-    .domain([0, maxCount])
+    .scaleLog()
+    .domain([1, maxCount])
     .nice()
     .range([innerHeight, 0]);
   const barWidth = parsedPoints.length
@@ -171,7 +171,10 @@ export default function OpsDashboard(): React.ReactElement {
       .axisBottom(xScale)
       .ticks(tickInterval)
       .tickFormat(tickFormat);
-    const yAxis = d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('~s'));
+    const yAxis = d3
+      .axisLeft(yScale)
+      .ticks(4, '~s')
+      .tickFormat(d3.format('~s'));
     if (xAxisRef.current) {
       d3.select(xAxisRef.current).call(xAxis);
     }
@@ -237,8 +240,10 @@ export default function OpsDashboard(): React.ReactElement {
               <g transform={`translate(${margin.left}, ${margin.top})`}>
                 {parsedPoints.map((point) => {
                   const x = xScale(point.date) - barWidth / 2;
-                  const y = yScale(point.count);
-                  const barHeight = innerHeight - y;
+                  const clampedCount = Math.max(1, point.count);
+                  const y = yScale(clampedCount);
+                  const barHeight =
+                    point.count <= 0 ? 0 : Math.max(1, innerHeight - y);
                   const label = `${hourFormatter.format(
                     point.date,
                   )}: ${point.count} messages`;
