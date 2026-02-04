@@ -171,10 +171,7 @@ export default function OpsDashboard(): React.ReactElement {
       .axisBottom(xScale)
       .ticks(tickInterval)
       .tickFormat(tickFormat);
-    const yAxis = d3
-      .axisLeft(yScale)
-      .ticks(4, '~s')
-      .tickFormat(d3.format('~s'));
+    const yAxis = d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('~s'));
     if (xAxisRef.current) {
       d3.select(xAxisRef.current).call(xAxis);
     }

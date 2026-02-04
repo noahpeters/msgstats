@@ -17,6 +17,13 @@ declare module 'd3' {
     nice: () => ScaleLinear;
   };
 
+  export type ScaleLog = {
+    (value: number): number;
+    domain: (values: [number, number]) => ScaleLog;
+    range: (values: [number, number]) => ScaleLog;
+    nice: () => ScaleLog;
+  };
+
   export function extent<T, R>(
     values: T[],
     accessor: (value: T) => R,
@@ -24,6 +31,7 @@ declare module 'd3' {
 
   export function scaleTime(): ScaleTime;
   export function scaleLinear(): ScaleLinear;
+  export function scaleLog(): ScaleLog;
 
   export function axisBottom<T>(scale: (value: T) => number): Axis<T>;
   export function axisLeft(scale: (value: number) => number): Axis<number>;
