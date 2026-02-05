@@ -1050,7 +1050,32 @@ async function getMetaMetrics(
     count: number;
   }>;
 }> {
+  const empty = {
+    overall: { total: 0, errors: 0, errorRate: 0, avgDurationMs: null },
+    byOp: [],
+    topRoutes: [],
+  };
   const interval = windowToSqlInterval(window);
+  try {
+    const countRows = await queryAnalyticsEngine<{ total: number }>(
+      env as Required<Env>,
+      `SELECT count() as total\n     FROM AE_META_CALLS\n     WHERE timestamp >= now() - ${interval}`,
+    );
+    const totalRows = Number(countRows[0]?.total ?? 0);
+    if (totalRows === 0) {
+      return empty;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes('unknown table') ||
+      message.includes('unable to find type of column')
+    ) {
+      return empty;
+    }
+    throw error;
+  }
+
   const overallRows = await queryAnalyticsEngine<{
     total: number;
     ok: number;
@@ -1137,7 +1162,28 @@ async function getAppErrorMetrics(
     count: number;
   }>;
 }> {
+  const empty = { overall: { totalErrors: 0 }, byMinute: [], topKeys: [] };
   const interval = windowToSqlInterval(window);
+  try {
+    const countRows = await queryAnalyticsEngine<{ total: number }>(
+      env as Required<Env>,
+      `SELECT count() as total\n     FROM AE_APP_ERRORS\n     WHERE timestamp >= now() - ${interval}`,
+    );
+    const totalRows = Number(countRows[0]?.total ?? 0);
+    if (totalRows === 0) {
+      return empty;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes('unknown table') ||
+      message.includes('unable to find type of column')
+    ) {
+      return empty;
+    }
+    throw error;
+  }
+
   const totalRows = await queryAnalyticsEngine<{ total: number }>(
     env as Required<Env>,
     `SELECT sum(double1) as total\n     FROM AE_APP_ERRORS\n     WHERE timestamp >= now() - ${interval}`,

@@ -18,12 +18,12 @@ export function parseMetricsWindow(
 export function windowToSqlInterval(window: MetricsWindow): string {
   switch (window) {
     case '5m':
-      return 'INTERVAL 5 MINUTE';
+      return "INTERVAL '5' MINUTE";
     case '15m':
-      return 'INTERVAL 15 MINUTE';
+      return "INTERVAL '15' MINUTE";
     case '60m':
-      return 'INTERVAL 60 MINUTE';
+      return "INTERVAL '60' MINUTE";
     case '24h':
-      return 'INTERVAL 24 HOUR';
+      return "INTERVAL '24' HOUR";
   }
 }

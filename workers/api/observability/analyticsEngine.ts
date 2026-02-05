@@ -12,23 +12,21 @@ type AnalyticsQueryResult<T> = {
 export async function queryAnalyticsEngine<T>(
   env: AnalyticsQueryEnv,
   sql: string,
-  params?: Array<string | number | boolean>,
 ): Promise<T[]> {
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = env.CLOUDFLARE_API_TOKEN;
   if (!accountId || !apiToken) {
     throw new Error('Missing Cloudflare Analytics Engine credentials.');
   }
-  const hasParams = Boolean(params && params.length);
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
     {
       method: 'POST',
       headers: {
         authorization: `Bearer ${apiToken}`,
-        'content-type': hasParams ? 'application/json' : 'text/plain',
+        'content-type': 'text/plain',
       },
-      body: hasParams ? JSON.stringify({ sql, params }) : sql,
+      body: sql,
     },
   );
   if (!response.ok) {
