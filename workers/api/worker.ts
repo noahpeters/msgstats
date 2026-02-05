@@ -2759,8 +2759,17 @@ addRoute('GET', '/api/ops/metrics/meta', async (req, env, ctx) => {
   }
   const cacheKey = `https://cache.msgstats/ops/meta?window=${parsed}`;
   return cachedJson(req, ctx, cacheKey, 45, async () => {
-    const metrics = await getMetaMetrics(env, parsed);
-    return json({ window: parsed, ...metrics });
+    try {
+      const metrics = await getMetaMetrics(env, parsed);
+      return json({ window: parsed, ...metrics });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Failed to load meta metrics', message);
+      return json(
+        { error: 'Failed to load metrics', detail: message },
+        { status: 500 },
+      );
+    }
   });
 });
 
@@ -2776,8 +2785,17 @@ addRoute('GET', '/api/ops/metrics/errors', async (req, env, ctx) => {
   }
   const cacheKey = `https://cache.msgstats/ops/errors?window=${parsed}`;
   return cachedJson(req, ctx, cacheKey, 45, async () => {
-    const metrics = await getAppErrorMetrics(env, parsed);
-    return json({ window: parsed, ...metrics });
+    try {
+      const metrics = await getAppErrorMetrics(env, parsed);
+      return json({ window: parsed, ...metrics });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Failed to load error metrics', message);
+      return json(
+        { error: 'Failed to load metrics', detail: message },
+        { status: 500 },
+      );
+    }
   });
 });
 
