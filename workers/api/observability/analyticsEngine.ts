@@ -19,15 +19,16 @@ export async function queryAnalyticsEngine<T>(
   if (!accountId || !apiToken) {
     throw new Error('Missing Cloudflare Analytics Engine credentials.');
   }
+  const hasParams = Boolean(params && params.length);
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
     {
       method: 'POST',
       headers: {
         authorization: `Bearer ${apiToken}`,
-        'content-type': 'application/json',
+        'content-type': hasParams ? 'application/json' : 'text/plain',
       },
-      body: JSON.stringify({ sql, params }),
+      body: hasParams ? JSON.stringify({ sql, params }) : sql,
     },
   );
   if (!response.ok) {
