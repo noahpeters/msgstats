@@ -56,6 +56,12 @@ type AssetsResponse = {
   igEnabled: boolean;
 };
 
+type FollowupCount = {
+  count: number;
+  windowDays: number;
+  slaHours: number;
+};
+
 type SyncRun = {
   id: string;
   pageId: string;
@@ -280,6 +286,11 @@ export default function Dashboard(): React.ReactElement {
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
   const syncRunStatuses = React.useRef(new Map<string, string>());
   const loadedIgAssets = React.useRef(new Set<string>());
+  const [followupCount, setFollowupCount] =
+    React.useState<FollowupCount | null>(null);
+  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
+    null,
+  );
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [loggingOut, setLoggingOut] = React.useState(false);
@@ -334,11 +345,44 @@ export default function Dashboard(): React.ReactElement {
     [fetchJson],
   );
 
+  const refreshFollowupCount = React.useCallback(
+    async (force = false) => {
+      if (!flags?.followupInbox) {
+        return;
+      }
+      const { ok, data } = await fetchJson<FollowupCount>(
+        '/api/inbox/follow-up/count',
+        undefined,
+        { force },
+      );
+      if (!ok) {
+        return;
+      }
+      setFollowupCount(data ?? null);
+    },
+    [fetchJson, flags?.followupInbox],
+  );
+
+  const refreshFlags = React.useCallback(async () => {
+    const { ok, data } = await fetchJson<{ followupInbox?: boolean }>(
+      '/api/feature-flags',
+    );
+    if (!ok) return;
+    setFlags(data ?? null);
+  }, [fetchJson]);
+
   React.useEffect(() => {
     void refreshAuth();
     void refreshPermissions();
     void refreshAssets();
-  }, [refreshAssets, refreshAuth, refreshPermissions]);
+    void refreshFlags();
+  }, [refreshAssets, refreshAuth, refreshPermissions, refreshFlags]);
+
+  React.useEffect(() => {
+    if (flags?.followupInbox) {
+      void refreshFollowupCount(true);
+    }
+  }, [flags?.followupInbox, refreshFollowupCount]);
 
   const mergeRunUpdate = React.useCallback((run: SyncRun) => {
     setSyncRuns((prev) => {
@@ -701,6 +745,26 @@ export default function Dashboard(): React.ReactElement {
           <p style={{ color: colors.coral }}>{permissions.error}</p>
         ) : null}
       </section>
+
+      {flags?.followupInbox ? (
+        <section {...stylex.props(layout.card)}>
+          <h2>Needs Follow-Up</h2>
+          <p {...stylex.props(layout.note)}>
+            Global count of conversations that need a reply in the last{' '}
+            {followupCount?.windowDays ?? 30} days.
+          </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <a href="/inbox/follow-up" title="Global">
+              <button {...stylex.props(layout.button)}>
+                {followupCount?.count ?? 0} conversations
+              </button>
+            </a>
+            <span {...stylex.props(layout.note)}>
+              SLA threshold: {followupCount?.slaHours ?? 24}h · Scope: Global
+            </span>
+          </div>
+        </section>
+      ) : null}
 
       {showBusinessesCard ? (
         <section {...stylex.props(layout.card)}>

@@ -15,6 +15,7 @@ import {
   metaConfig,
   MetaApiError,
   type MetaConversation,
+  sendMessage,
   fetchUserProfile,
 } from './meta';
 import { reportError } from './observability/reportError';
@@ -37,6 +38,7 @@ type Env = {
   DB: D1Database;
   SYNC_QUEUE: Queue<SyncJob>;
   SYNC_RUNS_HUB: DurableObjectNamespace;
+  INBOX_HUB: DurableObjectNamespace;
   SYNC_SCOPE_ORCHESTRATOR: DurableObjectNamespace;
   DEV_WS_PUBLISH_URL?: string;
   AE_META_CALLS: AnalyticsEngineDataset;
@@ -46,9 +48,13 @@ type Env = {
   META_REDIRECT_URI: string;
   META_API_VERSION?: string;
   META_SCOPES?: string;
+  META_WEBHOOK_VERIFY_TOKEN?: string;
   EARLIEST_MESSAGES_AT?: string;
   SYNC_MIN_INTERVAL_MINUTES?: string;
   SYNC_CHECKPOINT_OVERLAP_SECONDS?: string;
+  FOLLOWUP_WINDOW_DAYS?: string;
+  FOLLOWUP_SLA_HOURS?: string;
+  FEATURE_FOLLOWUP_INBOX?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -109,6 +115,30 @@ type SyncScope = {
   pageId: string;
   platform: 'messenger' | 'instagram';
   igBusinessId: string | null;
+};
+
+type FollowupReason =
+  | 'UNREPLIED'
+  | 'SLA_BREACH'
+  | 'LEAD_NEW'
+  | 'LEAD_STALE'
+  | 'MANUAL_FLAG';
+
+type ConversationRow = {
+  id: string;
+  userId: string;
+  platform: 'messenger' | 'instagram';
+  pageId: string;
+  igBusinessId: string | null;
+  assetId: string | null;
+  lastInboundAt: string | null;
+  lastOutboundAt: string | null;
+  lastMessageAt: string | null;
+  participantId: string | null;
+  participantName: string | null;
+  participantHandle: string | null;
+  needsFollowup: number;
+  followupReasons: string | null;
 };
 
 // function pickUsage(headers: Headers) {
@@ -334,6 +364,42 @@ function getSyncCheckpointOverlapSeconds(env: Env) {
     return 120;
   }
   return parsed;
+}
+
+function getFollowupWindowDays(env: Env) {
+  return Math.max(1, parseNumberEnv(env.FOLLOWUP_WINDOW_DAYS, 30));
+}
+
+function getFollowupSlaHours(env: Env) {
+  return Math.max(1, parseNumberEnv(env.FOLLOWUP_SLA_HOURS, 24));
+}
+
+function isFeatureEnabled(raw?: string) {
+  if (!raw) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === 'true' || normalized === '1' || normalized === 'yes';
+}
+
+function isFollowupInboxEnabled(env: Env) {
+  return isFeatureEnabled(env.FEATURE_FOLLOWUP_INBOX);
+}
+
+function parseJsonArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeTag(tag: string) {
+  return tag.trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function sleepMs(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function toHourBucket(date: Date) {
@@ -599,6 +665,215 @@ async function listPagesWithStats(env: Env, userId: string) {
   });
 }
 
+async function getAssetNameMap(env: Env, userId: string) {
+  const pages = await env.DB.prepare(
+    'SELECT id, name FROM meta_pages WHERE user_id = ?',
+  )
+    .bind(userId)
+    .all<{ id: string; name: string | null }>();
+  const igAssets = await env.DB.prepare(
+    'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ?',
+  )
+    .bind(userId)
+    .all<{ id: string; name: string | null; pageId: string }>();
+  const map = new Map<
+    string,
+    { name: string; platform: string; pageId?: string }
+  >();
+  for (const page of pages.results ?? []) {
+    map.set(page.id, {
+      name: page.name ?? 'Page',
+      platform: 'facebook',
+    });
+  }
+  for (const asset of igAssets.results ?? []) {
+    map.set(asset.id, {
+      name: asset.name ?? 'Instagram',
+      platform: 'instagram',
+      pageId: asset.pageId,
+    });
+  }
+  return map;
+}
+
+const CLOSED_TAGS = new Set(['closed']);
+const MANUAL_FLAG_TAGS = new Set(['manual_flag', 'flagged']);
+
+function deriveLeadReasons(
+  status?: string | null,
+  stage?: string | null,
+  disposition?: string | null,
+): FollowupReason[] {
+  const combined = [status, stage, disposition]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const reasons: FollowupReason[] = [];
+  if (combined.includes('new')) {
+    reasons.push('LEAD_NEW');
+  }
+  if (
+    combined.includes('stale') ||
+    combined.includes('cold') ||
+    combined.includes('lost')
+  ) {
+    reasons.push('LEAD_STALE');
+  }
+  return reasons;
+}
+
+function computeFollowupState(options: {
+  lastInboundAt?: string | null;
+  lastOutboundAt?: string | null;
+  tags: string[];
+  leadStatus?: string | null;
+  leadStage?: string | null;
+  leadDisposition?: string | null;
+  windowDays: number;
+  slaHours: number;
+  now?: Date;
+}) {
+  const now = options.now ?? new Date();
+  const lastInbound = options.lastInboundAt
+    ? parseDate(options.lastInboundAt)
+    : null;
+  const lastOutbound = options.lastOutboundAt
+    ? parseDate(options.lastOutboundAt)
+    : null;
+  const closed = options.tags.some((tag) => CLOSED_TAGS.has(tag));
+  if (!lastInbound || closed) {
+    return { needsFollowup: false, reasons: [] as FollowupReason[] };
+  }
+  const inboundMs = lastInbound.getTime();
+  const outboundMs = lastOutbound?.getTime() ?? null;
+  const windowMs = options.windowDays * 24 * 60 * 60 * 1000;
+  if (Number.isNaN(inboundMs) || now.getTime() - inboundMs > windowMs) {
+    return { needsFollowup: false, reasons: [] as FollowupReason[] };
+  }
+  if (outboundMs !== null && outboundMs >= inboundMs) {
+    return { needsFollowup: false, reasons: [] as FollowupReason[] };
+  }
+  const reasons: FollowupReason[] = ['UNREPLIED'];
+  const slaMs = options.slaHours * 60 * 60 * 1000;
+  if (now.getTime() - inboundMs >= slaMs) {
+    reasons.push('SLA_BREACH');
+  }
+  reasons.push(
+    ...deriveLeadReasons(
+      options.leadStatus,
+      options.leadStage,
+      options.leadDisposition,
+    ),
+  );
+  if (options.tags.some((tag) => MANUAL_FLAG_TAGS.has(tag))) {
+    reasons.push('MANUAL_FLAG');
+  }
+  return { needsFollowup: true, reasons };
+}
+
+async function getConversation(
+  env: Env,
+  userId: string,
+  conversationId: string,
+) {
+  return await env.DB.prepare(
+    `SELECT id,
+            user_id as userId,
+            platform,
+            page_id as pageId,
+            ig_business_id as igBusinessId,
+            asset_id as assetId,
+            last_inbound_at as lastInboundAt,
+            last_outbound_at as lastOutboundAt,
+            last_message_at as lastMessageAt,
+            participant_id as participantId,
+            participant_name as participantName,
+            participant_handle as participantHandle,
+            needs_followup as needsFollowup,
+            followup_reasons as followupReasons
+     FROM conversations
+     WHERE user_id = ? AND id = ?`,
+  )
+    .bind(userId, conversationId)
+    .first<ConversationRow>();
+}
+
+async function listConversationTags(
+  env: Env,
+  userId: string,
+  conversationIds: string[],
+) {
+  if (!conversationIds.length) return new Map<string, string[]>();
+  const placeholders = conversationIds.map(() => '?').join(',');
+  const result = await env.DB.prepare(
+    `SELECT conversation_id as conversationId, tag
+     FROM conversation_tags
+     WHERE user_id = ? AND conversation_id IN (${placeholders})`,
+  )
+    .bind(userId, ...conversationIds)
+    .all<{ conversationId: string; tag: string }>();
+  const map = new Map<string, string[]>();
+  for (const row of result.results ?? []) {
+    const list = map.get(row.conversationId) ?? [];
+    list.push(row.tag);
+    map.set(row.conversationId, list);
+  }
+  return map;
+}
+
+async function getConversationLead(
+  env: Env,
+  userId: string,
+  conversationId: string,
+) {
+  return await env.DB.prepare(
+    `SELECT status, stage, disposition
+     FROM conversation_leads
+     WHERE user_id = ? AND conversation_id = ?`,
+  )
+    .bind(userId, conversationId)
+    .first<{
+      status?: string | null;
+      stage?: string | null;
+      disposition?: string | null;
+    }>();
+}
+
+async function recomputeFollowupForConversation(
+  env: Env,
+  userId: string,
+  conversationId: string,
+) {
+  const conversation = await getConversation(env, userId, conversationId);
+  if (!conversation) return null;
+  const tags = await listConversationTags(env, userId, [conversationId]);
+  const lead = await getConversationLead(env, userId, conversationId);
+  const { needsFollowup, reasons } = computeFollowupState({
+    lastInboundAt: conversation.lastInboundAt,
+    lastOutboundAt: conversation.lastOutboundAt,
+    tags: tags.get(conversationId) ?? [],
+    leadStatus: lead?.status ?? null,
+    leadStage: lead?.stage ?? null,
+    leadDisposition: lead?.disposition ?? null,
+    windowDays: getFollowupWindowDays(env),
+    slaHours: getFollowupSlaHours(env),
+  });
+  await env.DB.prepare(
+    `UPDATE conversations
+     SET needs_followup = ?,
+         followup_reasons = ?
+     WHERE user_id = ? AND id = ?`,
+  )
+    .bind(
+      needsFollowup ? 1 : 0,
+      JSON.stringify(reasons),
+      userId,
+      conversationId,
+    )
+    .run();
+  return { needsFollowup, reasons };
+}
+
 async function getSyncRunById(env: Env, id: string) {
   return await env.DB.prepare(
     `SELECT id, status, conversations, messages
@@ -782,6 +1057,37 @@ async function notifySyncRunUpdated(env: Env, run: SyncRunRow) {
         error: error instanceof Error ? error.message : error,
       });
     }
+  }
+}
+
+async function notifyInboxEvent(
+  env: Env,
+  data: {
+    userId: string;
+    conversationId: string;
+    type: string;
+    payload?: Record<string, unknown>;
+  },
+) {
+  const updatedAt = new Date().toISOString();
+  const payload = {
+    type: data.type,
+    conversationId: data.conversationId,
+    updatedAt,
+    ...data.payload,
+  };
+  try {
+    const stub = env.INBOX_HUB.get(env.INBOX_HUB.idFromName(data.userId));
+    await stub.fetch('https://inbox/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error('Failed to notify inbox update', {
+      conversationId: data.conversationId,
+      error: error instanceof Error ? error.message : error,
+    });
   }
 }
 
@@ -1635,10 +1941,16 @@ async function runSync(options: {
     let priceGiven = 0;
     let earliest: string | null = null;
     let latest: string | null = null;
+    let lastInboundAt: string | null = null;
+    let lastOutboundAt: string | null = null;
+    let participantId: string | null = null;
+    let participantName: string | null = null;
     const insert = env.DB.prepare(
       `INSERT OR IGNORE INTO messages
-       (user_id, id, conversation_id, page_id, sender_type, body, created_time)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (user_id, id, conversation_id, page_id, sender_type, body, created_time,
+        asset_id, platform, ig_business_id, direction, sender_id, sender_name,
+        attachments, raw, meta_message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const statements: D1PreparedStatement[] = [];
 
@@ -1650,6 +1962,8 @@ async function runSync(options: {
           : igId
             ? senderId === igId
             : false;
+      const direction = isBusiness ? 'outbound' : 'inbound';
+      const senderName = message.from?.name ?? null;
       if (isBusiness) {
         businessCount += 1;
         if (message.message?.includes('$')) {
@@ -1660,6 +1974,14 @@ async function runSync(options: {
       }
       messageCount += 1;
       const created = message.created_time;
+      if (!isBusiness) {
+        if (!participantId && senderId) {
+          participantId = senderId;
+        }
+        if (!participantName && senderName) {
+          participantName = senderName;
+        }
+      }
       const createdMs = Date.parse(created);
       if (!Number.isNaN(createdMs)) {
         runMaxMessageCreatedMs =
@@ -1673,6 +1995,18 @@ async function runSync(options: {
       if (!latest || created > latest) {
         latest = created;
       }
+      if (direction === 'inbound') {
+        if (!lastInboundAt || created > lastInboundAt) {
+          lastInboundAt = created;
+        }
+      } else if (!lastOutboundAt || created > lastOutboundAt) {
+        lastOutboundAt = created;
+      }
+      const attachments =
+        message.attachments && message.attachments.data?.length
+          ? JSON.stringify(message.attachments)
+          : null;
+      const raw = JSON.stringify(message);
       statements.push(
         insert.bind(
           userId,
@@ -1682,6 +2016,15 @@ async function runSync(options: {
           isBusiness ? 'business' : 'customer',
           message.message ?? null,
           created,
+          igId ?? pageId,
+          platform,
+          igId ?? null,
+          direction,
+          senderId ?? null,
+          senderName,
+          attachments,
+          raw,
+          message.id,
         ),
       );
     }
@@ -1708,8 +2051,9 @@ async function runSync(options: {
     const conversationInsert = await env.DB.prepare(
       `INSERT OR IGNORE INTO conversations
        (user_id, id, platform, page_id, ig_business_id, updated_time, started_time, last_message_at,
-        customer_count, business_count, price_given)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        customer_count, business_count, price_given, last_inbound_at, last_outbound_at,
+        participant_id, participant_name, meta_thread_id, asset_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         userId,
@@ -1723,6 +2067,12 @@ async function runSync(options: {
         customerCount,
         businessCount,
         priceGiven,
+        lastInboundAt,
+        lastOutboundAt,
+        participantId,
+        participantName,
+        convo.id,
+        igId ?? pageId,
       )
       .run();
     if ((conversationInsert.meta?.changes ?? 0) > 0) {
@@ -1738,7 +2088,21 @@ async function runSync(options: {
            last_message_at = ?,
            customer_count = ?,
            business_count = ?,
-           price_given = ?
+           price_given = ?,
+           last_inbound_at = CASE
+             WHEN ? IS NULL THEN last_inbound_at
+             WHEN last_inbound_at IS NULL OR ? > last_inbound_at THEN ?
+             ELSE last_inbound_at
+           END,
+           last_outbound_at = CASE
+             WHEN ? IS NULL THEN last_outbound_at
+             WHEN last_outbound_at IS NULL OR ? > last_outbound_at THEN ?
+             ELSE last_outbound_at
+           END,
+           participant_id = COALESCE(participant_id, ?),
+           participant_name = COALESCE(participant_name, ?),
+           meta_thread_id = COALESCE(meta_thread_id, ?),
+           asset_id = ?
        WHERE user_id = ? AND id = ?`,
     )
       .bind(
@@ -1751,10 +2115,37 @@ async function runSync(options: {
         customerCount,
         businessCount,
         priceGiven,
+        lastInboundAt,
+        lastInboundAt,
+        lastInboundAt,
+        lastOutboundAt,
+        lastOutboundAt,
+        lastOutboundAt,
+        participantId,
+        participantName,
+        convo.id,
+        igId ?? pageId,
         userId,
         convo.id,
       )
       .run();
+
+    const followupState = await recomputeFollowupForConversation(
+      env,
+      userId,
+      convo.id,
+    );
+    if (followupState) {
+      await notifyInboxEvent(env, {
+        userId,
+        conversationId: convo.id,
+        type: 'conversation_updated',
+        payload: {
+          needsFollowup: followupState.needsFollowup,
+          reasons: followupState.reasons,
+        },
+      });
+    }
 
     if (conversationCount % 5 === 0) {
       await updateSyncRunAndNotify(env, {
@@ -1913,6 +2304,10 @@ async function recomputeConversationStatsForRun(
               MAX(m.created_time) as last_message_at,
               SUM(CASE WHEN m.sender_type = 'customer' THEN 1 ELSE 0 END) as customer_count,
               SUM(CASE WHEN m.sender_type = 'business' THEN 1 ELSE 0 END) as business_count,
+              MAX(CASE WHEN m.sender_type = 'customer' THEN m.created_time END) as last_inbound_at,
+              MAX(CASE WHEN m.sender_type = 'business' THEN m.created_time END) as last_outbound_at,
+              MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_id END) as participant_id,
+              MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_name END) as participant_name,
               MAX(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN 1 ELSE 0 END) as price_given,
               MIN(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN m.created_time END) as first_price_at,
               SUM(
@@ -1938,6 +2333,10 @@ async function recomputeConversationStatsForRun(
      UPDATE conversations
      SET started_time = (SELECT started_time FROM stats WHERE stats.conversation_id = conversations.id),
          last_message_at = (SELECT last_message_at FROM stats WHERE stats.conversation_id = conversations.id),
+         last_inbound_at = (SELECT last_inbound_at FROM stats WHERE stats.conversation_id = conversations.id),
+         last_outbound_at = (SELECT last_outbound_at FROM stats WHERE stats.conversation_id = conversations.id),
+         participant_id = COALESCE(participant_id, (SELECT participant_id FROM stats WHERE stats.conversation_id = conversations.id)),
+         participant_name = COALESCE(participant_name, (SELECT participant_name FROM stats WHERE stats.conversation_id = conversations.id)),
          customer_count = COALESCE((SELECT customer_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
          business_count = COALESCE((SELECT business_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
          price_given = COALESCE((SELECT price_given FROM stats WHERE stats.conversation_id = conversations.id), 0),
@@ -1953,6 +2352,16 @@ async function recomputeConversationStatsForRun(
     .bind(...bindings)
     .run();
 
+  const convoIds = await env.DB.prepare(
+    `SELECT id FROM conversations
+     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?`,
+  )
+    .bind(data.userId, data.pageId, data.platform, data.igBusinessId ?? null)
+    .all<{ id: string }>();
+  for (const row of convoIds.results ?? []) {
+    await recomputeFollowupForConversation(env, data.userId, row.id);
+  }
+
   return { updated: result.meta?.changes ?? 0 };
 }
 
@@ -1965,6 +2374,10 @@ async function recomputeConversationStats(
             MAX(created_time) as lastMessageAt,
             SUM(CASE WHEN sender_type = 'customer' THEN 1 ELSE 0 END) as customerCount,
             SUM(CASE WHEN sender_type = 'business' THEN 1 ELSE 0 END) as businessCount,
+            MAX(CASE WHEN sender_type = 'customer' THEN created_time END) as lastInboundAt,
+            MAX(CASE WHEN sender_type = 'business' THEN created_time END) as lastOutboundAt,
+            MAX(CASE WHEN sender_type = 'customer' THEN sender_id END) as participantId,
+            MAX(CASE WHEN sender_type = 'customer' THEN sender_name END) as participantName,
             MAX(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN 1 ELSE 0 END) as priceGiven,
             MIN(CASE WHEN sender_type = 'business' AND body LIKE '%$%' THEN created_time END) as firstPriceAt,
             SUM(
@@ -1999,6 +2412,10 @@ async function recomputeConversationStats(
       lastMessageAt: string | null;
       customerCount: number;
       businessCount: number;
+      lastInboundAt: string | null;
+      lastOutboundAt: string | null;
+      participantId: string | null;
+      participantName: string | null;
       priceGiven: number;
       firstPriceAt: string | null;
       customerAfterPriceCount: number;
@@ -2012,6 +2429,10 @@ async function recomputeConversationStats(
       `UPDATE conversations
        SET started_time = ?,
            last_message_at = ?,
+           last_inbound_at = ?,
+           last_outbound_at = ?,
+           participant_id = COALESCE(participant_id, ?),
+           participant_name = COALESCE(participant_name, ?),
            customer_count = ?,
            business_count = ?,
            price_given = ?,
@@ -2021,6 +2442,10 @@ async function recomputeConversationStats(
       .bind(
         row.startedTime,
         row.lastMessageAt,
+        row.lastInboundAt,
+        row.lastOutboundAt,
+        row.participantId,
+        row.participantName,
         row.customerCount ?? 0,
         row.businessCount ?? 0,
         row.priceGiven ?? 0,
@@ -2030,6 +2455,11 @@ async function recomputeConversationStats(
         row.pageId,
       )
       .run();
+    await recomputeFollowupForConversation(
+      env,
+      data.userId,
+      row.conversationId,
+    );
     updated += 1;
   }
 
@@ -2244,6 +2674,12 @@ addRoute('GET', '/api/auth/config', async (_req, env) => {
     appIdPresent: Boolean(env.META_APP_ID),
     appIdLength: env.META_APP_ID?.length ?? 0,
     redirectUri: env.META_REDIRECT_URI ?? null,
+  });
+});
+
+addRoute('GET', '/api/feature-flags', async (_req, env) => {
+  return json({
+    followupInbox: isFollowupInboxEnabled(env),
   });
 });
 
@@ -2737,6 +3173,908 @@ addRoute('GET', '/api/assets', async (req, env) => {
   return json({ pages, igAssets: igAssetsWithStats, igEnabled: true });
 });
 
+addRoute('GET', '/api/inbox/follow-up/count', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) as count FROM conversations WHERE user_id = ? AND needs_followup = 1',
+  )
+    .bind(userId)
+    .first<{ count: number }>();
+  return json({
+    count: row?.count ?? 0,
+    windowDays: getFollowupWindowDays(env),
+    slaHours: getFollowupSlaHours(env),
+  });
+});
+
+addRoute('GET', '/api/inbox/follow-up', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const url = new URL(req.url);
+  const assetId = url.searchParams.get('assetId')?.trim() || null;
+  const channel = url.searchParams.get('channel')?.trim() || null;
+  const search = url.searchParams.get('search')?.trim() || '';
+  const sort = url.searchParams.get('sort')?.trim() || 'oldest';
+  const limit = Math.min(
+    200,
+    Math.max(10, Number(url.searchParams.get('limit') ?? 100)),
+  );
+
+  const where: string[] = ['c.user_id = ?', 'c.needs_followup = 1'];
+  const bindings: unknown[] = [userId];
+  if (assetId) {
+    where.push('c.asset_id = ?');
+    bindings.push(assetId);
+  }
+  if (channel) {
+    if (channel === 'facebook') {
+      where.push("c.platform = 'messenger'");
+    } else if (channel === 'instagram') {
+      where.push("c.platform = 'instagram'");
+    }
+  }
+  if (search) {
+    where.push(
+      '(c.participant_name LIKE ? OR c.participant_handle LIKE ? OR m.body LIKE ?)',
+    );
+    const like = `%${search}%`;
+    bindings.push(like, like, like);
+  }
+
+  const orderBy =
+    sort === 'newest' ? 'c.last_inbound_at DESC' : 'c.last_inbound_at ASC';
+
+  const query = `SELECT c.id as conversationId,
+            c.platform,
+            c.page_id as pageId,
+            c.ig_business_id as igBusinessId,
+            c.asset_id as assetId,
+            c.participant_id as participantId,
+            c.participant_name as participantName,
+            c.participant_handle as participantHandle,
+            c.last_inbound_at as lastInboundAt,
+            c.last_outbound_at as lastOutboundAt,
+            c.last_message_at as lastMessageAt,
+            c.needs_followup as needsFollowup,
+            c.followup_reasons as followupReasons,
+            m.body as lastMessageBody,
+            m.created_time as lastMessageCreatedAt,
+            m.direction as lastMessageDirection
+     FROM conversations c
+     LEFT JOIN messages m
+       ON m.user_id = c.user_id
+      AND m.conversation_id = c.id
+      AND m.created_time = (
+        SELECT MAX(created_time)
+        FROM messages
+        WHERE user_id = c.user_id AND conversation_id = c.id
+      )
+     WHERE ${where.join(' AND ')}
+     ORDER BY ${orderBy}
+     LIMIT ?`;
+  const rows = await env.DB.prepare(query)
+    .bind(...bindings, limit)
+    .all<{
+      conversationId: string;
+      platform: string;
+      pageId: string;
+      igBusinessId: string | null;
+      assetId: string | null;
+      participantId: string | null;
+      participantName: string | null;
+      participantHandle: string | null;
+      lastInboundAt: string | null;
+      lastOutboundAt: string | null;
+      lastMessageAt: string | null;
+      needsFollowup: number;
+      followupReasons: string | null;
+      lastMessageBody: string | null;
+      lastMessageCreatedAt: string | null;
+      lastMessageDirection: string | null;
+    }>();
+
+  const conversationIds = (rows.results ?? []).map((row) => row.conversationId);
+  const tags = await listConversationTags(env, userId, conversationIds);
+  const assets = await getAssetNameMap(env, userId);
+
+  return json({
+    conversations: (rows.results ?? []).map((row) => {
+      const asset =
+        row.assetId && assets.has(row.assetId) ? assets.get(row.assetId) : null;
+      return {
+        id: row.conversationId,
+        platform: row.platform,
+        pageId: row.pageId,
+        igBusinessId: row.igBusinessId,
+        assetId: row.assetId,
+        assetName: asset?.name ?? null,
+        participantId: row.participantId,
+        participantName: row.participantName ?? 'Unknown',
+        participantHandle: row.participantHandle,
+        lastInboundAt: row.lastInboundAt,
+        lastOutboundAt: row.lastOutboundAt,
+        lastMessageAt: row.lastMessageAt,
+        lastMessageBody: row.lastMessageBody,
+        lastMessageDirection: row.lastMessageDirection,
+        needsFollowup: Boolean(row.needsFollowup),
+        followupReasons: parseJsonArray(row.followupReasons),
+        tags: tags.get(row.conversationId) ?? [],
+      };
+    }),
+  });
+});
+
+addRoute(
+  'GET',
+  '/api/inbox/conversations/:id',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const conversationId = params.id;
+    if (!conversationId) {
+      return json({ error: 'Missing conversation id' }, { status: 400 });
+    }
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const conversation = await getConversation(env, userId, conversationId);
+    if (!conversation) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const messages = await env.DB.prepare(
+      `SELECT id,
+            created_time as createdAt,
+            body,
+            direction,
+            sender_id as senderId,
+            sender_name as senderName,
+            attachments,
+            raw,
+            meta_message_id as metaMessageId
+     FROM messages
+     WHERE user_id = ? AND conversation_id = ?
+     ORDER BY created_time ASC`,
+    )
+      .bind(userId, conversationId)
+      .all<{
+        id: string;
+        createdAt: string;
+        body: string | null;
+        direction: string | null;
+        senderId: string | null;
+        senderName: string | null;
+        attachments: string | null;
+        raw: string | null;
+        metaMessageId: string | null;
+      }>();
+    const tags = await listConversationTags(env, userId, [conversationId]);
+    const attribution = await env.DB.prepare(
+      `SELECT campaign_id as campaignId,
+            campaign_name as campaignName,
+            adset_id as adsetId,
+            adset_name as adsetName,
+            ad_id as adId,
+            ad_name as adName,
+            click_ts as clickTs,
+            source,
+            creative_url as creativeUrl,
+            thumb_url as thumbUrl,
+            raw
+     FROM conversation_attribution
+     WHERE user_id = ? AND conversation_id = ?`,
+    )
+      .bind(userId, conversationId)
+      .first<{
+        campaignId: string | null;
+        campaignName: string | null;
+        adsetId: string | null;
+        adsetName: string | null;
+        adId: string | null;
+        adName: string | null;
+        clickTs: string | null;
+        source: string | null;
+        creativeUrl: string | null;
+        thumbUrl: string | null;
+        raw: string | null;
+      }>();
+    const lead = await env.DB.prepare(
+      `SELECT status, stage, disposition, updated_at as updatedAt, raw
+     FROM conversation_leads
+     WHERE user_id = ? AND conversation_id = ?`,
+    )
+      .bind(userId, conversationId)
+      .first<{
+        status: string | null;
+        stage: string | null;
+        disposition: string | null;
+        updatedAt: string;
+        raw: string | null;
+      }>();
+    const assets = await getAssetNameMap(env, userId);
+    const asset =
+      conversation.assetId && assets.has(conversation.assetId)
+        ? assets.get(conversation.assetId)
+        : null;
+
+    return json({
+      conversation: {
+        id: conversation.id,
+        platform: conversation.platform,
+        pageId: conversation.pageId,
+        igBusinessId: conversation.igBusinessId,
+        assetId: conversation.assetId,
+        assetName: asset?.name ?? null,
+        participantId: conversation.participantId,
+        participantName: conversation.participantName ?? 'Unknown',
+        participantHandle: conversation.participantHandle,
+        lastInboundAt: conversation.lastInboundAt,
+        lastOutboundAt: conversation.lastOutboundAt,
+        lastMessageAt: conversation.lastMessageAt,
+        needsFollowup: Boolean(conversation.needsFollowup),
+        followupReasons: parseJsonArray(conversation.followupReasons),
+        tags: tags.get(conversationId) ?? [],
+      },
+      messages: (messages.results ?? []).map((message) => ({
+        id: message.id,
+        createdAt: message.createdAt,
+        body: message.body,
+        direction: message.direction,
+        senderId: message.senderId,
+        senderName: message.senderName,
+        attachments: message.attachments
+          ? JSON.parse(message.attachments)
+          : null,
+        metaMessageId: message.metaMessageId,
+        raw: message.raw ? JSON.parse(message.raw) : null,
+      })),
+      context: {
+        attribution: attribution
+          ? {
+              ...attribution,
+              raw: attribution.raw ? JSON.parse(attribution.raw) : null,
+            }
+          : null,
+        lead: lead
+          ? {
+              status: lead.status,
+              stage: lead.stage,
+              disposition: lead.disposition,
+              updatedAt: lead.updatedAt,
+              raw: lead.raw ? JSON.parse(lead.raw) : null,
+            }
+          : null,
+      },
+    });
+  },
+);
+
+addRoute(
+  'POST',
+  '/api/inbox/conversations/:id/send',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const conversationId = params.id;
+    if (!conversationId) {
+      return json({ error: 'Missing conversation id' }, { status: 400 });
+    }
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const body = await readJson<{
+      text?: string;
+      templateId?: string;
+    }>(req);
+    const text = body?.text?.trim();
+    if (!text) {
+      return json({ error: 'Message text required' }, { status: 400 });
+    }
+    const conversation = await getConversation(env, userId, conversationId);
+    if (!conversation) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const page = await getPage(env, userId, conversation.pageId);
+    if (!page) {
+      return json({ error: 'Page not connected' }, { status: 404 });
+    }
+    const recipientId =
+      conversation.participantId ??
+      (
+        await env.DB.prepare(
+          `SELECT sender_id as senderId
+         FROM messages
+         WHERE user_id = ? AND conversation_id = ? AND direction = 'inbound'
+         ORDER BY created_time DESC
+         LIMIT 1`,
+        )
+          .bind(userId, conversationId)
+          .first<{ senderId: string | null }>()
+      )?.senderId ??
+      null;
+    if (!recipientId) {
+      return json({ error: 'Missing recipient id' }, { status: 400 });
+    }
+    try {
+      const payload = {
+        recipient: { id: recipientId },
+        message: { text },
+        messaging_type: 'RESPONSE',
+      };
+      const result = await sendMessage({
+        env,
+        accessToken: page.access_token,
+        version: getApiVersion(env),
+        payload,
+        workspaceId: userId,
+        assetId: conversation.assetId ?? conversation.pageId,
+      });
+      const now = new Date().toISOString();
+      const messageId = result.message_id ?? crypto.randomUUID();
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO messages
+         (user_id, id, conversation_id, page_id, sender_type, body, created_time,
+          asset_id, platform, ig_business_id, direction, sender_id, sender_name,
+          attachments, raw, meta_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          userId,
+          messageId,
+          conversationId,
+          conversation.pageId,
+          'business',
+          text,
+          now,
+          conversation.assetId ?? conversation.pageId,
+          conversation.platform,
+          conversation.igBusinessId ?? null,
+          'outbound',
+          conversation.assetId ?? conversation.pageId,
+          page.name ?? 'Business',
+          null,
+          null,
+          result.message_id ?? null,
+        )
+        .run();
+      await env.DB.prepare(
+        `UPDATE conversations
+         SET last_outbound_at = ?,
+             last_message_at = ?,
+             needs_followup = 0,
+             followup_reasons = ?
+         WHERE user_id = ? AND id = ?`,
+      )
+        .bind(now, now, JSON.stringify([]), userId, conversationId)
+        .run();
+      await notifyInboxEvent(env, {
+        userId,
+        conversationId,
+        type: 'message_sent',
+        payload: { createdAt: now },
+      });
+      return json({ ok: true, messageId });
+    } catch (error) {
+      console.error('Send message failed', error);
+      const message =
+        error instanceof MetaApiError
+          ? `Meta API error: ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : 'Failed to send message';
+      return json({ error: message }, { status: 502 });
+    }
+  },
+);
+
+addRoute(
+  'GET',
+  '/api/inbox/conversations/:id/tags',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const conversationId = params.id;
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!conversationId) {
+      return json({ error: 'Missing conversation id' }, { status: 400 });
+    }
+    const tags = await listConversationTags(env, userId, [conversationId]);
+    return json({ tags: tags.get(conversationId) ?? [] });
+  },
+);
+
+addRoute(
+  'POST',
+  '/api/inbox/conversations/:id/tags',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const conversationId = params.id;
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!conversationId) {
+      return json({ error: 'Missing conversation id' }, { status: 400 });
+    }
+    const body = await readJson<{ tags?: string[] }>(req);
+    const tags = (body?.tags ?? []).map(normalizeTag).filter(Boolean);
+    if (!tags.length) {
+      return json({ error: 'Tags required' }, { status: 400 });
+    }
+    const now = new Date().toISOString();
+    const statements = tags.map((tag) =>
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO conversation_tags
+         (user_id, conversation_id, tag, created_at)
+         VALUES (?, ?, ?, ?)`,
+      ).bind(userId, conversationId, tag, now),
+    );
+    if (statements.length) {
+      await env.DB.batch(statements);
+    }
+    await recomputeFollowupForConversation(env, userId, conversationId);
+    await notifyInboxEvent(env, {
+      userId,
+      conversationId,
+      type: 'tags_updated',
+    });
+    const updated = await listConversationTags(env, userId, [conversationId]);
+    return json({ tags: updated.get(conversationId) ?? [] });
+  },
+);
+
+addRoute(
+  'DELETE',
+  '/api/inbox/conversations/:id/tags/:tag',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const conversationId = params.id;
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!conversationId || !params.tag) {
+      return json({ error: 'Missing tag' }, { status: 400 });
+    }
+    const tag = normalizeTag(decodeURIComponent(params.tag));
+    await env.DB.prepare(
+      `DELETE FROM conversation_tags
+       WHERE user_id = ? AND conversation_id = ? AND tag = ?`,
+    )
+      .bind(userId, conversationId, tag)
+      .run();
+    await recomputeFollowupForConversation(env, userId, conversationId);
+    await notifyInboxEvent(env, {
+      userId,
+      conversationId,
+      type: 'tags_updated',
+    });
+    const updated = await listConversationTags(env, userId, [conversationId]);
+    return json({ tags: updated.get(conversationId) ?? [] });
+  },
+);
+
+addRoute('GET', '/api/inbox/templates', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const url = new URL(req.url);
+  const assetId = url.searchParams.get('assetId')?.trim() || null;
+  let query = `SELECT id, asset_id as assetId, title, body, created_at as createdAt, updated_at as updatedAt
+               FROM saved_responses
+               WHERE user_id = ?`;
+  const bindings: unknown[] = [userId];
+  if (assetId) {
+    query += ' AND (asset_id = ? OR asset_id IS NULL)';
+    bindings.push(assetId);
+  }
+  query += ' ORDER BY updated_at DESC';
+  const rows = await env.DB.prepare(query)
+    .bind(...bindings)
+    .all<{
+      id: string;
+      assetId: string | null;
+      title: string;
+      body: string;
+      createdAt: string;
+      updatedAt: string;
+    }>();
+  return json({ templates: rows.results ?? [] });
+});
+
+addRoute('POST', '/api/inbox/templates', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const body = await readJson<{
+    title?: string;
+    body?: string;
+    assetId?: string | null;
+  }>(req);
+  const title = body?.title?.trim();
+  const text = body?.body?.trim();
+  if (!title || !text) {
+    return json({ error: 'Title and body required' }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO saved_responses
+     (id, user_id, asset_id, title, body, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, userId, body?.assetId ?? null, title, text, now, now)
+    .run();
+  return json({ id, title, body: text, assetId: body?.assetId ?? null });
+});
+
+addRoute('PUT', '/api/inbox/templates/:id', async (req, env, _ctx, params) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const templateId = params.id;
+  if (!templateId) {
+    return json({ error: 'Missing template id' }, { status: 400 });
+  }
+  const body = await readJson<{
+    title?: string;
+    body?: string;
+    assetId?: string | null;
+  }>(req);
+  const title = body?.title?.trim();
+  const text = body?.body?.trim();
+  if (!title || !text) {
+    return json({ error: 'Title and body required' }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE saved_responses
+     SET title = ?, body = ?, asset_id = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+  )
+    .bind(title, text, body?.assetId ?? null, now, templateId, userId)
+    .run();
+  return json({
+    id: templateId,
+    title,
+    body: text,
+    assetId: body?.assetId ?? null,
+  });
+});
+
+addRoute(
+  'DELETE',
+  '/api/inbox/templates/:id',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const templateId = params.id;
+    if (!templateId) {
+      return json({ error: 'Missing template id' }, { status: 400 });
+    }
+    await env.DB.prepare(
+      'DELETE FROM saved_responses WHERE id = ? AND user_id = ?',
+    )
+      .bind(templateId, userId)
+      .run();
+    return json({ ok: true });
+  },
+);
+
+addRoute('POST', '/api/inbox/bulk', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const body = await readJson<{
+    conversationIds?: string[];
+    action?: 'tag' | 'close' | 'send_template';
+    tags?: string[];
+    templateId?: string;
+  }>(req);
+  const conversationIds = (body?.conversationIds ?? []).filter(Boolean);
+  if (!conversationIds.length || !body?.action) {
+    return json({ error: 'Invalid bulk request' }, { status: 400 });
+  }
+  const placeholders = conversationIds.map(() => '?').join(',');
+  const conversations = await env.DB.prepare(
+    `SELECT id, page_id as pageId, ig_business_id as igBusinessId, asset_id as assetId, platform
+     FROM conversations
+     WHERE user_id = ? AND id IN (${placeholders})`,
+  )
+    .bind(userId, ...conversationIds)
+    .all<{
+      id: string;
+      pageId: string;
+      igBusinessId: string | null;
+      assetId: string | null;
+      platform: string;
+    }>();
+  const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+  const now = new Date().toISOString();
+  if (body.action === 'tag') {
+    const tags = (body.tags ?? []).map(normalizeTag).filter(Boolean);
+    if (!tags.length) {
+      return json({ error: 'Tags required' }, { status: 400 });
+    }
+    for (const convo of conversations.results ?? []) {
+      const statements = tags.map((tag) =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO conversation_tags
+           (user_id, conversation_id, tag, created_at)
+           VALUES (?, ?, ?, ?)`,
+        ).bind(userId, convo.id, tag, now),
+      );
+      if (statements.length) {
+        await env.DB.batch(statements);
+      }
+      await recomputeFollowupForConversation(env, userId, convo.id);
+      await notifyInboxEvent(env, {
+        userId,
+        conversationId: convo.id,
+        type: 'tags_updated',
+      });
+      results.push({ id: convo.id, ok: true });
+    }
+    return json({ results });
+  }
+  if (body.action === 'close') {
+    for (const convo of conversations.results ?? []) {
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO conversation_tags
+         (user_id, conversation_id, tag, created_at)
+         VALUES (?, ?, 'closed', ?)`,
+      )
+        .bind(userId, convo.id, now)
+        .run();
+      await recomputeFollowupForConversation(env, userId, convo.id);
+      await notifyInboxEvent(env, {
+        userId,
+        conversationId: convo.id,
+        type: 'tags_updated',
+      });
+      results.push({ id: convo.id, ok: true });
+    }
+    return json({ results });
+  }
+  if (body.action === 'send_template') {
+    if (!body.templateId) {
+      return json({ error: 'Template required' }, { status: 400 });
+    }
+    const template = await env.DB.prepare(
+      `SELECT id, title, body, asset_id as assetId
+       FROM saved_responses
+       WHERE id = ? AND user_id = ?`,
+    )
+      .bind(body.templateId, userId)
+      .first<{ id: string; body: string; assetId: string | null }>();
+    if (!template) {
+      return json({ error: 'Template not found' }, { status: 404 });
+    }
+    for (const convo of conversations.results ?? []) {
+      try {
+        const conversation = await getConversation(env, userId, convo.id);
+        if (!conversation) {
+          results.push({ id: convo.id, ok: false, error: 'Not found' });
+          continue;
+        }
+        const page = await getPage(env, userId, conversation.pageId);
+        if (!page) {
+          results.push({
+            id: convo.id,
+            ok: false,
+            error: 'Page not connected',
+          });
+          continue;
+        }
+        const recipientId =
+          conversation.participantId ??
+          (
+            await env.DB.prepare(
+              `SELECT sender_id as senderId
+             FROM messages
+             WHERE user_id = ? AND conversation_id = ? AND direction = 'inbound'
+             ORDER BY created_time DESC
+             LIMIT 1`,
+            )
+              .bind(userId, convo.id)
+              .first<{ senderId: string | null }>()
+          )?.senderId ??
+          null;
+        if (!recipientId) {
+          results.push({ id: convo.id, ok: false, error: 'Missing recipient' });
+          continue;
+        }
+        const payload = {
+          recipient: { id: recipientId },
+          message: { text: template.body },
+          messaging_type: 'RESPONSE',
+        };
+        const result = await sendMessage({
+          env,
+          accessToken: page.access_token,
+          version: getApiVersion(env),
+          payload,
+          workspaceId: userId,
+          assetId: conversation.assetId ?? conversation.pageId,
+        });
+        const sentAt = new Date().toISOString();
+        const messageId = result.message_id ?? crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO messages
+           (user_id, id, conversation_id, page_id, sender_type, body, created_time,
+            asset_id, platform, ig_business_id, direction, sender_id, sender_name,
+            attachments, raw, meta_message_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            userId,
+            messageId,
+            convo.id,
+            conversation.pageId,
+            'business',
+            template.body,
+            sentAt,
+            conversation.assetId ?? conversation.pageId,
+            conversation.platform,
+            conversation.igBusinessId ?? null,
+            'outbound',
+            conversation.assetId ?? conversation.pageId,
+            page.name ?? 'Business',
+            null,
+            null,
+            result.message_id ?? null,
+          )
+          .run();
+        await env.DB.prepare(
+          `UPDATE conversations
+           SET last_outbound_at = ?,
+               last_message_at = ?,
+               needs_followup = 0,
+               followup_reasons = ?
+           WHERE user_id = ? AND id = ?`,
+        )
+          .bind(sentAt, sentAt, JSON.stringify([]), userId, convo.id)
+          .run();
+        await notifyInboxEvent(env, {
+          userId,
+          conversationId: convo.id,
+          type: 'message_sent',
+          payload: { createdAt: sentAt },
+        });
+        results.push({ id: convo.id, ok: true });
+        await sleepMs(400);
+      } catch (error) {
+        const message =
+          error instanceof MetaApiError
+            ? `Meta API error: ${error.message}`
+            : error instanceof Error
+              ? error.message
+              : 'Failed to send';
+        results.push({ id: convo.id, ok: false, error: message });
+        if (error instanceof MetaApiError && error.status === 429) {
+          await sleepMs(1500);
+        }
+      }
+    }
+    return json({ results });
+  }
+
+  return json({ error: 'Unsupported action' }, { status: 400 });
+});
+
+addRoute('GET', '/api/meta/webhook', async (req, env) => {
+  const url = new URL(req.url);
+  const mode = url.searchParams.get('hub.mode');
+  const token = url.searchParams.get('hub.verify_token');
+  const challenge = url.searchParams.get('hub.challenge');
+  if (
+    mode === 'subscribe' &&
+    token &&
+    env.META_WEBHOOK_VERIFY_TOKEN &&
+    token === env.META_WEBHOOK_VERIFY_TOKEN
+  ) {
+    return new Response(challenge ?? '', { status: 200 });
+  }
+  return new Response('Forbidden', { status: 403 });
+});
+
+addRoute('POST', '/api/meta/webhook', async (req, env) => {
+  const body = await readJson<{
+    object?: string;
+    entry?: Array<{ id?: string; messaging?: unknown[]; time?: number }>;
+  }>(req);
+  if (!body?.entry?.length) {
+    return new Response('No content', { status: 204 });
+  }
+
+  for (const entry of body.entry ?? []) {
+    const entryId = entry.id;
+    if (!entryId) continue;
+
+    const pageMatch = await env.DB.prepare(
+      'SELECT user_id as userId FROM meta_pages WHERE id = ?',
+    )
+      .bind(entryId)
+      .first<{ userId: string }>();
+    if (pageMatch?.userId) {
+      await callSyncScopeOrchestrator(
+        env,
+        {
+          userId: pageMatch.userId,
+          pageId: entryId,
+          platform: 'messenger',
+          igBusinessId: null,
+        },
+        'webhook',
+      );
+      continue;
+    }
+
+    const igMatch = await env.DB.prepare(
+      'SELECT user_id as userId, page_id as pageId FROM ig_assets WHERE id = ?',
+    )
+      .bind(entryId)
+      .first<{ userId: string; pageId: string }>();
+    if (igMatch?.userId) {
+      await callSyncScopeOrchestrator(
+        env,
+        {
+          userId: igMatch.userId,
+          pageId: igMatch.pageId,
+          platform: 'instagram',
+          igBusinessId: entryId,
+        },
+        'webhook',
+      );
+    }
+  }
+
+  return new Response('ok', { status: 200 });
+});
+
 addRoute('GET', '/api/ops/summary', async (_req, env) => {
   const counters = await env.DB.prepare(
     'SELECT key, value, updated_at as updatedAt FROM ops_counters',
@@ -2759,6 +4097,87 @@ addRoute('GET', '/api/ops/summary', async (_req, env) => {
     updatedAt,
   });
 });
+
+addRoute('GET', '/api/ops/sync-runs', async (req, env) => {
+  if (!isFollowupInboxEnabled(env)) {
+    return json({ error: 'Not found' }, { status: 404 });
+  }
+  const userId = await requireUser(req, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const url = new URL(req.url);
+  const status = url.searchParams.get('status');
+  const limit = Math.min(
+    50,
+    Math.max(5, Number(url.searchParams.get('limit') ?? 20)),
+  );
+  let query = `SELECT id,
+            user_id as userId,
+            page_id as pageId,
+            platform,
+            ig_business_id as igBusinessId,
+            status,
+            started_at as startedAt,
+            finished_at as finishedAt,
+            last_error as lastError
+     FROM sync_runs
+     WHERE user_id = ?`;
+  const bindings: unknown[] = [userId];
+  if (status) {
+    query += ' AND status = ?';
+    bindings.push(status);
+  }
+  query += ' ORDER BY started_at DESC LIMIT ?';
+  bindings.push(limit);
+  const rows = await env.DB.prepare(query)
+    .bind(...bindings)
+    .all<{
+      id: string;
+      userId: string;
+      pageId: string;
+      platform: string;
+      igBusinessId: string | null;
+      status: string;
+      startedAt: string;
+      finishedAt: string | null;
+      lastError: string | null;
+    }>();
+  return json({ runs: rows.results ?? [] });
+});
+
+addRoute(
+  'POST',
+  '/api/ops/sync-runs/:id/cancel',
+  async (req, env, _ctx, params) => {
+    if (!isFollowupInboxEnabled(env)) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const runId = params.id;
+    if (!runId) {
+      return json({ error: 'Missing run id' }, { status: 400 });
+    }
+    const now = new Date().toISOString();
+    const result = await env.DB.prepare(
+      `UPDATE sync_runs
+       SET status = 'failed',
+           finished_at = ?,
+           last_error = 'cancelled',
+           updated_at = ?
+       WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')`,
+    )
+      .bind(now, now, runId, userId)
+      .run();
+    if ((result.meta?.changes ?? 0) < 1) {
+      return json({ ok: false, error: 'Not running' }, { status: 409 });
+    }
+    return json({ ok: true });
+  },
+);
 
 addRoute('GET', '/api/ops/messages-per-hour', async (req, env) => {
   const url = new URL(req.url);

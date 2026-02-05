@@ -82,6 +82,7 @@ export const metaConfig = {
     conversationMessages: (conversationId: string) =>
       `/${conversationId}/messages`,
     igAccounts: (pageId: string) => `/${pageId}/instagram_accounts`,
+    sendMessage: '/me/messages',
   },
   fields: {
     permissions: ['permission', 'status'],
@@ -90,7 +91,7 @@ export const metaConfig = {
     pageWithToken: ['id', 'name', 'access_token'],
     me: ['id', 'name'],
     conversations: ['id', 'updated_time'],
-    messages: ['id', 'from', 'created_time', 'message'],
+    messages: ['id', 'from', 'to', 'created_time', 'message', 'attachments'],
     igAccounts: ['id', 'name'],
   },
 };
@@ -109,6 +110,7 @@ const metaRouteLabels = {
   conversationDetails: '/:conversationId',
   conversationMessages: '/:conversationId/messages',
   igAccounts: '/:pageId/instagram_accounts',
+  sendMessage: '/me/messages',
 };
 
 async function fetchWithTelemetry(
@@ -781,9 +783,18 @@ export type MetaConversation = {
 
 export type MetaMessage = {
   id: string;
-  from?: { id?: string };
+  from?: { id?: string; name?: string };
+  to?: { data?: Array<{ id?: string; name?: string }> };
   created_time: string;
   message?: string;
+  attachments?: {
+    data?: Array<{
+      mime_type?: string;
+      name?: string;
+      file_url?: string;
+      image_data?: { url?: string };
+    }>;
+  };
 };
 
 export async function fetchConversations(options: {
@@ -1026,6 +1037,36 @@ export async function fetchInstagramAssets(options: {
     });
   }
   return fallback;
+}
+
+export async function sendMessage(options: {
+  env: MetaEnv;
+  accessToken: string;
+  version: string;
+  payload: Record<string, unknown>;
+  workspaceId?: string | null;
+  assetId?: string | null;
+}) {
+  const url = buildUrl(metaConfig.endpoints.sendMessage, options.version, {
+    access_token: options.accessToken,
+  });
+  const response = await fetchGraph<{ message_id?: string }>(
+    url,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(options.payload),
+    },
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.send_message',
+      route: metaRouteLabels.sendMessage,
+      method: 'POST',
+      workspaceId: options.workspaceId,
+      assetId: options.assetId,
+    }),
+  );
+  return response.data ?? {};
 }
 
 export async function fetchPageIgDebug(options: {

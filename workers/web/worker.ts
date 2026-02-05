@@ -1,6 +1,7 @@
 import { createRequestHandler } from '@react-router/cloudflare';
 import { handleApiProxyRequest } from './apiProxy';
 import { SyncRunsHub } from './syncRunsHub';
+import { InboxHub } from './inboxHub';
 import type {
   ExecutionContext,
   IncomingRequestCfProperties,
@@ -10,6 +11,7 @@ type Env = {
   ASSETS: { fetch: typeof fetch };
   API?: { fetch: typeof fetch };
   SYNC_RUNS_HUB: DurableObjectNamespace;
+  INBOX_HUB: DurableObjectNamespace;
   API_URL?: string;
 };
 
@@ -85,6 +87,41 @@ export default {
       return stub.fetch(request);
     }
 
+    if (url.pathname === '/inbox/subscribe') {
+      const cookie = request.headers.get('cookie') ?? '';
+      const whoami = env.API
+        ? await env.API.fetch('http://internal/api/auth/whoami', {
+            headers: { cookie },
+          })
+        : await fetch(
+            `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
+            {
+              headers: { cookie },
+            },
+          );
+      if (!whoami.ok) return new Response('Unauthorized', { status: 401 });
+      const payload = (await whoami.json()) as { userId?: string };
+      if (!payload.userId) return new Response('Unauthorized', { status: 401 });
+      const flags = env.API
+        ? await env.API.fetch('http://internal/api/feature-flags', {
+            headers: { cookie },
+          })
+        : await fetch(
+            `${env.API_URL ?? 'http://localhost:8787'}/api/feature-flags`,
+            {
+              headers: { cookie },
+            },
+          );
+      if (flags.ok) {
+        const data = (await flags.json()) as { followupInbox?: boolean };
+        if (!data.followupInbox) {
+          return new Response('Not Found', { status: 404 });
+        }
+      }
+      const stub = env.INBOX_HUB.get(env.INBOX_HUB.idFromName(payload.userId));
+      return stub.fetch(request);
+    }
+
     try {
       const proxyResponse = await handleApiProxyRequest(request, env);
       if (proxyResponse) {
@@ -120,3 +157,4 @@ export default {
 };
 
 export { SyncRunsHub };
+export { InboxHub };

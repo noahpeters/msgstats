@@ -65,9 +65,25 @@ const parseBuildInfo = (raw: string) => {
 
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
+  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
+    null,
+  );
   const buildInfoRaw = import.meta.env.VITE_STAGING_INFO;
   const buildInfo = buildInfoRaw ? parseBuildInfo(buildInfoRaw) : null;
   const showBanner = buildInfo && buildInfo.env !== 'prod';
+
+  React.useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch('/api/feature-flags');
+        if (!response.ok) return;
+        const data = (await response.json()) as { followupInbox?: boolean };
+        setFlags(data);
+      } catch {
+        setFlags(null);
+      }
+    })();
+  }, []);
 
   return (
     <div {...stylex.props(layout.page)}>
@@ -93,6 +109,28 @@ export default function RootRoute(): React.ReactElement {
           >
             Dashboard
           </Link>
+          {flags?.followupInbox ? (
+            <>
+              <Link
+                to="/inbox/follow-up"
+                {...stylex.props(
+                  layout.navLink,
+                  location.pathname.startsWith('/inbox') && activeLink.active,
+                )}
+              >
+                Follow-Up Inbox
+              </Link>
+              <Link
+                to="/inbox/templates"
+                {...stylex.props(
+                  layout.navLink,
+                  location.pathname === '/inbox/templates' && activeLink.active,
+                )}
+              >
+                Templates
+              </Link>
+            </>
+          ) : null}
           <Link
             to="/reports"
             {...stylex.props(

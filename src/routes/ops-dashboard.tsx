@@ -13,6 +13,17 @@ type OpsSummary = {
   updatedAt: string | null;
 };
 
+type SyncRun = {
+  id: string;
+  pageId: string;
+  platform: string;
+  igBusinessId: string | null;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  lastError: string | null;
+};
+
 type HourPoint = {
   hour: string;
   count: number;
@@ -111,6 +122,10 @@ export default function OpsDashboard(): React.ReactElement {
   );
   const [errorMetrics, setErrorMetrics] =
     React.useState<AppErrorMetrics | null>(null);
+  const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
+  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
+    null,
+  );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -130,12 +145,16 @@ export default function OpsDashboard(): React.ReactElement {
       setLoading(true);
       setError(null);
       try {
-        const [summaryRes, pointsRes, metaRes, errorsRes] = await Promise.all([
-          fetch('/api/ops/summary', { cache: 'no-store' }),
-          fetch('/api/ops/messages-per-hour?hours=168', { cache: 'no-store' }),
-          fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
-          fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
-        ]);
+        const [summaryRes, pointsRes, metaRes, errorsRes, flagsRes] =
+          await Promise.all([
+            fetch('/api/ops/summary', { cache: 'no-store' }),
+            fetch('/api/ops/messages-per-hour?hours=168', {
+              cache: 'no-store',
+            }),
+            fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
+            fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
+            fetch('/api/feature-flags', { cache: 'no-store' }),
+          ]);
         if (!summaryRes.ok) {
           throw new Error('Failed to load ops summary.');
         }
@@ -152,11 +171,28 @@ export default function OpsDashboard(): React.ReactElement {
         const pointsData = (await pointsRes.json()) as { points: HourPoint[] };
         const metaData = (await metaRes.json()) as MetaMetrics;
         const errorsData = (await errorsRes.json()) as AppErrorMetrics;
+        const flagsData = (await flagsRes.json()) as {
+          followupInbox?: boolean;
+        };
+        let runsData: { runs: SyncRun[] } = { runs: [] };
+        if (flagsData.followupInbox) {
+          const runsRes = await fetch(
+            '/api/ops/sync-runs?status=running&limit=25',
+            {
+              cache: 'no-store',
+            },
+          );
+          if (runsRes.ok) {
+            runsData = (await runsRes.json()) as { runs: SyncRun[] };
+          }
+        }
         if (active) {
           setSummary(summaryData);
           setPoints(pointsData.points ?? []);
           setMetaMetrics(metaData);
           setErrorMetrics(errorsData);
+          setFlags(flagsData ?? null);
+          setSyncRuns(runsData.runs ?? []);
         }
       } catch (err) {
         if (active) {
@@ -173,6 +209,20 @@ export default function OpsDashboard(): React.ReactElement {
       active = false;
     };
   }, []);
+
+  const cancelRun = async (runId: string) => {
+    const confirm = window.confirm('Cancel this sync run?');
+    if (!confirm) return;
+    const response = await fetch(`/api/ops/sync-runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (response.ok) {
+      setSyncRuns((prev) => prev.filter((run) => run.id !== runId));
+    } else {
+      setError('Failed to cancel sync run.');
+    }
+  };
 
   const width = 720;
   const height = 200;
@@ -337,6 +387,64 @@ export default function OpsDashboard(): React.ReactElement {
             <strong>{summary?.messagesTotal ?? 0}</strong>
           </div>
         </div>
+
+        {flags?.followupInbox ? (
+          <div
+            style={{
+              marginTop: '18px',
+              display: 'grid',
+              gap: '8px',
+            }}
+          >
+            <h2 style={{ margin: 0 }}>Running syncs</h2>
+            <p {...stylex.props(layout.note)}>
+              Active sync runs and their start time. Cancel if stuck.
+            </p>
+            {syncRuns.length ? (
+              <table {...stylex.props(layout.table)}>
+                <thead>
+                  <tr {...stylex.props(layout.tableRow)}>
+                    <th {...stylex.props(layout.tableHead)}>Run ID</th>
+                    <th {...stylex.props(layout.tableHead)}>Platform</th>
+                    <th {...stylex.props(layout.tableHead)}>Started</th>
+                    <th {...stylex.props(layout.tableHead)}>Status</th>
+                    <th {...stylex.props(layout.tableHead)}>Last error</th>
+                    <th {...stylex.props(layout.tableHead)}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {syncRuns.map((run) => (
+                    <tr key={run.id} {...stylex.props(layout.tableRow)}>
+                      <td {...stylex.props(layout.tableCell)}>
+                        <code>{run.id.slice(0, 8)}</code>
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {run.platform}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {new Date(run.startedAt).toLocaleString()}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>{run.status}</td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {run.lastError ?? '—'}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        <button
+                          {...stylex.props(layout.ghostButton)}
+                          onClick={() => cancelRun(run.id)}
+                        >
+                          Cancel
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p {...stylex.props(layout.note)}>No running syncs.</p>
+            )}
+          </div>
+        ) : null}
 
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>

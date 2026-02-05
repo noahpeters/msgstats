@@ -10,9 +10,17 @@ directory = "./build/client"
 name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
 
+[[durable_objects.bindings]]
+name = "INBOX_HUB"
+class_name = "InboxHub"
+
 [[migrations]]
 tag = "v1"
 new_classes = ["SyncRunsHub"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["InboxHub"]
 
 [[services]]
 binding = "API"
@@ -41,9 +49,17 @@ directory = "./build/client"
 name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
 
+[[env.staging.durable_objects.bindings]]
+name = "INBOX_HUB"
+class_name = "InboxHub"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_classes = ["SyncRunsHub"]
+
+[[env.staging.migrations]]
+tag = "v2"
+new_classes = ["InboxHub"]
 
 [[env.staging.services]]
 binding = "API"
@@ -63,9 +79,17 @@ directory = "./build/client"
 name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
 
+[[env.production.durable_objects.bindings]]
+name = "INBOX_HUB"
+class_name = "InboxHub"
+
 [[env.production.migrations]]
 tag = "v1"
 new_classes = ["SyncRunsHub"]
+
+[[env.production.migrations]]
+tag = "v2"
+new_classes = ["InboxHub"]
 
 [[env.production.services]]
 binding = "API"
