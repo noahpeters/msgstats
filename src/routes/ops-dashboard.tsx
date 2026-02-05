@@ -18,6 +18,42 @@ type HourPoint = {
   count: number;
 };
 
+type MetaMetrics = {
+  window: string;
+  overall: {
+    total: number;
+    errors: number;
+    errorRate: number;
+    avgDurationMs: number | null;
+  };
+  byOp: Array<{
+    op: string;
+    total: number;
+    errors: number;
+    errorRate: number;
+    avgDurationMs: number | null;
+  }>;
+  topRoutes: Array<{
+    route: string;
+    status: string;
+    metaErrorCode: string;
+    metaErrorSubcode: string;
+    count: number;
+  }>;
+};
+
+type AppErrorMetrics = {
+  window: string;
+  overall: { totalErrors: number };
+  byMinute: Array<{ minuteISO: string; errors: number }>;
+  topKeys: Array<{
+    errorKey: string;
+    kind: string;
+    severity: string;
+    count: number;
+  }>;
+};
+
 const cardGridStyle: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
@@ -70,11 +106,23 @@ const formatRelativeTime = (value: string | null) => {
 export default function OpsDashboard(): React.ReactElement {
   const [summary, setSummary] = React.useState<OpsSummary | null>(null);
   const [points, setPoints] = React.useState<HourPoint[]>([]);
+  const [metaMetrics, setMetaMetrics] = React.useState<MetaMetrics | null>(
+    null,
+  );
+  const [errorMetrics, setErrorMetrics] =
+    React.useState<AppErrorMetrics | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
+  const {
+    tooltip: errorTooltip,
+    show: showErrorTooltip,
+    move: moveErrorTooltip,
+    hide: hideErrorTooltip,
+  } = useChartTooltip();
   const xAxisRef = React.useRef<SVGGElement | null>(null);
   const yAxisRef = React.useRef<SVGGElement | null>(null);
+  const errorAxisRef = React.useRef<SVGGElement | null>(null);
 
   React.useEffect(() => {
     let active = true;
@@ -82,25 +130,33 @@ export default function OpsDashboard(): React.ReactElement {
       setLoading(true);
       setError(null);
       try {
-        const summaryRes = await fetch('/api/ops/summary', {
-          cache: 'no-store',
-        });
+        const [summaryRes, pointsRes, metaRes, errorsRes] = await Promise.all([
+          fetch('/api/ops/summary', { cache: 'no-store' }),
+          fetch('/api/ops/messages-per-hour?hours=168', { cache: 'no-store' }),
+          fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
+          fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
+        ]);
         if (!summaryRes.ok) {
           throw new Error('Failed to load ops summary.');
         }
-        const summaryData = (await summaryRes.json()) as OpsSummary;
-        const pointsRes = await fetch('/api/ops/messages-per-hour?hours=168', {
-          cache: 'no-store',
-        });
         if (!pointsRes.ok) {
           throw new Error('Failed to load ops chart.');
         }
-        const pointsData = (await pointsRes.json()) as {
-          points: HourPoint[];
-        };
+        if (!metaRes.ok) {
+          throw new Error('Failed to load Meta metrics.');
+        }
+        if (!errorsRes.ok) {
+          throw new Error('Failed to load app error metrics.');
+        }
+        const summaryData = (await summaryRes.json()) as OpsSummary;
+        const pointsData = (await pointsRes.json()) as { points: HourPoint[] };
+        const metaData = (await metaRes.json()) as MetaMetrics;
+        const errorsData = (await errorsRes.json()) as AppErrorMetrics;
         if (active) {
           setSummary(summaryData);
           setPoints(pointsData.points ?? []);
+          setMetaMetrics(metaData);
+          setErrorMetrics(errorsData);
         }
       } catch (err) {
         if (active) {
@@ -155,6 +211,49 @@ export default function OpsDashboard(): React.ReactElement {
     ? Math.max(1, innerWidth / parsedPoints.length)
     : innerWidth;
 
+  const appErrorMinutes = 60;
+  const appErrorPoints = React.useMemo(() => {
+    const map = new Map(
+      (errorMetrics?.byMinute ?? []).map((row) => [
+        row.minuteISO.slice(0, 16),
+        row.errors,
+      ]),
+    );
+    const end = new Date();
+    const startMs = end.getTime() - (appErrorMinutes - 1) * 60 * 1000;
+    return Array.from({ length: appErrorMinutes }, (_, index) => {
+      const minute = new Date(startMs + index * 60 * 1000);
+      const key = minute.toISOString().slice(0, 16);
+      return {
+        minute,
+        errors: map.get(key) ?? 0,
+      };
+    });
+  }, [errorMetrics]);
+
+  const errorWidth = 720;
+  const errorHeight = 140;
+  const errorMargin = { top: 10, right: 12, bottom: 24, left: 44 };
+  const errorInnerWidth = errorWidth - errorMargin.left - errorMargin.right;
+  const errorInnerHeight = errorHeight - errorMargin.top - errorMargin.bottom;
+  const errorMax = Math.max(1, ...appErrorPoints.map((point) => point.errors));
+  const errorXScale = d3
+    .scaleTime()
+    .domain(
+      appErrorPoints.length
+        ? [appErrorPoints[0]?.minute ?? new Date(), new Date()]
+        : [new Date(), new Date()],
+    )
+    .range([0, errorInnerWidth]);
+  const errorYScale = d3
+    .scaleLinear()
+    .domain([0, errorMax])
+    .nice()
+    .range([errorInnerHeight, 0]);
+  const errorBarWidth = appErrorPoints.length
+    ? Math.max(1, errorInnerWidth / appErrorPoints.length)
+    : errorInnerWidth;
+
   React.useEffect(() => {
     if (!parsedPoints.length) {
       return;
@@ -181,11 +280,31 @@ export default function OpsDashboard(): React.ReactElement {
     }
   }, [parsedPoints, xScale, yScale]);
 
+  React.useEffect(() => {
+    if (!appErrorPoints.length) {
+      return;
+    }
+    const tickFormat = d3.timeFormat('%I:%M %p');
+    const xAxis = d3.axisBottom(errorXScale).ticks(4).tickFormat(tickFormat);
+    if (errorAxisRef.current) {
+      d3.select(errorAxisRef.current).call(xAxis);
+    }
+  }, [appErrorPoints, errorXScale]);
+
   const hourFormatter = new Intl.DateTimeFormat('en', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
   });
+  const minuteFormatter = new Intl.DateTimeFormat('en', {
+    hour: 'numeric',
+    minute: 'numeric',
+  });
+  const percentFormatter = new Intl.NumberFormat('en', {
+    style: 'percent',
+    maximumFractionDigits: 1,
+  });
+  const numberFormatter = new Intl.NumberFormat('en');
 
   return (
     <div {...stylex.props(layout.page)}>
@@ -294,6 +413,186 @@ export default function OpsDashboard(): React.ReactElement {
             </svg>
             <ChartTooltip tooltip={tooltip} />
           </div>
+        </div>
+
+        <div style={{ marginTop: '24px', display: 'grid', gap: '16px' }}>
+          <h2 style={{ margin: 0 }}>Meta API health (last 15m)</h2>
+          <div style={cardGridStyle}>
+            <div style={metricCardStyle}>
+              <span {...stylex.props(layout.note)}>Error rate</span>
+              <strong>
+                {percentFormatter.format(metaMetrics?.overall.errorRate ?? 0)}
+              </strong>
+            </div>
+            <div style={metricCardStyle}>
+              <span {...stylex.props(layout.note)}>Total calls</span>
+              <strong>
+                {numberFormatter.format(metaMetrics?.overall.total ?? 0)}
+              </strong>
+            </div>
+            <div style={metricCardStyle}>
+              <span {...stylex.props(layout.note)}>Avg latency</span>
+              <strong>
+                {metaMetrics?.overall.avgDurationMs
+                  ? `${Math.round(metaMetrics.overall.avgDurationMs)} ms`
+                  : '—'}
+              </strong>
+            </div>
+          </div>
+          <section style={chartWrapStyle}>
+            <h3 style={{ marginTop: 0 }}>Top failing ops</h3>
+            {metaMetrics?.byOp.length ? (
+              <table {...stylex.props(layout.table)}>
+                <thead>
+                  <tr {...stylex.props(layout.tableRow)}>
+                    <th {...stylex.props(layout.tableHead)}>Op</th>
+                    <th {...stylex.props(layout.tableHead)}>Errors</th>
+                    <th {...stylex.props(layout.tableHead)}>Error rate</th>
+                    <th {...stylex.props(layout.tableHead)}>Avg ms</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {metaMetrics.byOp.slice(0, 8).map((row) => (
+                    <tr key={row.op} {...stylex.props(layout.tableRow)}>
+                      <td {...stylex.props(layout.tableCell)}>{row.op}</td>
+                      <td {...stylex.props(layout.tableCell)}>{row.errors}</td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {percentFormatter.format(row.errorRate)}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {row.avgDurationMs
+                          ? Math.round(row.avgDurationMs)
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p {...stylex.props(layout.note)}>No recent failures.</p>
+            )}
+          </section>
+          <section style={chartWrapStyle}>
+            <h3 style={{ marginTop: 0 }}>Meta failures (last 15m)</h3>
+            {metaMetrics?.topRoutes.length ? (
+              <table {...stylex.props(layout.table)}>
+                <thead>
+                  <tr {...stylex.props(layout.tableRow)}>
+                    <th {...stylex.props(layout.tableHead)}>Route</th>
+                    <th {...stylex.props(layout.tableHead)}>Status</th>
+                    <th {...stylex.props(layout.tableHead)}>Meta code</th>
+                    <th {...stylex.props(layout.tableHead)}>Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {metaMetrics.topRoutes.slice(0, 8).map((row, index) => (
+                    <tr
+                      key={`${row.route}-${row.status}-${index}`}
+                      {...stylex.props(layout.tableRow)}
+                    >
+                      <td {...stylex.props(layout.tableCell)}>{row.route}</td>
+                      <td {...stylex.props(layout.tableCell)}>{row.status}</td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {row.metaErrorCode || '—'}
+                        {row.metaErrorSubcode ? `/${row.metaErrorSubcode}` : ''}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>{row.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p {...stylex.props(layout.note)}>No failures in window.</p>
+            )}
+          </section>
+        </div>
+
+        <div style={{ marginTop: '24px', display: 'grid', gap: '12px' }}>
+          <h2 style={{ margin: 0 }}>App errors (last 60m)</h2>
+          <div style={chartWrapStyle}>
+            <svg
+              width="100%"
+              height="160"
+              viewBox={`0 0 ${errorWidth} ${errorHeight}`}
+              role="img"
+              aria-label="App errors per minute"
+            >
+              <rect
+                width={errorWidth}
+                height={errorHeight}
+                fill="#f8f5f2"
+                rx="12"
+              />
+              <g
+                transform={`translate(${errorMargin.left}, ${errorMargin.top})`}
+              >
+                {appErrorPoints.map((point, index) => {
+                  const x = errorXScale(point.minute) - errorBarWidth / 2;
+                  const y = errorYScale(point.errors);
+                  const barHeight = errorInnerHeight - y;
+                  return (
+                    <rect
+                      key={index}
+                      x={x}
+                      y={y}
+                      width={Math.max(1, errorBarWidth - 1)}
+                      height={barHeight}
+                      fill="#f97316"
+                      opacity={0.85}
+                      onMouseEnter={(event) =>
+                        showErrorTooltip(event, {
+                          title: minuteFormatter.format(point.minute),
+                          lines: [`${point.errors} errors`],
+                        })
+                      }
+                      onMouseMove={moveErrorTooltip}
+                      onMouseLeave={hideErrorTooltip}
+                    />
+                  );
+                })}
+                <g
+                  ref={errorAxisRef}
+                  transform={`translate(0, ${errorInnerHeight})`}
+                  style={{ color: '#284b63', fontSize: '11px' }}
+                />
+              </g>
+            </svg>
+            <ChartTooltip tooltip={errorTooltip} />
+          </div>
+          <section style={chartWrapStyle}>
+            <h3 style={{ marginTop: 0 }}>Top error keys</h3>
+            {errorMetrics?.topKeys.length ? (
+              <table {...stylex.props(layout.table)}>
+                <thead>
+                  <tr {...stylex.props(layout.tableRow)}>
+                    <th {...stylex.props(layout.tableHead)}>Error key</th>
+                    <th {...stylex.props(layout.tableHead)}>Kind</th>
+                    <th {...stylex.props(layout.tableHead)}>Severity</th>
+                    <th {...stylex.props(layout.tableHead)}>Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {errorMetrics.topKeys.map((row) => (
+                    <tr
+                      key={`${row.errorKey}-${row.kind}`}
+                      {...stylex.props(layout.tableRow)}
+                    >
+                      <td {...stylex.props(layout.tableCell)}>
+                        {row.errorKey}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>{row.kind}</td>
+                      <td {...stylex.props(layout.tableCell)}>
+                        {row.severity}
+                      </td>
+                      <td {...stylex.props(layout.tableCell)}>{row.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p {...stylex.props(layout.note)}>No app errors in window.</p>
+            )}
+          </section>
         </div>
       </div>
     </div>

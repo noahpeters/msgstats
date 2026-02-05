@@ -25,6 +25,14 @@ class_name = "SyncScopeOrchestrator"
 tag = "v1"
 new_classes = ["SyncScopeOrchestrator"]
 
+[[analytics_engine_datasets]]
+binding = "AE_META_CALLS"
+dataset = "AE_META_CALLS"
+
+[[analytics_engine_datasets]]
+binding = "AE_APP_ERRORS"
+dataset = "AE_APP_ERRORS"
+
 [queues]
 
 [[queues.producers]]
@@ -41,4 +49,4 @@ enabled = true
 invocation_logs = true
 
 [triggers]
-crons = ["0 * * * *"]
+crons = ["*/5 * * * *"]
