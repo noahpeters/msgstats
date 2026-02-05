@@ -34,6 +34,9 @@ routes = [
 META_REDIRECT_URI = "https://staging.msgstats.from-trees.com/api/auth/callback"
 META_SCOPES = "pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management,instagram_basic,instagram_manage_messages"
 
+[env.staging.assets]
+directory = "./build/client"
+
 [[env.staging.durable_objects.bindings]]
 name = "SYNC_RUNS_HUB"
 class_name = "SyncRunsHub"
@@ -45,3 +48,25 @@ new_classes = ["SyncRunsHub"]
 [[env.staging.services]]
 binding = "API"
 service = "msgstats-api-staging"
+
+[env.production]
+name = "msgstats-web"
+
+routes = [
+  { pattern = "msgstats.from-trees.com/*", zone_name = "from-trees.com" },
+]
+
+[env.production.assets]
+directory = "./build/client"
+
+[[env.production.durable_objects.bindings]]
+name = "SYNC_RUNS_HUB"
+class_name = "SyncRunsHub"
+
+[[env.production.migrations]]
+tag = "v1"
+new_classes = ["SyncRunsHub"]
+
+[[env.production.services]]
+binding = "API"
+service = "msgstats-api"
