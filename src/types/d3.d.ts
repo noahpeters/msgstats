@@ -22,6 +22,7 @@ declare module 'd3' {
     domain: (values: [number, number]) => ScaleLog;
     range: (values: [number, number]) => ScaleLog;
     nice: () => ScaleLog;
+    ticks: (count?: number) => number[];
   };
 
   export function extent<T, R>(

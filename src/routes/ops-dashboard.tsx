@@ -150,6 +150,7 @@ export default function OpsDashboard(): React.ReactElement {
     .domain([1, maxCount])
     .nice()
     .range([innerHeight, 0]);
+  const gridTicks = yScale.ticks(4);
   const barWidth = parsedPoints.length
     ? Math.max(1, innerWidth / parsedPoints.length)
     : innerWidth;
@@ -235,6 +236,21 @@ export default function OpsDashboard(): React.ReactElement {
             >
               <rect width={width} height={height} fill="#f8f5f2" rx="12" />
               <g transform={`translate(${margin.left}, ${margin.top})`}>
+                {gridTicks.map((tick) => {
+                  const y = yScale(tick);
+                  return (
+                    <line
+                      key={`grid-${tick}`}
+                      x1={0}
+                      x2={innerWidth}
+                      y1={y}
+                      y2={y}
+                      stroke="#0f766e"
+                      strokeOpacity={0.12}
+                      strokeWidth={1}
+                    />
+                  );
+                })}
                 {parsedPoints.map((point) => {
                   const x = xScale(point.date) - barWidth / 2;
                   const clampedCount = Math.max(1, point.count);
