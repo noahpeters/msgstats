@@ -17,7 +17,7 @@
     "preview": "react-router preview",
     "deploy:web": "npm run verify && react-router build && wrangler deploy --config wrangler.web.toml",
     "deploy:api": "npm run verify && wrangler deploy --config wrangler.api.toml",
-    "deploy:web:staging": "npm run verify && react-router build && wrangler deploy --config wrangler.web.staging.toml",
+    "deploy:web:staging": "npm run verify && react-router build && wrangler deploy --config wrangler.web.toml --env staging",
     "deploy:api:staging": "npm run verify && wrangler deploy --config wrangler.api.toml --env staging",
     "db:migrations:local": "wrangler d1 migrations apply DB --local --config wrangler.api.toml",
     "db:migrations:remote": "wrangler d1 migrations apply DB --env production --remote --config wrangler.api.toml",

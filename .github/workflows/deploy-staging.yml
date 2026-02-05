@@ -37,4 +37,4 @@ jobs:
       - name: Build web assets
         run: npm run build
       - name: Deploy staging web
-        run: npx wrangler deploy --config wrangler.web.staging.toml --var VITE_STAGING_INFO:$VITE_STAGING_INFO
+        run: npx wrangler deploy --config wrangler.web.toml --env staging --var VITE_STAGING_INFO:$VITE_STAGING_INFO

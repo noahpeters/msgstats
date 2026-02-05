@@ -22,3 +22,18 @@ service = "msgstats-api"
 [observability.logs]
 enabled = true
 invocation_logs = true
+
+[env.staging]
+name = "msgstats-web-staging"
+
+routes = [
+  { pattern = "staging.msgstats.from-trees.com/*", zone_name = "from-trees.com" },
+]
+
+[env.staging.vars]
+META_REDIRECT_URI = "https://staging.msgstats.from-trees.com/api/auth/callback"
+META_SCOPES = "pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management,instagram_basic,instagram_manage_messages"
+
+[[env.staging.services]]
+binding = "API"
+service = "msgstats-api-staging"
