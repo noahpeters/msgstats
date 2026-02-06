@@ -233,14 +233,14 @@ export default function OpsDashboard(): React.ReactElement {
   }, []);
 
   const updateUserFlag = React.useCallback(
-    async (userId: string, value: boolean | null) => {
+    async (userId: string, flag: string, value: boolean | null) => {
       setOpsUsersUpdating(userId);
       try {
         const res = await fetch(`/api/ops/users/${userId}/feature-flags`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            flag: 'FEATURE_FOLLOWUP_INBOX',
+            flag,
             value,
           }),
         });
@@ -521,8 +521,8 @@ export default function OpsDashboard(): React.ReactElement {
     }
     return parts.join(' • ') || '—';
   };
-  const readFollowupValue = (flags: Record<string, unknown>) => {
-    const value = flags?.FEATURE_FOLLOWUP_INBOX;
+  const readFlagValue = (flags: Record<string, unknown>, key: string) => {
+    const value = flags?.[key];
     if (value === true || value === false) {
       return value ? 'enabled' : 'disabled';
     }
@@ -761,7 +761,7 @@ export default function OpsDashboard(): React.ReactElement {
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
           <h2 style={{ margin: 0 }}>User feature flags</h2>
           <p {...stylex.props(layout.note)}>
-            Per-user overrides for FEATURE_FOLLOWUP_INBOX.
+            Per-user overrides for Feature flags.
           </p>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button
@@ -781,6 +781,7 @@ export default function OpsDashboard(): React.ReactElement {
                   <th {...stylex.props(layout.tableHead)}>User</th>
                   <th {...stylex.props(layout.tableHead)}>Assets</th>
                   <th {...stylex.props(layout.tableHead)}>Followup inbox</th>
+                  <th {...stylex.props(layout.tableHead)}>Ops dashboard</th>
                 </tr>
               </thead>
               <tbody>
@@ -794,11 +795,36 @@ export default function OpsDashboard(): React.ReactElement {
                     </td>
                     <td {...stylex.props(layout.tableCell)}>
                       <select
-                        value={readFollowupValue(user.featureFlags)}
+                        value={readFlagValue(
+                          user.featureFlags,
+                          'FEATURE_FOLLOWUP_INBOX',
+                        )}
                         onChange={(event) => {
                           const next = event.target.value;
                           void updateUserFlag(
                             user.userId,
+                            'FEATURE_FOLLOWUP_INBOX',
+                            next === 'inherit' ? null : next === 'enabled',
+                          );
+                        }}
+                        disabled={opsUsersUpdating === user.userId}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <select
+                        value={readFlagValue(
+                          user.featureFlags,
+                          'FEATURE_OPS_DASHBOARD',
+                        )}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          void updateUserFlag(
+                            user.userId,
+                            'FEATURE_OPS_DASHBOARD',
                             next === 'inherit' ? null : next === 'enabled',
                           );
                         }}

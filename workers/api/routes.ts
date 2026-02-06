@@ -24,7 +24,9 @@ export function registerRoutes(deps: any) {
     getMetaScopes,
     getApiVersion,
     isFollowupInboxEnabled,
+    isOpsDashboardEnabled,
     isFollowupInboxEnabledForUser,
+    isOpsDashboardEnabledForUser,
     exchangeCodeForToken,
     exchangeForLongLivedToken,
     debugToken,
@@ -217,10 +219,12 @@ export function registerRoutes(deps: any) {
     if (!userId) {
       return json({
         followupInbox: isFollowupInboxEnabled(env),
+        opsDashboard: isOpsDashboardEnabled(env),
       });
     }
     return json({
       followupInbox: await isFollowupInboxEnabledForUser(env, userId),
+      opsDashboard: await isOpsDashboardEnabledForUser(env, userId),
     });
   });
 

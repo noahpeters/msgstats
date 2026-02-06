@@ -87,6 +87,7 @@ export type Env = {
   CLASSIFIER_AI_DAILY_BUDGET_CALLS?: string;
   CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY?: string;
   FEATURE_FOLLOWUP_INBOX?: string;
+  FEATURE_OPS_DASHBOARD?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -488,6 +489,10 @@ function isFollowupInboxEnabled(env: Env) {
   return isFeatureEnabled(env.FEATURE_FOLLOWUP_INBOX);
 }
 
+function isOpsDashboardEnabled(env: Env) {
+  return isFeatureEnabled(env.FEATURE_OPS_DASHBOARD);
+}
+
 async function getUserFeatureFlags(env: Env, userId: string) {
   const row = await env.DB.prepare(
     'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
@@ -527,6 +532,18 @@ async function isFollowupInboxEnabledForUser(env: Env, userId: string) {
   return resolveFeatureFlagValue(
     defaultValue,
     (flags as Record<string, unknown>).FEATURE_FOLLOWUP_INBOX,
+  );
+}
+
+async function isOpsDashboardEnabledForUser(env: Env, userId: string) {
+  const defaultValue = isOpsDashboardEnabled(env);
+  const flags = await getUserFeatureFlags(env, userId);
+  if (!Object.prototype.hasOwnProperty.call(flags, 'FEATURE_OPS_DASHBOARD')) {
+    return defaultValue;
+  }
+  return resolveFeatureFlagValue(
+    defaultValue,
+    (flags as Record<string, unknown>).FEATURE_OPS_DASHBOARD,
   );
 }
 
@@ -3030,7 +3047,9 @@ registerRoutes({
   getMetaScopes,
   getApiVersion,
   isFollowupInboxEnabled,
+  isOpsDashboardEnabled,
   isFollowupInboxEnabledForUser,
+  isOpsDashboardEnabledForUser,
   getUserFeatureFlags,
   exchangeCodeForToken,
   exchangeForLongLivedToken,

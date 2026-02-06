@@ -65,9 +65,10 @@ const parseBuildInfo = (raw: string) => {
 
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
-  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
-    null,
-  );
+  const [flags, setFlags] = React.useState<{
+    followupInbox?: boolean;
+    opsDashboard?: boolean;
+  } | null>(null);
   const buildInfoRaw = import.meta.env.VITE_STAGING_INFO;
   const buildInfo = buildInfoRaw ? parseBuildInfo(buildInfoRaw) : null;
   const showBanner = buildInfo && buildInfo.env !== 'prod';
@@ -77,7 +78,10 @@ export default function RootRoute(): React.ReactElement {
       try {
         const response = await fetch('/api/feature-flags');
         if (!response.ok) return;
-        const data = (await response.json()) as { followupInbox?: boolean };
+        const data = (await response.json()) as {
+          followupInbox?: boolean;
+          opsDashboard?: boolean;
+        };
         setFlags(data);
       } catch {
         setFlags(null);
@@ -140,6 +144,17 @@ export default function RootRoute(): React.ReactElement {
           >
             Reports
           </Link>
+          {flags?.opsDashboard ? (
+            <Link
+              to="/ops-dashboard"
+              {...stylex.props(
+                layout.navLink,
+                location.pathname === '/ops-dashboard' && activeLink.active,
+              )}
+            >
+              Ops
+            </Link>
+          ) : null}
         </nav>
         <Outlet />
         <footer {...stylex.props(footerStyles.footer)}>
