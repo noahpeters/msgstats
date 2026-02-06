@@ -58,6 +58,15 @@ type AiRunDetail = {
   aiConfig: Record<string, unknown> | null;
 };
 
+type OpsUser = {
+  userId: string;
+  assets: {
+    pages: string[];
+    igAssets: string[];
+  };
+  featureFlags: Record<string, unknown>;
+};
+
 type HourPoint = {
   hour: string;
   count: number;
@@ -163,6 +172,11 @@ export default function OpsDashboard(): React.ReactElement {
   const [aiRunDetail, setAiRunDetail] = React.useState<AiRunDetail | null>(
     null,
   );
+  const [opsUsers, setOpsUsers] = React.useState<OpsUser[]>([]);
+  const [opsUsersError, setOpsUsersError] = React.useState<string | null>(null);
+  const [opsUsersUpdating, setOpsUsersUpdating] = React.useState<string | null>(
+    null,
+  );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -203,6 +217,47 @@ export default function OpsDashboard(): React.ReactElement {
       setAiRuns([]);
     }
   }, []);
+
+  const loadOpsUsers = React.useCallback(async () => {
+    setOpsUsersError(null);
+    const usersRes = await fetch('/api/ops/users?limit=50', {
+      cache: 'no-store',
+    });
+    if (usersRes.ok) {
+      const usersData = (await usersRes.json()) as { users: OpsUser[] };
+      setOpsUsers(usersData.users ?? []);
+    } else {
+      setOpsUsersError('Failed to load users.');
+      setOpsUsers([]);
+    }
+  }, []);
+
+  const updateUserFlag = React.useCallback(
+    async (userId: string, value: boolean | null) => {
+      setOpsUsersUpdating(userId);
+      try {
+        const res = await fetch(`/api/ops/users/${userId}/feature-flags`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            flag: 'FEATURE_FOLLOWUP_INBOX',
+            value,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error('Failed to update.');
+        }
+        await loadOpsUsers();
+      } catch (err) {
+        setOpsUsersError(
+          err instanceof Error ? err.message : 'Failed to update user.',
+        );
+      } finally {
+        setOpsUsersUpdating(null);
+      }
+    },
+    [loadOpsUsers],
+  );
 
   React.useEffect(() => {
     let active = true;
@@ -259,6 +314,17 @@ export default function OpsDashboard(): React.ReactElement {
             setAiRuns(aiRunsData.runs ?? []);
           } else {
             setAiRunsError('Failed to load AI runs.');
+          }
+          const usersRes = await fetch('/api/ops/users?limit=50', {
+            cache: 'no-store',
+          });
+          if (usersRes.ok) {
+            const usersData = (await usersRes.json()) as {
+              users: OpsUser[];
+            };
+            setOpsUsers(usersData.users ?? []);
+          } else {
+            setOpsUsersError('Failed to load users.');
           }
         }
       } catch (err) {
@@ -445,6 +511,23 @@ export default function OpsDashboard(): React.ReactElement {
     maximumFractionDigits: 1,
   });
   const numberFormatter = new Intl.NumberFormat('en');
+  const formatAssets = (assets: OpsUser['assets']) => {
+    const parts: string[] = [];
+    if (assets.pages.length) {
+      parts.push(`Pages: ${assets.pages.join(', ')}`);
+    }
+    if (assets.igAssets.length) {
+      parts.push(`IG: ${assets.igAssets.join(', ')}`);
+    }
+    return parts.join(' • ') || '—';
+  };
+  const readFollowupValue = (flags: Record<string, unknown>) => {
+    const value = flags?.FEATURE_FOLLOWUP_INBOX;
+    if (value === true || value === false) {
+      return value ? 'enabled' : 'disabled';
+    }
+    return 'inherit';
+  };
 
   return (
     <div {...stylex.props(layout.page)}>
@@ -673,6 +756,66 @@ export default function OpsDashboard(): React.ReactElement {
               </div>
             </div>
           ) : null}
+        </div>
+
+        <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
+          <h2 style={{ margin: 0 }}>User feature flags</h2>
+          <p {...stylex.props(layout.note)}>
+            Per-user overrides for FEATURE_FOLLOWUP_INBOX.
+          </p>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => loadOpsUsers()}
+            >
+              Refresh
+            </button>
+          </div>
+          {opsUsersError ? (
+            <p style={{ color: colors.coral }}>{opsUsersError}</p>
+          ) : null}
+          {opsUsers.length ? (
+            <table {...stylex.props(layout.table)}>
+              <thead>
+                <tr {...stylex.props(layout.tableRow)}>
+                  <th {...stylex.props(layout.tableHead)}>User</th>
+                  <th {...stylex.props(layout.tableHead)}>Assets</th>
+                  <th {...stylex.props(layout.tableHead)}>Followup inbox</th>
+                </tr>
+              </thead>
+              <tbody>
+                {opsUsers.map((user) => (
+                  <tr key={user.userId} {...stylex.props(layout.tableRow)}>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <code>{user.userId.slice(0, 8)}</code>
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {formatAssets(user.assets)}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <select
+                        value={readFollowupValue(user.featureFlags)}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          void updateUserFlag(
+                            user.userId,
+                            next === 'inherit' ? null : next === 'enabled',
+                          );
+                        }}
+                        disabled={opsUsersUpdating === user.userId}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p {...stylex.props(layout.note)}>No users yet.</p>
+          )}
         </div>
 
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>

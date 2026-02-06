@@ -24,6 +24,7 @@ export function registerRoutes(deps: any) {
     getMetaScopes,
     getApiVersion,
     isFollowupInboxEnabled,
+    isFollowupInboxEnabledForUser,
     exchangeCodeForToken,
     exchangeForLongLivedToken,
     debugToken,
@@ -211,9 +212,15 @@ export function registerRoutes(deps: any) {
     });
   });
 
-  addRoute('GET', '/api/feature-flags', async (_req, env) => {
+  addRoute('GET', '/api/feature-flags', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({
+        followupInbox: isFollowupInboxEnabled(env),
+      });
+    }
     return json({
-      followupInbox: isFollowupInboxEnabled(env),
+      followupInbox: await isFollowupInboxEnabledForUser(env, userId),
     });
   });
 
@@ -719,12 +726,12 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/inbox/conversations', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
     const state = url.searchParams.get('state')?.trim() || null;
@@ -922,12 +929,12 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/inbox/conversations/count', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
     const needsFollowup = url.searchParams.get('needs_followup');
@@ -950,12 +957,12 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('POST', '/api/inbox/recompute-all', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const rows = await env.DB.prepare(
       `SELECT id FROM conversations WHERE user_id = ?`,
@@ -976,9 +983,6 @@ export function registerRoutes(deps: any) {
     'GET',
     '/api/inbox/conversations/:id',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -986,6 +990,9 @@ export function registerRoutes(deps: any) {
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const conversation = await getConversation(env, userId, conversationId);
       if (!conversation) {
@@ -1132,9 +1139,6 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/send',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1142,6 +1146,9 @@ export function registerRoutes(deps: any) {
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const body = await readJson<{
         text?: string;
@@ -1254,9 +1261,6 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/final-touch',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1264,6 +1268,9 @@ export function registerRoutes(deps: any) {
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const body = await readJson<{ text?: string }>(req);
       const conversation = await getConversation(env, userId, conversationId);
@@ -1405,9 +1412,6 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/off_platform_outcome',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1415,6 +1419,9 @@ export function registerRoutes(deps: any) {
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const body = await readJson<{ outcome?: string }>(req);
       const outcome = body?.outcome ?? '';
@@ -1457,9 +1464,6 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/recompute',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1467,6 +1471,9 @@ export function registerRoutes(deps: any) {
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const result = await recomputeConversationState(
         env,
@@ -1490,13 +1497,13 @@ export function registerRoutes(deps: any) {
     'GET',
     '/api/inbox/conversations/:id/tags',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1510,13 +1517,13 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/tags',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -1552,13 +1559,13 @@ export function registerRoutes(deps: any) {
     'DELETE',
     '/api/inbox/conversations/:id/tags/:tag',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const conversationId = params.id;
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       if (!conversationId || !params.tag) {
         return json({ error: 'Missing tag' }, { status: 400 });
@@ -1582,12 +1589,12 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute('GET', '/api/inbox/templates', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
     const assetId = url.searchParams.get('assetId')?.trim() || null;
@@ -1614,12 +1621,12 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('POST', '/api/inbox/templates', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const body = await readJson<{
       title?: string;
@@ -1647,12 +1654,12 @@ export function registerRoutes(deps: any) {
     'PUT',
     '/api/inbox/templates/:id',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const templateId = params.id;
       if (!templateId) {
@@ -1689,12 +1696,12 @@ export function registerRoutes(deps: any) {
     'DELETE',
     '/api/inbox/templates/:id',
     async (req, env, _ctx, params) => {
-      if (!isFollowupInboxEnabled(env)) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
       const userId = await requireUser(req, env);
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
       }
       const templateId = params.id;
       if (!templateId) {
@@ -1710,12 +1717,12 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute('POST', '/api/inbox/bulk', async (req, env) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
     const body = await readJson<{
       conversationIds?: string[];
@@ -2012,6 +2019,124 @@ export function registerRoutes(deps: any) {
       updatedAt,
     });
   });
+
+  addRoute('GET', '/api/ops/users', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const url = new URL(req.url);
+    const limit = Math.min(
+      100,
+      Math.max(5, Number(url.searchParams.get('limit') ?? 50)),
+    );
+    const rows = await env.DB.prepare(
+      `SELECT u.id as userId,
+              u.feature_flags as featureFlags,
+              group_concat(DISTINCT mp.name) as pageNames,
+              group_concat(DISTINCT ig.name) as igAssetNames
+       FROM meta_users u
+       LEFT JOIN meta_pages mp ON mp.user_id = u.id
+       LEFT JOIN ig_assets ig ON ig.user_id = u.id
+       GROUP BY u.id
+       ORDER BY COALESCE(u.updated_at, u.created_at) DESC
+       LIMIT ?`,
+    )
+      .bind(limit)
+      .all<{
+        userId: string;
+        featureFlags: string | null;
+        pageNames: string | null;
+        igAssetNames: string | null;
+      }>();
+    const parseNames = (value: string | null) =>
+      (value ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean);
+    const users =
+      rows.results?.map((row) => {
+        let flags: Record<string, unknown> = {};
+        if (row.featureFlags) {
+          try {
+            const parsed = JSON.parse(row.featureFlags) as Record<
+              string,
+              unknown
+            >;
+            if (parsed && typeof parsed === 'object') {
+              flags = parsed;
+            }
+          } catch {
+            flags = {};
+          }
+        }
+        return {
+          userId: row.userId,
+          featureFlags: flags,
+          assets: {
+            pages: parseNames(row.pageNames),
+            igAssets: parseNames(row.igAssetNames),
+          },
+        };
+      }) ?? [];
+    return json({ users });
+  });
+
+  addRoute(
+    'POST',
+    '/api/ops/users/:id/feature-flags',
+    async (req, env, _ctx, params) => {
+      const userId = await requireUser(req, env);
+      if (!userId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const targetUserId = params.id;
+      if (!targetUserId) {
+        return json({ error: 'Missing user id' }, { status: 400 });
+      }
+      const body = await readJson<{
+        flag?: string;
+        value?: unknown;
+      }>(req);
+      const flag = body?.flag?.trim();
+      if (!flag) {
+        return json({ error: 'Missing flag' }, { status: 400 });
+      }
+      const existing = await env.DB.prepare(
+        'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
+      )
+        .bind(targetUserId)
+        .first<{ featureFlags: string | null }>();
+      let flags: Record<string, unknown> = {};
+      if (existing?.featureFlags) {
+        try {
+          const parsed = JSON.parse(existing.featureFlags) as Record<
+            string,
+            unknown
+          >;
+          if (parsed && typeof parsed === 'object') {
+            flags = { ...parsed };
+          }
+        } catch {
+          flags = {};
+        }
+      }
+      if (body?.value === null) {
+        delete flags[flag];
+      } else {
+        flags[flag] = body?.value;
+      }
+      const nextFlags =
+        Object.keys(flags).length > 0 ? JSON.stringify(flags) : null;
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        'UPDATE meta_users SET feature_flags = ?, updated_at = ? WHERE id = ?',
+      )
+        .bind(nextFlags, now, targetUserId)
+        .run();
+      return json({ userId: targetUserId, featureFlags: flags });
+    },
+  );
 
   addRoute('GET', '/api/ops/sync-runs', async (req, env) => {
     const userId = await requireUser(req, env);

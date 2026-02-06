@@ -488,6 +488,48 @@ function isFollowupInboxEnabled(env: Env) {
   return isFeatureEnabled(env.FEATURE_FOLLOWUP_INBOX);
 }
 
+async function getUserFeatureFlags(env: Env, userId: string) {
+  const row = await env.DB.prepare(
+    'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
+  )
+    .bind(userId)
+    .first<{ featureFlags: string | null }>();
+  if (!row?.featureFlags) return {};
+  try {
+    const parsed = JSON.parse(row.featureFlags);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveFeatureFlagValue(
+  defaultValue: boolean,
+  override: unknown,
+): boolean {
+  if (override === undefined) return defaultValue;
+  if (override === null) return false;
+  if (typeof override === 'boolean') return override;
+  if (typeof override === 'string') {
+    const normalized = override.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return Boolean(override);
+}
+
+async function isFollowupInboxEnabledForUser(env: Env, userId: string) {
+  const defaultValue = isFollowupInboxEnabled(env);
+  const flags = await getUserFeatureFlags(env, userId);
+  if (!Object.prototype.hasOwnProperty.call(flags, 'FEATURE_FOLLOWUP_INBOX')) {
+    return defaultValue;
+  }
+  return resolveFeatureFlagValue(
+    defaultValue,
+    (flags as Record<string, unknown>).FEATURE_FOLLOWUP_INBOX,
+  );
+}
+
 function parseJsonArray(raw: string | null | undefined): unknown[] {
   if (!raw) return [];
   try {
@@ -2241,6 +2283,7 @@ async function runSync(options: {
   cursor?: string | null;
 }) {
   const { env, userId, pageId, platform, igId, runId, cursor } = options;
+  const followupEnabled = await isFollowupInboxEnabledForUser(env, userId);
   const existingRun = await getSyncRunById(env, runId);
   await updateSyncRunAndNotify(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
@@ -2541,7 +2584,7 @@ async function runSync(options: {
       )
       .run();
 
-    if (isFollowupInboxEnabled(env)) {
+    if (followupEnabled) {
       const followupState = await recomputeConversationState(
         env,
         userId,
@@ -2792,7 +2835,8 @@ async function recomputeConversationStatsForRun(
   )
     .bind(data.userId, data.pageId, data.platform, data.igBusinessId ?? null)
     .all<{ id: string }>();
-  if (isFollowupInboxEnabled(env)) {
+  const followupEnabled = await isFollowupInboxEnabledForUser(env, data.userId);
+  if (followupEnabled) {
     for (const row of convoIds.results ?? []) {
       await recomputeConversationState(
         env,
@@ -2863,6 +2907,7 @@ async function recomputeConversationStats(
     }>();
 
   let updated = 0;
+  const followupEnabled = await isFollowupInboxEnabledForUser(env, data.userId);
   for (const row of rows.results ?? []) {
     const lowResponseAfterPrice =
       row.firstPriceAt && (row.customerAfterPriceCount ?? 0) <= 2 ? 1 : 0;
@@ -2896,7 +2941,7 @@ async function recomputeConversationStats(
         row.pageId,
       )
       .run();
-    if (isFollowupInboxEnabled(env)) {
+    if (followupEnabled) {
       await recomputeConversationState(env, data.userId, row.conversationId);
     }
     updated += 1;
@@ -2985,6 +3030,8 @@ registerRoutes({
   getMetaScopes,
   getApiVersion,
   isFollowupInboxEnabled,
+  isFollowupInboxEnabledForUser,
+  getUserFeatureFlags,
   exchangeCodeForToken,
   exchangeForLongLivedToken,
   debugToken,
