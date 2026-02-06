@@ -1148,11 +1148,17 @@ async function recomputeConversationState(
   let finalState = inference.state;
   let finalConfidence = inference.confidence;
   const reasons = inference.reasons.slice();
+  const objectReason = reasons.find((reason) => {
+    if (typeof reason !== 'object' || reason === null) return false;
+    const code = (reason as { code?: unknown }).code;
+    return typeof code === 'string' && code.startsWith('LOST_');
+  });
   const lostReasonCode =
-    reasons.find(
-      (reason) =>
-        typeof reason === 'object' && reason.code?.startsWith('LOST_'),
-    )?.code ??
+    (typeof objectReason === 'object' &&
+    objectReason !== null &&
+    'code' in objectReason
+      ? (objectReason as { code: string }).code
+      : null) ??
     reasons.find(
       (reason) => typeof reason === 'string' && reason.startsWith('LOST_'),
     ) ??

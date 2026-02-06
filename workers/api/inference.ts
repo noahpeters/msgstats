@@ -809,7 +809,7 @@ export function inferConversation(
       {
         code: 'LOST_INACTIVE_TIMEOUT',
         confidence: 'HIGH',
-        evidence: lastInboundAt,
+        evidence: lastInboundAt ?? undefined,
       },
     ];
   }
