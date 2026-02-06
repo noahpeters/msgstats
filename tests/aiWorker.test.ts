@@ -7,8 +7,8 @@ import {
   getAiConfig,
   resolveAiMaxInputChars,
   runAiAttemptForMessage,
-  type Env,
-} from '../workers/api/worker';
+  type AiEnv,
+} from '../workers/api/aiRun';
 import type { MessageFeatures } from '../workers/api/inference';
 
 const baseFeatures = (messageText: string): MessageFeatures => ({
@@ -34,7 +34,7 @@ describe('ai usage budgeting', () => {
       CLASSIFIER_AI_MODE: 'workers_ai',
       CLASSIFIER_AI_DAILY_BUDGET_CALLS: '1',
       CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY: '1',
-    } as unknown as Env;
+    } as AiEnv;
     const aiConfig = getAiConfig(env);
     const messageText = 'call me next week';
     const incrementCalls: number[] = [];
@@ -91,7 +91,7 @@ describe('ai usage budgeting', () => {
       CLASSIFIER_AI_MODE: 'workers_ai',
       CLASSIFIER_AI_DAILY_BUDGET_CALLS: '5',
       CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY: '5',
-    } as unknown as Env;
+    } as AiEnv;
     const aiConfig = getAiConfig(env);
     const messageText = 'call me next week';
     const contextDigest = 'ctx';
