@@ -54,6 +54,11 @@ export type MessageFeatures = {
     mode?: string;
     model?: string;
     prompt_version?: string;
+    input_truncated?: boolean;
+    input_chars?: number;
+    attempted?: boolean;
+    attempt_outcome?: string;
+    ran_at?: string;
     interpretation?: {
       handoff?: {
         is_handoff: boolean;

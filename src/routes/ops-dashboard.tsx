@@ -25,6 +25,39 @@ type SyncRun = {
   lastError: string | null;
 };
 
+type AiRunSummary = {
+  id: string;
+  userId: string;
+  pageId: string;
+  platform: string;
+  igBusinessId: string | null;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  stats: {
+    attempted: number;
+    succeeded: number;
+    failed: number;
+    skippedTop: { reason: string; count: number } | null;
+    results: { handoff_true: number; deferred_true: number };
+  } | null;
+};
+
+type AiRunDetail = {
+  id: string;
+  userId: string;
+  pageId: string;
+  platform: string;
+  igBusinessId: string | null;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  aiStats: Record<string, unknown> | null;
+  aiConfig: Record<string, unknown> | null;
+};
+
 type HourPoint = {
   hour: string;
   count: number;
@@ -125,6 +158,11 @@ export default function OpsDashboard(): React.ReactElement {
     React.useState<AppErrorMetrics | null>(null);
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
   const [runsError, setRunsError] = React.useState<string | null>(null);
+  const [aiRuns, setAiRuns] = React.useState<AiRunSummary[]>([]);
+  const [aiRunsError, setAiRunsError] = React.useState<string | null>(null);
+  const [aiRunDetail, setAiRunDetail] = React.useState<AiRunDetail | null>(
+    null,
+  );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -149,6 +187,20 @@ export default function OpsDashboard(): React.ReactElement {
     } else {
       setRunsError('Failed to load sync runs.');
       setSyncRuns([]);
+    }
+  }, []);
+
+  const loadAiRuns = React.useCallback(async () => {
+    setAiRunsError(null);
+    const runsRes = await fetch('/api/ops/ai/runs?limit=20', {
+      cache: 'no-store',
+    });
+    if (runsRes.ok) {
+      const runsData = (await runsRes.json()) as { runs: AiRunSummary[] };
+      setAiRuns(runsData.runs ?? []);
+    } else {
+      setAiRunsError('Failed to load AI runs.');
+      setAiRuns([]);
     }
   }, []);
 
@@ -197,6 +249,17 @@ export default function OpsDashboard(): React.ReactElement {
           } else {
             setRunsError('Failed to load sync runs.');
           }
+          const aiRunsRes = await fetch('/api/ops/ai/runs?limit=20', {
+            cache: 'no-store',
+          });
+          if (aiRunsRes.ok) {
+            const aiRunsData = (await aiRunsRes.json()) as {
+              runs: AiRunSummary[];
+            };
+            setAiRuns(aiRunsData.runs ?? []);
+          } else {
+            setAiRunsError('Failed to load AI runs.');
+          }
         }
       } catch (err) {
         if (active) {
@@ -217,11 +280,12 @@ export default function OpsDashboard(): React.ReactElement {
   React.useEffect(() => {
     const interval = window.setInterval(() => {
       void loadSyncRuns();
+      void loadAiRuns();
     }, 15000);
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadSyncRuns]);
+  }, [loadSyncRuns, loadAiRuns]);
 
   const cancelRun = async (runId: string) => {
     const confirm = window.confirm('Cancel this sync run?');
@@ -235,6 +299,19 @@ export default function OpsDashboard(): React.ReactElement {
     } else {
       setError('Failed to cancel sync run.');
     }
+  };
+
+  const handleAiRunSelect = async (runId: string) => {
+    const response = await fetch(`/api/ops/ai/runs/${runId}`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      setAiRunsError('Failed to load AI run details.');
+      setAiRunDetail(null);
+      return;
+    }
+    const data = (await response.json()) as { run: AiRunDetail };
+    setAiRunDetail(data.run ?? null);
   };
 
   const width = 720;
@@ -471,6 +548,131 @@ export default function OpsDashboard(): React.ReactElement {
           ) : (
             <p {...stylex.props(layout.note)}>No running syncs.</p>
           )}
+        </div>
+
+        <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
+          <h2 style={{ margin: 0 }}>AI runs</h2>
+          <p {...stylex.props(layout.note)}>
+            Recent AI inference activity per sync run.
+          </p>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => loadAiRuns()}
+            >
+              Refresh
+            </button>
+            <span {...stylex.props(layout.note)}>
+              Auto-refreshes every 15s.
+            </span>
+          </div>
+          {aiRunsError ? (
+            <p style={{ color: colors.coral }}>{aiRunsError}</p>
+          ) : null}
+          {aiRuns.length ? (
+            <table {...stylex.props(layout.table)}>
+              <thead>
+                <tr {...stylex.props(layout.tableRow)}>
+                  <th {...stylex.props(layout.tableHead)}>Run ID</th>
+                  <th {...stylex.props(layout.tableHead)}>Started</th>
+                  <th {...stylex.props(layout.tableHead)}>Duration</th>
+                  <th {...stylex.props(layout.tableHead)}>Attempted</th>
+                  <th {...stylex.props(layout.tableHead)}>Succeeded</th>
+                  <th {...stylex.props(layout.tableHead)}>Failed</th>
+                  <th {...stylex.props(layout.tableHead)}>Top skip</th>
+                  <th {...stylex.props(layout.tableHead)}>Handoff</th>
+                  <th {...stylex.props(layout.tableHead)}>Deferred</th>
+                </tr>
+              </thead>
+              <tbody>
+                {aiRuns.map((run) => (
+                  <tr
+                    key={run.id}
+                    {...stylex.props(layout.tableRow)}
+                    onClick={() => handleAiRunSelect(run.id)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <td {...stylex.props(layout.tableCell)}>
+                      <code>{run.id.slice(0, 8)}</code>
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {new Date(run.startedAt).toLocaleString()}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.durationMs != null
+                        ? `${Math.round(run.durationMs / 1000)}s`
+                        : '—'}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.attempted ?? 0}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.succeeded ?? 0}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.failed ?? 0}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.skippedTop
+                        ? `${run.stats.skippedTop.reason} (${run.stats.skippedTop.count})`
+                        : '—'}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.results.handoff_true ?? 0}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.stats?.results.deferred_true ?? 0}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p {...stylex.props(layout.note)}>No AI runs yet.</p>
+          )}
+          {aiRunDetail ? (
+            <div {...stylex.props(layout.card)}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <strong>AI run {aiRunDetail.id.slice(0, 8)}</strong>
+                <button
+                  {...stylex.props(layout.ghostButton)}
+                  onClick={() => setAiRunDetail(null)}
+                >
+                  Close
+                </button>
+              </div>
+              <div style={{ marginTop: '8px', display: 'grid', gap: '6px' }}>
+                <div>
+                  Status: {aiRunDetail.status} · Started:{' '}
+                  {new Date(aiRunDetail.startedAt).toLocaleString()}
+                </div>
+                <div>
+                  Duration:{' '}
+                  {aiRunDetail.durationMs != null
+                    ? `${Math.round(aiRunDetail.durationMs / 1000)}s`
+                    : '—'}
+                </div>
+                <div>
+                  <strong>AI config</strong>
+                  <pre style={{ whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(aiRunDetail.aiConfig ?? {}, null, 2)}
+                  </pre>
+                </div>
+                <div>
+                  <strong>AI stats</strong>
+                  <pre style={{ whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(aiRunDetail.aiStats ?? {}, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>

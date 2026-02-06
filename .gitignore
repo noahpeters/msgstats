@@ -6,3 +6,4 @@ dist
 data
 build
 .wrangler
+.dev.vars

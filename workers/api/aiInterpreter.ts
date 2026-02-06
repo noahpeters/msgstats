@@ -38,6 +38,13 @@ export type AiInterpreterMeta = {
   promptVersion: string;
 };
 
+export type AiPromptInput = {
+  promptText: string;
+  normalizedText: string;
+  inputChars: number;
+  inputTruncated: boolean;
+};
+
 export type ShouldRunAiResult = {
   run: boolean;
   reason: string;
@@ -110,6 +117,23 @@ export function getAiMode(raw?: string | null): AiMode {
 
 export function normalizeText(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+export function getAiPromptInput(
+  messageText: string,
+  maxInputChars: number,
+): AiPromptInput {
+  const safeMax = Math.max(1, Math.floor(maxInputChars));
+  const inputTruncated = messageText.length > safeMax;
+  const promptText = inputTruncated
+    ? messageText.slice(0, safeMax)
+    : messageText;
+  return {
+    promptText,
+    normalizedText: normalizeText(promptText),
+    inputChars: promptText.length,
+    inputTruncated,
+  };
 }
 
 export function buildContextDigest(
@@ -270,12 +294,17 @@ export async function interpretAmbiguity(options: {
   promptVersion: string;
   timeoutMs: number;
   maxOutputTokens: number;
+  maxInputChars: number;
   inputHash: string;
   messageText: string;
   contextDigest: string;
   extractedFeatures: Record<string, unknown>;
 }): Promise<AiInterpretation | null> {
-  const normalized = normalizeText(options.messageText);
+  const promptInput = getAiPromptInput(
+    options.messageText,
+    options.maxInputChars,
+  );
+  const normalized = promptInput.normalizedText;
   if (!normalized) return null;
   if (options.mode === 'mock') {
     const lower = normalized;
@@ -301,14 +330,14 @@ export async function interpretAmbiguity(options: {
         is_handoff: isHandoff,
         type: isHandoff ? 'phone' : null,
         confidence: isHandoff ? 'MEDIUM' : 'LOW',
-        evidence: isHandoff ? options.messageText.slice(0, 120) : '',
+        evidence: isHandoff ? promptInput.promptText.slice(0, 120) : '',
       },
       deferred: {
         is_deferred: Boolean(isDeferred),
         bucket: isDeferred ? deferredBucket : null,
         due_date_iso: null,
         confidence: isDeferred ? 'MEDIUM' : 'LOW',
-        evidence: isDeferred ? options.messageText.slice(0, 120) : '',
+        evidence: isDeferred ? promptInput.promptText.slice(0, 120) : '',
       },
     };
   }
@@ -342,7 +371,7 @@ export async function interpretAmbiguity(options: {
           },
           {
             role: 'user',
-            content: `${JSON_SCHEMA_HINT}\n\nMessage:\n${options.messageText}\n\nContext:\n${options.contextDigest}\n\nExtracted features:\n${JSON.stringify(
+            content: `${JSON_SCHEMA_HINT}\n\nMessage:\n${promptInput.promptText}\n\nContext:\n${options.contextDigest}\n\nExtracted features:\n${JSON.stringify(
               options.extractedFeatures,
             )}`,
           },

@@ -91,6 +91,18 @@ const styles = stylex.create({
     backgroundColor: '#fff4d6',
     color: '#7c3e00',
   },
+  badgeAi: {
+    backgroundColor: '#e9efff',
+    color: '#1f2a44',
+  },
+  badgeAiHandoff: {
+    backgroundColor: '#e7f7f2',
+    color: '#0f766e',
+  },
+  badgeAiDeferred: {
+    backgroundColor: '#fef3c7',
+    color: '#92400e',
+  },
   mainPanel: {
     borderRadius: '16px',
     border: '1px solid rgba(12, 27, 26, 0.1)',
@@ -218,6 +230,11 @@ type ConversationSummary = {
   currentConfidence: string;
   followupSuggestion: string | null;
   followupDueAt: string | null;
+  aiSummary?: {
+    has_ai_processed: boolean;
+    has_ai_handoff_true: boolean;
+    has_ai_deferred_true: boolean;
+  };
 };
 
 type ConversationDetail = {
@@ -274,6 +291,11 @@ type AiMeta = {
   mode?: string;
   model?: string;
   prompt_version?: string;
+  input_truncated?: boolean;
+  input_chars?: number;
+  attempted?: boolean;
+  attempt_outcome?: string;
+  ran_at?: string;
   interpretation?: AiInterpretation;
   skipped_reason?: string;
   errors?: string[];
@@ -420,6 +442,15 @@ export default function Inbox(): React.ReactElement {
     messageText: string | null;
     ai: AiMeta | null;
   } | null>(null);
+  const [selectedAi, setSelectedAi] = React.useState<{
+    kind: 'handoff' | 'deferred' | 'error';
+    messageId: string;
+    messageText: string | null;
+    ai: AiMeta;
+  } | null>(null);
+  const showAiErrors =
+    typeof window !== 'undefined' &&
+    (import.meta.env.DEV || window.location.search.includes('ops=1'));
 
   const loadAssets = React.useCallback(async () => {
     const response = await fetch('/api/assets');
@@ -520,6 +551,7 @@ export default function Inbox(): React.ReactElement {
 
   React.useEffect(() => {
     setSelectedRule(null);
+    setSelectedAi(null);
   }, [selectedId]);
 
   React.useEffect(() => {
@@ -860,6 +892,25 @@ export default function Inbox(): React.ReactElement {
                         {conversation.followupSuggestion}
                       </span>
                     ) : null}
+                    {conversation.aiSummary?.has_ai_processed ? (
+                      <span {...stylex.props(styles.badge, styles.badgeAi)}>
+                        AI
+                      </span>
+                    ) : null}
+                    {conversation.aiSummary?.has_ai_handoff_true ? (
+                      <span
+                        {...stylex.props(styles.badge, styles.badgeAiHandoff)}
+                      >
+                        AI: Handoff
+                      </span>
+                    ) : null}
+                    {conversation.aiSummary?.has_ai_deferred_true ? (
+                      <span
+                        {...stylex.props(styles.badge, styles.badgeAiDeferred)}
+                      >
+                        AI: Deferred
+                      </span>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -1015,46 +1066,126 @@ export default function Inbox(): React.ReactElement {
                   <div>
                     <div {...stylex.props(styles.sectionTitle)}>Messages</div>
                     <div {...stylex.props(styles.timeline)}>
-                      {detail.messages.map((message) => (
-                        <div
-                          key={message.id}
-                          {...stylex.props(
-                            styles.message,
-                            message.direction === 'outbound'
-                              ? styles.outbound
-                              : styles.inbound,
-                          )}
-                        >
+                      {detail.messages.map((message) => {
+                        const ai = getAiMeta(message.features);
+                        const aiHandoff = Boolean(
+                          ai?.interpretation?.handoff?.is_handoff,
+                        );
+                        const aiDeferred = Boolean(
+                          ai?.interpretation?.deferred?.is_deferred,
+                        );
+                        const aiErrors = Boolean(
+                          showAiErrors && ai?.errors?.length,
+                        );
+                        const hasChips =
+                          aiHandoff ||
+                          aiDeferred ||
+                          aiErrors ||
+                          message.ruleHits.length;
+                        return (
                           <div
-                            style={{ fontSize: '12px', color: palette.slate }}
+                            key={message.id}
+                            {...stylex.props(
+                              styles.message,
+                              message.direction === 'outbound'
+                                ? styles.outbound
+                                : styles.inbound,
+                            )}
                           >
-                            {message.senderName ?? 'Unknown'} ·{' '}
-                            {new Date(message.createdAt).toLocaleString()}
-                          </div>
-                          <div>{message.body ?? '—'}</div>
-                          {message.ruleHits.length ? (
-                            <div {...stylex.props(styles.chipRow)}>
-                              {message.ruleHits.map((hit) => (
-                                <button
-                                  key={hit}
-                                  {...stylex.props(styles.chip)}
-                                  onClick={() =>
-                                    setSelectedRule({
-                                      hit,
-                                      messageId: message.id,
-                                      messageText: message.body ?? null,
-                                      ai: getAiMeta(message.features),
-                                    })
-                                  }
-                                  style={{ border: 'none', cursor: 'pointer' }}
-                                >
-                                  {ruleLabels[hit] ?? hit}
-                                </button>
-                              ))}
+                            <div
+                              style={{ fontSize: '12px', color: palette.slate }}
+                            >
+                              {message.senderName ?? 'Unknown'} ·{' '}
+                              {new Date(message.createdAt).toLocaleString()}
                             </div>
-                          ) : null}
-                        </div>
-                      ))}
+                            <div>{message.body ?? '—'}</div>
+                            {hasChips ? (
+                              <div {...stylex.props(styles.chipRow)}>
+                                {aiHandoff ? (
+                                  <button
+                                    {...stylex.props(styles.chip)}
+                                    onClick={() =>
+                                      ai &&
+                                      setSelectedAi({
+                                        kind: 'handoff',
+                                        messageId: message.id,
+                                        messageText: message.body ?? null,
+                                        ai,
+                                      })
+                                    }
+                                    style={{
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    Handoff (AI)
+                                  </button>
+                                ) : null}
+                                {aiDeferred ? (
+                                  <button
+                                    {...stylex.props(styles.chip)}
+                                    onClick={() =>
+                                      ai &&
+                                      setSelectedAi({
+                                        kind: 'deferred',
+                                        messageId: message.id,
+                                        messageText: message.body ?? null,
+                                        ai,
+                                      })
+                                    }
+                                    style={{
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    Deferred (AI)
+                                  </button>
+                                ) : null}
+                                {aiErrors ? (
+                                  <button
+                                    {...stylex.props(styles.chip)}
+                                    onClick={() =>
+                                      ai &&
+                                      setSelectedAi({
+                                        kind: 'error',
+                                        messageId: message.id,
+                                        messageText: message.body ?? null,
+                                        ai,
+                                      })
+                                    }
+                                    style={{
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    AI error
+                                  </button>
+                                ) : null}
+                                {message.ruleHits.map((hit) => (
+                                  <button
+                                    key={hit}
+                                    {...stylex.props(styles.chip)}
+                                    onClick={() =>
+                                      setSelectedRule({
+                                        hit,
+                                        messageId: message.id,
+                                        messageText: message.body ?? null,
+                                        ai: getAiMeta(message.features),
+                                      })
+                                    }
+                                    style={{
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    {ruleLabels[hit] ?? hit}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                       {selectedRule ? (
                         <div
                           {...stylex.props(layout.card)}
@@ -1138,6 +1269,116 @@ export default function Inbox(): React.ReactElement {
                           <button
                             {...stylex.props(layout.ghostButton)}
                             onClick={() => setSelectedRule(null)}
+                            style={{ marginTop: '8px' }}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      ) : null}
+                      {selectedAi ? (
+                        <div
+                          {...stylex.props(layout.card)}
+                          style={{ marginTop: '12px' }}
+                        >
+                          <div {...stylex.props(styles.sectionTitle)}>
+                            AI Detail
+                          </div>
+                          <div>
+                            <strong>
+                              {selectedAi.kind === 'handoff'
+                                ? 'Handoff (AI)'
+                                : selectedAi.kind === 'deferred'
+                                  ? 'Deferred (AI)'
+                                  : 'AI Error'}
+                            </strong>
+                          </div>
+                          {selectedAi.kind === 'error' ? (
+                            <div style={{ color: palette.slate }}>
+                              {(selectedAi.ai.errors ?? []).join(', ') || '—'}
+                            </div>
+                          ) : null}
+                          {selectedAi.kind === 'handoff' &&
+                          selectedAi.ai.interpretation?.handoff ? (
+                            <div style={{ marginTop: '8px' }}>
+                              <div>
+                                Evidence:{' '}
+                                {selectedAi.ai.interpretation.handoff
+                                  .evidence || '—'}
+                              </div>
+                              <div>
+                                Confidence:{' '}
+                                {
+                                  selectedAi.ai.interpretation.handoff
+                                    .confidence
+                                }
+                              </div>
+                              <div>
+                                Type:{' '}
+                                {selectedAi.ai.interpretation.handoff.type ||
+                                  '—'}
+                              </div>
+                            </div>
+                          ) : null}
+                          {selectedAi.kind === 'deferred' &&
+                          selectedAi.ai.interpretation?.deferred ? (
+                            <div style={{ marginTop: '8px' }}>
+                              <div>
+                                Evidence:{' '}
+                                {selectedAi.ai.interpretation.deferred
+                                  .evidence || '—'}
+                              </div>
+                              <div>
+                                Confidence:{' '}
+                                {
+                                  selectedAi.ai.interpretation.deferred
+                                    .confidence
+                                }
+                              </div>
+                              <div>
+                                Bucket:{' '}
+                                {selectedAi.ai.interpretation.deferred.bucket ||
+                                  '—'}
+                              </div>
+                              <div>
+                                Due date:{' '}
+                                {selectedAi.ai.interpretation.deferred
+                                  .due_date_iso || '—'}
+                              </div>
+                            </div>
+                          ) : null}
+                          <details style={{ marginTop: '8px' }}>
+                            <summary style={{ cursor: 'pointer' }}>
+                              Details
+                            </summary>
+                            <div style={{ marginTop: '6px' }}>
+                              Model: {selectedAi.ai.model ?? '—'} · Prompt:{' '}
+                              {selectedAi.ai.prompt_version ?? '—'}
+                            </div>
+                            <div>
+                              Ran at:{' '}
+                              {selectedAi.ai.ran_at ||
+                                selectedAi.ai.updated_at ||
+                                '—'}
+                            </div>
+                            <div>
+                              Input truncated:{' '}
+                              {selectedAi.ai.input_truncated == null
+                                ? '—'
+                                : selectedAi.ai.input_truncated
+                                  ? 'Yes'
+                                  : 'No'}{' '}
+                              · Chars:{' '}
+                              {selectedAi.ai.input_chars ??
+                                selectedAi.messageText?.length ??
+                                '—'}
+                            </div>
+                          </details>
+                          <div style={{ marginTop: '6px' }}>
+                            Matched in message: {selectedAi.messageText ?? '—'}
+                          </div>
+                          <button
+                            {...stylex.props(layout.ghostButton)}
+                            onClick={() => setSelectedAi(null)}
                             style={{ marginTop: '8px' }}
                           >
                             Close
