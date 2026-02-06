@@ -13,11 +13,30 @@ import {
   fetchConversationsPage,
   fetchConversationMessages,
   metaConfig,
-  MetaApiError,
+  type MetaApiError,
   type MetaConversation,
   sendMessage,
   fetchUserProfile,
 } from './meta';
+import {
+  annotateMessage,
+  inferConversation,
+  type AnnotatedMessage,
+  type ConversationState,
+  type InferenceConfig,
+  type MessageFeatures,
+} from './inference';
+import {
+  buildContextDigest,
+  computeInputHash,
+  defaultAiModel,
+  getAiMode,
+  interpretAmbiguity,
+  shouldAllowAiCall,
+  shouldRunAI,
+  normalizeText,
+  type AiInterpretation,
+} from './aiInterpreter';
 import { reportError } from './observability/reportError';
 import { queryAnalyticsEngine } from './observability/analyticsEngine';
 import {
@@ -25,6 +44,7 @@ import {
   windowToSqlInterval,
   type MetricsWindow,
 } from './observability/window';
+import { registerRoutes } from './routes';
 import { buildReportFromDb } from './report';
 import {
   buildSessionCookie,
@@ -34,12 +54,15 @@ import {
   readSessionToken,
 } from './session';
 
-type Env = {
+export type Env = {
   DB: D1Database;
   SYNC_QUEUE: Queue<SyncJob>;
   SYNC_RUNS_HUB: DurableObjectNamespace;
   INBOX_HUB: DurableObjectNamespace;
   SYNC_SCOPE_ORCHESTRATOR: DurableObjectNamespace;
+  AI?: {
+    run: (model: string, input: unknown, options?: unknown) => Promise<unknown>;
+  };
   DEV_WS_PUBLISH_URL?: string;
   AE_META_CALLS: AnalyticsEngineDataset;
   AE_APP_ERRORS: AnalyticsEngineDataset;
@@ -54,6 +77,17 @@ type Env = {
   SYNC_CHECKPOINT_OVERLAP_SECONDS?: string;
   FOLLOWUP_WINDOW_DAYS?: string;
   FOLLOWUP_SLA_HOURS?: string;
+  INBOX_SLA_HOURS?: string;
+  INBOX_LOST_AFTER_PRICE_DAYS?: string;
+  INBOX_RESURRECT_GAP_DAYS?: string;
+  INBOX_DEFER_DEFAULT_DAYS?: string;
+  CLASSIFIER_AI_MODE?: string;
+  CLASSIFIER_AI_MODEL?: string;
+  CLASSIFIER_AI_PROMPT_VERSION?: string;
+  CLASSIFIER_AI_TIMEOUT_MS?: string;
+  CLASSIFIER_AI_MAX_OUTPUT_TOKENS?: string;
+  CLASSIFIER_AI_DAILY_BUDGET_CALLS?: string;
+  CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY?: string;
   FEATURE_FOLLOWUP_INBOX?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
@@ -117,13 +151,6 @@ type SyncScope = {
   igBusinessId: string | null;
 };
 
-type FollowupReason =
-  | 'UNREPLIED'
-  | 'SLA_BREACH'
-  | 'LEAD_NEW'
-  | 'LEAD_STALE'
-  | 'MANUAL_FLAG';
-
 type ConversationRow = {
   id: string;
   userId: string;
@@ -139,6 +166,20 @@ type ConversationRow = {
   participantHandle: string | null;
   needsFollowup: number;
   followupReasons: string | null;
+  currentState: ConversationState | null;
+  currentConfidence: string | null;
+  followupDueAt: string | null;
+  followupSuggestion: string | null;
+  lastEvaluatedAt: string | null;
+  messageCount: number;
+  inboundCount: number;
+  outboundCount: number;
+  isSpam: number;
+  lastSnippet: string | null;
+  offPlatformOutcome: string | null;
+  finalTouchRequired?: number | null;
+  finalTouchSentAt?: string | null;
+  lostReasonCode?: string | null;
 };
 
 // function pickUsage(headers: Headers) {
@@ -366,12 +407,100 @@ function getSyncCheckpointOverlapSeconds(env: Env) {
   return parsed;
 }
 
-function getFollowupWindowDays(env: Env) {
-  return Math.max(1, parseNumberEnv(env.FOLLOWUP_WINDOW_DAYS, 30));
+function getInferenceConfig(env: Env): InferenceConfig {
+  const slaHours = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_SLA_HOURS ?? env.FOLLOWUP_SLA_HOURS, 24),
+  );
+  const lostAfterPriceDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_LOST_AFTER_PRICE_DAYS, 60),
+  );
+  const resurrectGapDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_RESURRECT_GAP_DAYS, 30),
+  );
+  const deferDefaultDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_DEFER_DEFAULT_DAYS, 30),
+  );
+  return { slaHours, lostAfterPriceDays, resurrectGapDays, deferDefaultDays };
 }
 
-function getFollowupSlaHours(env: Env) {
-  return Math.max(1, parseNumberEnv(env.FOLLOWUP_SLA_HOURS, 24));
+function getAiConfig(env: Env) {
+  const mode = getAiMode(env.CLASSIFIER_AI_MODE);
+  return {
+    mode,
+    model: env.CLASSIFIER_AI_MODEL?.trim() || defaultAiModel,
+    promptVersion: env.CLASSIFIER_AI_PROMPT_VERSION?.trim() || 'v1',
+    timeoutMs: Math.max(
+      1000,
+      parseNumberEnv(env.CLASSIFIER_AI_TIMEOUT_MS, 8000),
+    ),
+    maxOutputTokens: Math.max(
+      32,
+      parseNumberEnv(env.CLASSIFIER_AI_MAX_OUTPUT_TOKENS, 128),
+    ),
+    dailyBudget: Math.max(
+      0,
+      parseNumberEnv(env.CLASSIFIER_AI_DAILY_BUDGET_CALLS, 25),
+    ),
+    maxCallsPerConversation: Math.max(
+      0,
+      parseNumberEnv(env.CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY, 1),
+    ),
+  };
+}
+
+function getAiDateKey(now: Date) {
+  return now.toISOString().slice(0, 10);
+}
+
+async function getAiUsageDaily(env: Env, dateKey: string) {
+  const row = await env.DB.prepare(
+    'SELECT calls FROM ai_usage_daily WHERE date = ?',
+  )
+    .bind(dateKey)
+    .first<{ calls: number }>();
+  return row?.calls ?? 0;
+}
+
+async function getAiUsageConversation(
+  env: Env,
+  conversationId: string,
+  dateKey: string,
+) {
+  const row = await env.DB.prepare(
+    'SELECT calls FROM ai_usage_conversation_daily WHERE conversation_id = ? AND date = ?',
+  )
+    .bind(conversationId, dateKey)
+    .first<{ calls: number }>();
+  return row?.calls ?? 0;
+}
+
+async function incrementAiUsage(
+  env: Env,
+  conversationId: string,
+  dateKey: string,
+) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO ai_usage_daily (date, calls, updated_at)
+     VALUES (?, 1, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       calls = calls + 1,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(dateKey, now)
+    .run();
+  await env.DB.prepare(
+    `INSERT INTO ai_usage_conversation_daily (conversation_id, date, calls)
+     VALUES (?, ?, 1)
+     ON CONFLICT(conversation_id, date) DO UPDATE SET
+       calls = calls + 1`,
+  )
+    .bind(conversationId, dateKey)
+    .run();
 }
 
 function isFeatureEnabled(raw?: string) {
@@ -384,7 +513,7 @@ function isFollowupInboxEnabled(env: Env) {
   return isFeatureEnabled(env.FEATURE_FOLLOWUP_INBOX);
 }
 
-function parseJsonArray(raw: string | null | undefined): string[] {
+function parseJsonArray(raw: string | null | undefined): unknown[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -392,10 +521,6 @@ function parseJsonArray(raw: string | null | undefined): string[] {
   } catch {
     return [];
   }
-}
-
-function normalizeTag(tag: string) {
-  return tag.trim().toLowerCase().replace(/\s+/g, '_');
 }
 
 function sleepMs(ms: number) {
@@ -696,81 +821,6 @@ async function getAssetNameMap(env: Env, userId: string) {
   return map;
 }
 
-const CLOSED_TAGS = new Set(['closed']);
-const MANUAL_FLAG_TAGS = new Set(['manual_flag', 'flagged']);
-
-function deriveLeadReasons(
-  status?: string | null,
-  stage?: string | null,
-  disposition?: string | null,
-): FollowupReason[] {
-  const combined = [status, stage, disposition]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-  const reasons: FollowupReason[] = [];
-  if (combined.includes('new')) {
-    reasons.push('LEAD_NEW');
-  }
-  if (
-    combined.includes('stale') ||
-    combined.includes('cold') ||
-    combined.includes('lost')
-  ) {
-    reasons.push('LEAD_STALE');
-  }
-  return reasons;
-}
-
-function computeFollowupState(options: {
-  lastInboundAt?: string | null;
-  lastOutboundAt?: string | null;
-  tags: string[];
-  leadStatus?: string | null;
-  leadStage?: string | null;
-  leadDisposition?: string | null;
-  windowDays: number;
-  slaHours: number;
-  now?: Date;
-}) {
-  const now = options.now ?? new Date();
-  const lastInbound = options.lastInboundAt
-    ? parseDate(options.lastInboundAt)
-    : null;
-  const lastOutbound = options.lastOutboundAt
-    ? parseDate(options.lastOutboundAt)
-    : null;
-  const closed = options.tags.some((tag) => CLOSED_TAGS.has(tag));
-  if (!lastInbound || closed) {
-    return { needsFollowup: false, reasons: [] as FollowupReason[] };
-  }
-  const inboundMs = lastInbound.getTime();
-  const outboundMs = lastOutbound?.getTime() ?? null;
-  const windowMs = options.windowDays * 24 * 60 * 60 * 1000;
-  if (Number.isNaN(inboundMs) || now.getTime() - inboundMs > windowMs) {
-    return { needsFollowup: false, reasons: [] as FollowupReason[] };
-  }
-  if (outboundMs !== null && outboundMs >= inboundMs) {
-    return { needsFollowup: false, reasons: [] as FollowupReason[] };
-  }
-  const reasons: FollowupReason[] = ['UNREPLIED'];
-  const slaMs = options.slaHours * 60 * 60 * 1000;
-  if (now.getTime() - inboundMs >= slaMs) {
-    reasons.push('SLA_BREACH');
-  }
-  reasons.push(
-    ...deriveLeadReasons(
-      options.leadStatus,
-      options.leadStage,
-      options.leadDisposition,
-    ),
-  );
-  if (options.tags.some((tag) => MANUAL_FLAG_TAGS.has(tag))) {
-    reasons.push('MANUAL_FLAG');
-  }
-  return { needsFollowup: true, reasons };
-}
-
 async function getConversation(
   env: Env,
   userId: string,
@@ -790,7 +840,21 @@ async function getConversation(
             participant_name as participantName,
             participant_handle as participantHandle,
             needs_followup as needsFollowup,
-            followup_reasons as followupReasons
+            followup_reasons as followupReasons,
+            current_state as currentState,
+            current_confidence as currentConfidence,
+            followup_due_at as followupDueAt,
+            followup_suggestion as followupSuggestion,
+            last_evaluated_at as lastEvaluatedAt,
+            message_count as messageCount,
+            inbound_count as inboundCount,
+            outbound_count as outboundCount,
+            is_spam as isSpam,
+            last_snippet as lastSnippet,
+            off_platform_outcome as offPlatformOutcome,
+            final_touch_required as finalTouchRequired,
+            final_touch_sent_at as finalTouchSentAt,
+            lost_reason_code as lostReasonCode
      FROM conversations
      WHERE user_id = ? AND id = ?`,
   )
@@ -821,57 +885,385 @@ async function listConversationTags(
   return map;
 }
 
-async function getConversationLead(
+async function loadConversationMessagesForInference(
   env: Env,
   userId: string,
   conversationId: string,
-) {
-  return await env.DB.prepare(
-    `SELECT status, stage, disposition
-     FROM conversation_leads
-     WHERE user_id = ? AND conversation_id = ?`,
+  forceRecompute = false,
+): Promise<AnnotatedMessage[]> {
+  const rows = await env.DB.prepare(
+    `SELECT id, created_time as createdAt, body, direction, sender_type as senderType,
+            message_type as messageType,
+            features_json as featuresJson, rule_hits_json as ruleHitsJson
+     FROM messages
+     WHERE user_id = ? AND conversation_id = ?
+     ORDER BY created_time ASC`,
   )
     .bind(userId, conversationId)
-    .first<{
-      status?: string | null;
-      stage?: string | null;
-      disposition?: string | null;
+    .all<{
+      id: string;
+      createdAt: string;
+      body: string | null;
+      direction: 'inbound' | 'outbound' | null;
+      senderType: string | null;
+      messageType: string | null;
+      featuresJson: string | null;
+      ruleHitsJson: string | null;
     }>();
+
+  const annotated: AnnotatedMessage[] = [];
+  const updates: D1PreparedStatement[] = [];
+  const updateStmt = env.DB.prepare(
+    `UPDATE messages
+     SET features_json = ?, rule_hits_json = ?
+     WHERE user_id = ? AND id = ?`,
+  );
+  const aiConfig = getAiConfig(env);
+  const aiMode = aiConfig.mode;
+  const now = new Date();
+  const dateKey = getAiDateKey(now);
+  let dailyCalls = aiMode === 'off' ? 0 : await getAiUsageDaily(env, dateKey);
+  let conversationCalls =
+    aiMode === 'off'
+      ? 0
+      : await getAiUsageConversation(env, conversationId, dateKey);
+
+  for (const row of rows.results ?? []) {
+    const direction =
+      row.direction === 'outbound'
+        ? 'outbound'
+        : row.direction === 'inbound'
+          ? 'inbound'
+          : row.senderType === 'business'
+            ? 'outbound'
+            : 'inbound';
+    const baseAnnotated = annotateMessage({
+      id: row.id,
+      direction,
+      text: row.body,
+      createdAt: row.createdAt,
+    });
+    let features = baseAnnotated.features;
+    let ruleHits = [...baseAnnotated.ruleHits];
+    let existingAi: MessageFeatures['ai'] | undefined;
+    if (row.featuresJson) {
+      try {
+        const parsed = JSON.parse(row.featuresJson) as MessageFeatures;
+        if (parsed?.ai) {
+          existingAi = parsed.ai;
+        }
+      } catch {
+        existingAi = undefined;
+      }
+    }
+
+    if (aiMode === 'off') {
+      features = { ...features, ai: undefined };
+      ruleHits = ruleHits.filter(
+        (hit) => hit !== 'AI_HANDOFF_INTERPRET' && hit !== 'AI_DEFER_INTERPRET',
+      );
+    } else if (direction === 'inbound' && row.body) {
+      const contextDigest = buildContextDigest(
+        [...annotated, { ...baseAnnotated }].map((msg) => ({
+          direction: msg.direction,
+          text: msg.text,
+        })),
+        4,
+      );
+      const inputSeed = `${normalizeText(row.body)}|${aiConfig.promptVersion}|${aiConfig.model}|${contextDigest}`;
+      const inputHash = await computeInputHash(inputSeed);
+      const decision = shouldRunAI({
+        messageText: row.body,
+        extractedFeatures: {
+          has_phone_number: features.has_phone_number,
+          has_email: features.has_email,
+          deferral_date_hint: features.deferral_date_hint,
+        },
+        mode: aiMode,
+      });
+
+      let aiRecord: MessageFeatures['ai'] | undefined = existingAi;
+      let interpretation: AiInterpretation | null = null;
+      let skippedReason: string | undefined;
+      let errors: string[] = [];
+      if (!decision.run) {
+        skippedReason = decision.reason;
+      } else if (
+        existingAi?.input_hash === inputHash &&
+        existingAi.interpretation
+      ) {
+        interpretation = existingAi.interpretation as AiInterpretation;
+      } else {
+        const budget = shouldAllowAiCall({
+          dailyCalls,
+          conversationCalls,
+          maxDaily: aiConfig.dailyBudget,
+          maxPerConversation: aiConfig.maxCallsPerConversation,
+        });
+        if (!budget.allowed) {
+          skippedReason = budget.reason ?? 'budget_exceeded';
+        } else {
+          try {
+            interpretation = await interpretAmbiguity({
+              envAi: env.AI,
+              mode: aiMode,
+              model: aiConfig.model,
+              promptVersion: aiConfig.promptVersion,
+              timeoutMs: aiConfig.timeoutMs,
+              maxOutputTokens: aiConfig.maxOutputTokens,
+              inputHash,
+              messageText: row.body,
+              contextDigest,
+              extractedFeatures: features,
+            });
+            if (aiMode === 'workers_ai' || interpretation) {
+              await incrementAiUsage(env, conversationId, dateKey);
+              dailyCalls += 1;
+              conversationCalls += 1;
+            }
+          } catch (error) {
+            errors = [error instanceof Error ? error.message : 'ai_error'];
+          }
+        }
+      }
+
+      if (interpretation) {
+        aiRecord = {
+          input_hash: inputHash,
+          mode: aiMode,
+          model: aiConfig.model,
+          prompt_version: aiConfig.promptVersion,
+          interpretation,
+          updated_at: new Date().toISOString(),
+        };
+        if (interpretation.handoff?.is_handoff) {
+          ruleHits.push('AI_HANDOFF_INTERPRET');
+        }
+        if (interpretation.deferred?.is_deferred) {
+          ruleHits.push('AI_DEFER_INTERPRET');
+        }
+      } else if (skippedReason || errors.length) {
+        aiRecord = {
+          input_hash: inputHash,
+          mode: aiMode,
+          model: aiConfig.model,
+          prompt_version: aiConfig.promptVersion,
+          skipped_reason: skippedReason,
+          errors: errors.length ? errors : undefined,
+          updated_at: new Date().toISOString(),
+        };
+      }
+
+      if (aiRecord) {
+        features = { ...features, ai: aiRecord };
+      }
+    }
+
+    if (forceRecompute || !row.featuresJson || !row.ruleHitsJson) {
+      updates.push(
+        updateStmt.bind(
+          JSON.stringify(features),
+          JSON.stringify(ruleHits),
+          userId,
+          row.id,
+        ),
+      );
+    }
+    annotated.push({
+      id: row.id,
+      direction,
+      text: row.body,
+      createdAt: row.createdAt,
+      messageType: row.messageType,
+      features,
+      ruleHits,
+    });
+  }
+
+  if (updates.length) {
+    const batchSize = 50;
+    for (let i = 0; i < updates.length; i += batchSize) {
+      await env.DB.batch(updates.slice(i, i + batchSize));
+    }
+  }
+  return annotated;
 }
 
-async function recomputeFollowupForConversation(
+async function recordStateEvent(
+  env: Env,
+  data: {
+    userId: string;
+    conversationId: string;
+    fromState: ConversationState | null;
+    toState: ConversationState;
+    confidence: string;
+    reasons: Array<
+      string | { code: string; confidence: string; evidence?: string }
+    >;
+    triggeredByMessageId?: string | null;
+  },
+) {
+  await env.DB.prepare(
+    `INSERT INTO conversation_state_events
+     (id, user_id, conversation_id, from_state, to_state, confidence, reasons_json, triggered_by_message_id, triggered_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      data.userId,
+      data.conversationId,
+      data.fromState,
+      data.toState,
+      data.confidence,
+      JSON.stringify(data.reasons),
+      data.triggeredByMessageId ?? null,
+      new Date().toISOString(),
+    )
+    .run();
+}
+
+async function recomputeConversationState(
   env: Env,
   userId: string,
   conversationId: string,
 ) {
   const conversation = await getConversation(env, userId, conversationId);
   if (!conversation) return null;
-  const tags = await listConversationTags(env, userId, [conversationId]);
-  const lead = await getConversationLead(env, userId, conversationId);
-  const { needsFollowup, reasons } = computeFollowupState({
-    lastInboundAt: conversation.lastInboundAt,
-    lastOutboundAt: conversation.lastOutboundAt,
-    tags: tags.get(conversationId) ?? [],
-    leadStatus: lead?.status ?? null,
-    leadStage: lead?.stage ?? null,
-    leadDisposition: lead?.disposition ?? null,
-    windowDays: getFollowupWindowDays(env),
-    slaHours: getFollowupSlaHours(env),
+  const messages = await loadConversationMessagesForInference(
+    env,
+    userId,
+    conversationId,
+    true,
+  );
+  if (!messages.length) return null;
+  const config = getInferenceConfig(env);
+  const inference = inferConversation({
+    messages,
+    previousState: conversation.currentState ?? null,
+    previousEvaluatedAt: conversation.lastEvaluatedAt ?? null,
+    finalTouchSentAt: conversation.finalTouchSentAt ?? null,
+    config,
   });
+
+  let finalState = inference.state;
+  let finalConfidence = inference.confidence;
+  const reasons = inference.reasons.slice();
+  const lostReasonCode =
+    reasons.find(
+      (reason) =>
+        typeof reason === 'object' && reason.code?.startsWith('LOST_'),
+    )?.code ??
+    reasons.find(
+      (reason) => typeof reason === 'string' && reason.startsWith('LOST_'),
+    ) ??
+    null;
+
+  if (
+    conversation.offPlatformOutcome &&
+    conversation.currentState === 'OFF_PLATFORM'
+  ) {
+    if (conversation.offPlatformOutcome === 'converted') {
+      finalState = 'CONVERTED';
+      finalConfidence = 'LOW';
+      reasons.push('USER_ANNOTATION');
+    } else if (conversation.offPlatformOutcome === 'lost') {
+      finalState = 'LOST';
+      finalConfidence = 'LOW';
+      reasons.push('USER_ANNOTATION');
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const needsFollowup =
+    finalState !== 'LOST' &&
+    finalState !== 'SPAM' &&
+    Boolean(inference.followupSuggestion);
+  const finalTouchSentAt =
+    conversation.finalTouchSentAt ?? conversation.finalTouchSentAt ?? null;
+  const finalTouchRequired =
+    finalState === 'LOST' &&
+    lostReasonCode === 'LOST_INACTIVE_TIMEOUT' &&
+    !finalTouchSentAt
+      ? 1
+      : 0;
+
   await env.DB.prepare(
     `UPDATE conversations
-     SET needs_followup = ?,
-         followup_reasons = ?
+     SET last_inbound_at = ?,
+         last_outbound_at = ?,
+         last_message_at = ?,
+         message_count = ?,
+         inbound_count = ?,
+         outbound_count = ?,
+         current_state = ?,
+         current_confidence = ?,
+         followup_due_at = ?,
+         followup_suggestion = ?,
+         last_evaluated_at = ?,
+         is_spam = ?,
+         last_snippet = ?,
+         needs_followup = ?,
+         followup_reasons = ?,
+         final_touch_required = ?,
+         final_touch_sent_at = ?,
+         lost_reason_code = ?
      WHERE user_id = ? AND id = ?`,
   )
     .bind(
+      inference.lastInboundAt,
+      inference.lastOutboundAt,
+      inference.lastMessageAt ?? conversation.lastMessageAt,
+      inference.messageCount,
+      inference.inboundCount,
+      inference.outboundCount,
+      finalState,
+      finalConfidence,
+      inference.followupDueAt,
+      inference.followupSuggestion,
+      nowIso,
+      finalState === 'SPAM' ? 1 : 0,
+      inference.lastSnippet,
       needsFollowup ? 1 : 0,
       JSON.stringify(reasons),
+      finalTouchRequired,
+      finalTouchSentAt,
+      lostReasonCode,
       userId,
       conversationId,
     )
     .run();
-  return { needsFollowup, reasons };
+
+  if (inference.resurrected) {
+    await recordStateEvent(env, {
+      userId,
+      conversationId,
+      fromState: conversation.currentState,
+      toState: 'RESURRECTED',
+      confidence: 'LOW',
+      reasons: ['RESURRECTED'],
+    });
+  }
+  if (conversation.currentState !== finalState || !conversation.currentState) {
+    await recordStateEvent(env, {
+      userId,
+      conversationId,
+      fromState: inference.resurrected
+        ? 'RESURRECTED'
+        : conversation.currentState,
+      toState: finalState,
+      confidence: finalConfidence,
+      reasons,
+      triggeredByMessageId: inference.stateTriggerMessageId ?? null,
+    });
+  }
+
+  return {
+    state: finalState,
+    confidence: finalConfidence,
+    followupSuggestion: inference.followupSuggestion,
+    followupDueAt: inference.followupDueAt,
+    reasons,
+  };
 }
 
 async function getSyncRunById(env: Env, id: string) {
@@ -1949,8 +2341,9 @@ async function runSync(options: {
       `INSERT OR IGNORE INTO messages
        (user_id, id, conversation_id, page_id, sender_type, body, created_time,
         asset_id, platform, ig_business_id, direction, sender_id, sender_name,
-        attachments, raw, meta_message_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        attachments, raw, meta_message_id, features_json, rule_hits_json,
+        message_type, message_trigger)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const statements: D1PreparedStatement[] = [];
 
@@ -2007,6 +2400,14 @@ async function runSync(options: {
           ? JSON.stringify(message.attachments)
           : null;
       const raw = JSON.stringify(message);
+      const annotatedMessage = annotateMessage({
+        id: message.id,
+        direction,
+        text: message.message ?? null,
+        createdAt: created,
+      });
+      const featuresJson = JSON.stringify(annotatedMessage.features);
+      const ruleHitsJson = JSON.stringify(annotatedMessage.ruleHits);
       statements.push(
         insert.bind(
           userId,
@@ -2025,6 +2426,10 @@ async function runSync(options: {
           attachments,
           raw,
           message.id,
+          featuresJson,
+          ruleHitsJson,
+          null,
+          null,
         ),
       );
     }
@@ -2130,21 +2535,23 @@ async function runSync(options: {
       )
       .run();
 
-    const followupState = await recomputeFollowupForConversation(
-      env,
-      userId,
-      convo.id,
-    );
-    if (followupState) {
-      await notifyInboxEvent(env, {
+    if (isFollowupInboxEnabled(env)) {
+      const followupState = await recomputeConversationState(
+        env,
         userId,
-        conversationId: convo.id,
-        type: 'conversation_updated',
-        payload: {
-          needsFollowup: followupState.needsFollowup,
-          reasons: followupState.reasons,
-        },
-      });
+        convo.id,
+      );
+      if (followupState) {
+        await notifyInboxEvent(env, {
+          userId,
+          conversationId: convo.id,
+          type: 'conversation_updated',
+          payload: {
+            state: followupState.state,
+            reasons: followupState.reasons,
+          },
+        });
+      }
     }
 
     if (conversationCount % 5 === 0) {
@@ -2358,8 +2765,10 @@ async function recomputeConversationStatsForRun(
   )
     .bind(data.userId, data.pageId, data.platform, data.igBusinessId ?? null)
     .all<{ id: string }>();
-  for (const row of convoIds.results ?? []) {
-    await recomputeFollowupForConversation(env, data.userId, row.id);
+  if (isFollowupInboxEnabled(env)) {
+    for (const row of convoIds.results ?? []) {
+      await recomputeConversationState(env, data.userId, row.id);
+    }
   }
 
   return { updated: result.meta?.changes ?? 0 };
@@ -2455,11 +2864,9 @@ async function recomputeConversationStats(
         row.pageId,
       )
       .run();
-    await recomputeFollowupForConversation(
-      env,
-      data.userId,
-      row.conversationId,
-    );
+    if (isFollowupInboxEnabled(env)) {
+      await recomputeConversationState(env, data.userId, row.conversationId);
+    }
     updated += 1;
   }
 
@@ -2538,1892 +2945,57 @@ class SyncScopeOrchestrator {
   }
 }
 
-addRoute('GET', '/api/health', () => json({ status: 'ok' }));
-
-addRoute('GET', '/api/auth/login', async (req, env) => {
-  const state = crypto.randomUUID();
-  const url = new URL('https://www.facebook.com/v19.0/dialog/oauth');
-  url.searchParams.set('client_id', env.META_APP_ID);
-  url.searchParams.set('redirect_uri', env.META_REDIRECT_URI);
-  url.searchParams.set('state', state);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', getMetaScopes(env).join(','));
-  url.searchParams.set('auth_type', 'rerequest');
-  return Response.redirect(url.toString(), 302);
-});
-
-addRoute('GET', '/api/auth/callback', async (req, env) => {
-  const url = new URL(req.url);
-  const code = url.searchParams.get('code');
-  if (!code) {
-    return json({ error: 'Missing code' }, { status: 400 });
-  }
-
-  const shortToken = await exchangeCodeForToken({
-    env,
-    appId: env.META_APP_ID,
-    appSecret: env.META_APP_SECRET,
-    redirectUri: env.META_REDIRECT_URI,
-    code,
-    version: getApiVersion(env),
-  });
-  const longToken = await exchangeForLongLivedToken({
-    env,
-    appId: env.META_APP_ID,
-    appSecret: env.META_APP_SECRET,
-    accessToken: shortToken.accessToken,
-    version: getApiVersion(env),
-  });
-
-  const appToken = `${env.META_APP_ID}|${env.META_APP_SECRET}`;
-  const debug = await debugToken({
-    env,
-    inputToken: longToken.accessToken,
-    appToken,
-    version: getApiVersion(env),
-  });
-  if (!debug?.user_id || !debug?.is_valid) {
-    return json({ error: 'Token validation failed' }, { status: 400 });
-  }
-
-  await upsertMetaUser(env, {
-    id: debug.user_id,
-    accessToken: longToken.accessToken,
-    tokenType: longToken.tokenType ?? shortToken.tokenType,
-    expiresAt:
-      debug.expires_at && debug.expires_at > 0
-        ? debug.expires_at
-        : longToken.expiresIn
-          ? Math.floor(Date.now() / 1000) + longToken.expiresIn
-          : null,
-  });
-
-  const fallbackExpiry = longToken.expiresIn ?? 60 * 60 * 24 * 30;
-  const expiresAtSeconds =
-    debug.expires_at && debug.expires_at > 0
-      ? debug.expires_at
-      : Math.floor(Date.now() / 1000) + fallbackExpiry;
-  const session = await createSessionToken(
-    {
-      userId: debug.user_id,
-      expiresAt: expiresAtSeconds * 1000,
-    },
-    env.SESSION_SECRET,
-  );
-  const isSecure =
-    new URL(req.url).protocol === 'https:' ||
-    (env.APP_ORIGIN?.startsWith('https://') ?? false);
-  const cookie = buildSessionCookie(session, 60 * 60 * 24 * 30, {
-    secure: isSecure,
-  });
-  return new Response(null, {
-    status: 302,
-    headers: {
-      'set-cookie': cookie,
-      location: env.APP_ORIGIN ?? '/',
-    },
-  });
-});
-
-addRoute('POST', '/api/auth/logout', (req, env) => {
-  const isSecure =
-    new URL(req.url).protocol === 'https:' ||
-    (env.APP_ORIGIN?.startsWith('https://') ?? false);
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'set-cookie': clearSessionCookie({ secure: isSecure }),
-    },
-  });
-});
-
-addRoute('GET', '/api/auth/me', async (req, env) => {
-  const session = await requireSession(req, env);
-  if (!session?.userId) {
-    return json({ authenticated: false });
-  }
-  let name: string | null = null;
-  try {
-    const token = await getUserToken(env, session.userId);
-    if (token?.access_token) {
-      const profile = await fetchUserProfile({
-        env,
-        accessToken: token.access_token,
-        version: getApiVersion(env),
-        workspaceId: session.userId,
-      });
-      name = profile?.name ?? null;
-    }
-  } catch (error) {
-    console.warn('Failed to fetch user profile');
-    console.warn(error);
-  }
-  return json({ authenticated: true, userId: session.userId, name });
-});
-
-addRoute('GET', '/api/auth/whoami', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  return json({ userId });
-});
-
-addRoute('GET', '/api/auth/config', async (_req, env) => {
-  return json({
-    appIdPresent: Boolean(env.META_APP_ID),
-    appIdLength: env.META_APP_ID?.length ?? 0,
-    redirectUri: env.META_REDIRECT_URI ?? null,
-  });
-});
-
-addRoute('GET', '/api/feature-flags', async (_req, env) => {
-  return json({
-    followupInbox: isFollowupInboxEnabled(env),
-  });
-});
-
-addRoute('GET', '/api/meta/permissions', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({
-      hasToken: false,
-      permissions: [],
-      missing: getMetaScopes(env),
-    });
-  }
-  const token = await getUserToken(env, userId);
-  if (!token) {
-    return json({
-      hasToken: false,
-      permissions: [],
-      missing: getMetaScopes(env),
-    });
-  }
-  try {
-    const permissions = await fetchPermissions({
-      env,
-      accessToken: token.access_token,
-      version: getApiVersion(env),
-      workspaceId: userId,
-    });
-    const granted = permissions
-      .filter((perm) => perm.status === 'granted')
-      .map((perm) => perm.permission);
-    const missing = getMetaScopes(env).filter(
-      (scope) => !granted.includes(scope),
-    );
-    return json({ hasToken: true, permissions, missing });
-  } catch (error) {
-    console.error(error);
-    reportError(env, {
-      errorKey: 'meta.permissions_failed',
-      kind: 'meta',
-      route: 'GET /api/meta/permissions',
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return json(
-      {
-        hasToken: true,
-        permissions: [],
-        missing: getMetaScopes(env),
-        error:
-          error instanceof Error ? error.message : 'Meta permissions failed',
-      },
-      { status: 502 },
-    );
-  }
-});
-
-addRoute('GET', '/api/meta/businesses', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const token = await getUserToken(env, userId);
-  if (!token) {
-    return json({ error: 'No token' }, { status: 401 });
-  }
-  try {
-    const businesses = await fetchBusinesses({
-      env,
-      accessToken: token.access_token,
-      version: getApiVersion(env),
-      workspaceId: userId,
-    });
-    return json(businesses);
-  } catch (error) {
-    console.error(error);
-    reportError(env, {
-      errorKey: 'meta.businesses_failed',
-      kind: 'meta',
-      route: 'GET /api/meta/businesses',
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return json(
-      {
-        error:
-          error instanceof Error ? error.message : 'Meta business fetch failed',
-      },
-      { status: 502 },
-    );
-  }
-});
-
-addRoute(
-  'GET',
-  '/api/meta/businesses/:businessId/pages',
-  async (req, env, _ctx, params) => {
-    const businessId = params.businessId;
-    if (!businessId) {
-      return json({ error: 'Missing business id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const token = await getUserToken(env, userId);
-    if (!token) {
-      return json({ error: 'No token' }, { status: 401 });
-    }
-    try {
-      const result = await fetchBusinessPages({
-        env,
-        businessId,
-        accessToken: token.access_token,
-        version: getApiVersion(env),
-        workspaceId: userId,
-      });
-      return json(
-        result.pages.map((page) => ({
-          id: page.id,
-          name: page.name,
-          source: result.source,
-        })),
-      );
-    } catch (error) {
-      console.error(error);
-      reportError(env, {
-        errorKey: 'meta.pages_failed',
-        kind: 'meta',
-        route: 'GET /api/meta/businesses/:businessId/pages',
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return json(
-        {
-          error:
-            error instanceof Error ? error.message : 'Meta pages fetch failed',
-        },
-        { status: 502 },
-      );
-    }
-  },
-);
-
-addRoute('GET', '/api/meta/accounts', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const token = await getUserToken(env, userId);
-  if (!token) {
-    return json({ error: 'No token' }, { status: 401 });
-  }
-  try {
-    const pages = await fetchClassicPages({
-      env,
-      accessToken: token.access_token,
-      version: getApiVersion(env),
-      workspaceId: userId,
-    });
-    return json(pages);
-  } catch (error) {
-    console.error(error);
-    reportError(env, {
-      errorKey: 'meta.accounts_failed',
-      kind: 'meta',
-      route: 'GET /api/meta/accounts',
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return json(
-      {
-        error:
-          error instanceof Error ? error.message : 'Meta accounts fetch failed',
-      },
-      { status: 502 },
-    );
-  }
-});
-
-addRoute(
-  'POST',
-  '/api/meta/pages/:pageId/token',
-  async (req, env, _ctx, params) => {
-    const pageId = params.pageId;
-    if (!pageId) {
-      return json({ error: 'Missing page id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const token = await getUserToken(env, userId);
-    if (!token) {
-      return json({ error: 'No token' }, { status: 401 });
-    }
-    const body = await readJson<{ name?: string }>(req);
-    const rawName = body?.name ?? '';
-    try {
-      const page = await fetchPageToken({
-        env,
-        pageId,
-        accessToken: token.access_token,
-        version: getApiVersion(env),
-        workspaceId: userId,
-      });
-      const trimmed = rawName.trim();
-      const normalized = trimmed.toLowerCase();
-      const resolvedName =
-        !trimmed || normalized === 'page' ? page.name : trimmed;
-      await upsertPage(env, {
-        userId,
-        pageId,
-        name: resolvedName,
-        accessToken: page.accessToken,
-      });
-      return json({ id: page.id, name: resolvedName });
-    } catch (error) {
-      if (error instanceof MetaApiError) {
-        const meta =
-          typeof error.meta === 'object' && error.meta !== null
-            ? (error.meta as {
-                error?: {
-                  message?: string;
-                  type?: string;
-                  code?: number;
-                  error_subcode?: number;
-                  fbtrace_id?: string;
-                };
-              })
-            : undefined;
-        const fb = meta?.error;
-        console.error('MetaApiError', {
-          status: error.status,
-          fb,
-          usage: error.usage,
-          pageId,
-          userId,
-        });
-        const status =
-          error.status >= 400 && error.status < 500
-            ? error.status
-            : error.status === 429
-              ? 429
-              : error.status >= 500
-                ? 502
-                : 500;
-        reportError(env, {
-          errorKey: classifyMetaErrorKey(error),
-          kind: 'meta',
-          route: 'POST /api/meta/pages/:pageId/token',
-          workspaceId: userId,
-          assetId: pageId,
-          message: error.message,
-        });
-        return json(
-          {
-            error: 'Meta API error',
-            meta: {
-              status: error.status,
-              error: fb
-                ? {
-                    message: fb.message,
-                    type: fb.type,
-                    code: fb.code,
-                    error_subcode: fb.error_subcode,
-                    fbtrace_id: fb.fbtrace_id,
-                  }
-                : undefined,
-              usage: error.usage,
-            },
-          },
-          { status },
-        );
-      }
-      const norm = normalizeUnknownError(error);
-      console.error('Meta page token failed', { userId, pageId, ...norm });
-      reportError(env, {
-        errorKey: 'meta.page_token_failed',
-        kind: 'meta',
-        route: 'POST /api/meta/pages/:pageId/token',
-        workspaceId: userId,
-        assetId: pageId,
-        message: norm.message,
-      });
-      return json(
-        { error: 'Meta page token failed', details: norm },
-        { status: 500 },
-      );
-    }
-  },
-);
-
-addRoute(
-  'GET',
-  '/api/meta/pages/:pageId/ig-assets',
-  async (req, env, _ctx, params) => {
-    const pageId = params.pageId;
-    if (!pageId) {
-      return json({ error: 'Missing page id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const page = await getPage(env, userId, pageId);
-    if (!page) {
-      return json({ error: 'Page not enabled' }, { status: 404 });
-    }
-    let assets: { id: string; name?: string }[] = [];
-    try {
-      assets = await fetchInstagramAssets({
-        env,
-        pageId,
-        accessToken: page.access_token,
-        version: getApiVersion(env),
-        workspaceId: userId,
-      });
-    } catch (error) {
-      console.error('Failed to fetch Instagram assets', {
-        pageId,
-        error: error instanceof Error ? error.message : error,
-      });
-      reportError(env, {
-        errorKey: 'meta.ig_assets_failed',
-        kind: 'meta',
-        route: 'GET /api/meta/pages/:pageId/ig-assets',
-        workspaceId: userId,
-        assetId: pageId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      const message = error instanceof Error ? error.message : '';
-      if (message.includes('Page Access Token')) {
-        const token = await getUserToken(env, userId);
-        if (token) {
-          const refreshed = await fetchPageToken({
-            env,
-            pageId,
-            accessToken: token.access_token,
-            version: getApiVersion(env),
-            workspaceId: userId,
-          });
-          await upsertPage(env, {
-            userId,
-            pageId,
-            name: refreshed.name,
-            accessToken: refreshed.accessToken,
-          });
-          assets = await fetchInstagramAssets({
-            env,
-            pageId,
-            accessToken: refreshed.accessToken,
-            version: getApiVersion(env),
-            workspaceId: userId,
-          });
-        }
-      } else {
-        console.error(error);
-        return json(
-          {
-            error:
-              error instanceof Error ? error.message : 'Meta IG assets failed',
-          },
-          { status: 502 },
-        );
-      }
-    }
-
-    for (const asset of assets) {
-      await upsertIgAsset(env, {
-        userId,
-        pageId,
-        id: asset.id,
-        name: asset.name ?? asset.id,
-      });
-    }
-    const stored = await listIgAssets(env, userId, pageId);
-    return json({ igAssets: stored });
-  },
-);
-
-addRoute(
-  'GET',
-  '/api/meta/pages/:pageId/ig-debug',
-  async (req, env, _ctx, params) => {
-    const pageId = params.pageId;
-    if (!pageId) {
-      return json({ error: 'Missing page id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const page = await getPage(env, userId, pageId);
-    if (!page) {
-      return json({ error: 'Page not enabled' }, { status: 404 });
-    }
-    const token = await getUserToken(env, userId);
-    try {
-      const pageData = await fetchPageIgDebug({
-        env,
-        pageId,
-        accessToken: page.access_token,
-        version: getApiVersion(env),
-        workspaceId: userId,
-      });
-      const userData = token
-        ? await fetchPageIgDebug({
-            env,
-            pageId,
-            accessToken: token.access_token,
-            version: getApiVersion(env),
-            workspaceId: userId,
-          })
-        : null;
-      return json({
-        pageId,
-        pageToken: pageData,
-        userToken: userData,
-      });
-    } catch (error) {
-      console.error(error);
-      reportError(env, {
-        errorKey: 'meta.ig_debug_failed',
-        kind: 'meta',
-        route: 'GET /api/meta/pages/:pageId/ig-debug',
-        workspaceId: userId,
-        assetId: pageId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return json(
-        {
-          error:
-            error instanceof Error ? error.message : 'Meta IG debug failed',
-        },
-        { status: 502 },
-      );
-    }
-  },
-);
-
-addRoute('GET', '/api/assets', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ pages: [], igAssets: [], igEnabled: true });
-  }
-  const pages = await listPagesWithStats(env, userId);
-  const igAssets = await env.DB.prepare(
-    'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ?',
-  )
-    .bind(userId)
-    .all<{ id: string; name: string; pageId: string }>();
-  const igStats = await env.DB.prepare(
-    `SELECT ig_business_id as igBusinessId,
-            COUNT(DISTINCT id) as conversations,
-            SUM(customer_count + business_count) as messages
-     FROM conversations
-     WHERE user_id = ? AND platform = 'instagram'
-     GROUP BY ig_business_id`,
-  )
-    .bind(userId)
-    .all<{
-      igBusinessId: string | null;
-      conversations: number;
-      messages: number;
-    }>();
-  const igRuns = await env.DB.prepare(
-    `SELECT ig_business_id as igBusinessId,
-            MAX(finished_at) as lastSyncFinishedAt
-     FROM sync_runs
-     WHERE user_id = ? AND platform = 'instagram' AND status = 'completed'
-     GROUP BY ig_business_id`,
-  )
-    .bind(userId)
-    .all<{ igBusinessId: string | null; lastSyncFinishedAt: string | null }>();
-  const igStatsById = new Map(
-    (igStats.results ?? [])
-      .filter((row) => row.igBusinessId)
-      .map((row) => [row.igBusinessId as string, row]),
-  );
-  const igRunsById = new Map(
-    (igRuns.results ?? [])
-      .filter((row) => row.igBusinessId)
-      .map((row) => [row.igBusinessId as string, row]),
-  );
-  const igAssetsWithStats = (igAssets.results ?? []).map((asset) => {
-    const stats = igStatsById.get(asset.id);
-    const run = igRunsById.get(asset.id);
-    return {
-      ...asset,
-      conversationCount: stats?.conversations ?? 0,
-      messageCount: stats?.messages ?? 0,
-      lastSyncFinishedAt: run?.lastSyncFinishedAt ?? null,
-    };
-  });
-  return json({ pages, igAssets: igAssetsWithStats, igEnabled: true });
-});
-
-addRoute('GET', '/api/inbox/follow-up/count', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const row = await env.DB.prepare(
-    'SELECT COUNT(*) as count FROM conversations WHERE user_id = ? AND needs_followup = 1',
-  )
-    .bind(userId)
-    .first<{ count: number }>();
-  return json({
-    count: row?.count ?? 0,
-    windowDays: getFollowupWindowDays(env),
-    slaHours: getFollowupSlaHours(env),
-  });
-});
-
-addRoute('GET', '/api/inbox/follow-up', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const url = new URL(req.url);
-  const assetId = url.searchParams.get('assetId')?.trim() || null;
-  const channel = url.searchParams.get('channel')?.trim() || null;
-  const search = url.searchParams.get('search')?.trim() || '';
-  const sort = url.searchParams.get('sort')?.trim() || 'oldest';
-  const limit = Math.min(
-    200,
-    Math.max(10, Number(url.searchParams.get('limit') ?? 100)),
-  );
-
-  const where: string[] = ['c.user_id = ?', 'c.needs_followup = 1'];
-  const bindings: unknown[] = [userId];
-  if (assetId) {
-    where.push('c.asset_id = ?');
-    bindings.push(assetId);
-  }
-  if (channel) {
-    if (channel === 'facebook') {
-      where.push("c.platform = 'messenger'");
-    } else if (channel === 'instagram') {
-      where.push("c.platform = 'instagram'");
-    }
-  }
-  if (search) {
-    where.push(
-      '(c.participant_name LIKE ? OR c.participant_handle LIKE ? OR m.body LIKE ?)',
-    );
-    const like = `%${search}%`;
-    bindings.push(like, like, like);
-  }
-
-  const orderBy =
-    sort === 'newest' ? 'c.last_inbound_at DESC' : 'c.last_inbound_at ASC';
-
-  const query = `SELECT c.id as conversationId,
-            c.platform,
-            c.page_id as pageId,
-            c.ig_business_id as igBusinessId,
-            c.asset_id as assetId,
-            c.participant_id as participantId,
-            c.participant_name as participantName,
-            c.participant_handle as participantHandle,
-            c.last_inbound_at as lastInboundAt,
-            c.last_outbound_at as lastOutboundAt,
-            c.last_message_at as lastMessageAt,
-            c.needs_followup as needsFollowup,
-            c.followup_reasons as followupReasons,
-            m.body as lastMessageBody,
-            m.created_time as lastMessageCreatedAt,
-            m.direction as lastMessageDirection
-     FROM conversations c
-     LEFT JOIN messages m
-       ON m.user_id = c.user_id
-      AND m.conversation_id = c.id
-      AND m.created_time = (
-        SELECT MAX(created_time)
-        FROM messages
-        WHERE user_id = c.user_id AND conversation_id = c.id
-      )
-     WHERE ${where.join(' AND ')}
-     ORDER BY ${orderBy}
-     LIMIT ?`;
-  const rows = await env.DB.prepare(query)
-    .bind(...bindings, limit)
-    .all<{
-      conversationId: string;
-      platform: string;
-      pageId: string;
-      igBusinessId: string | null;
-      assetId: string | null;
-      participantId: string | null;
-      participantName: string | null;
-      participantHandle: string | null;
-      lastInboundAt: string | null;
-      lastOutboundAt: string | null;
-      lastMessageAt: string | null;
-      needsFollowup: number;
-      followupReasons: string | null;
-      lastMessageBody: string | null;
-      lastMessageCreatedAt: string | null;
-      lastMessageDirection: string | null;
-    }>();
-
-  const conversationIds = (rows.results ?? []).map((row) => row.conversationId);
-  const tags = await listConversationTags(env, userId, conversationIds);
-  const assets = await getAssetNameMap(env, userId);
-
-  return json({
-    conversations: (rows.results ?? []).map((row) => {
-      const asset =
-        row.assetId && assets.has(row.assetId) ? assets.get(row.assetId) : null;
-      return {
-        id: row.conversationId,
-        platform: row.platform,
-        pageId: row.pageId,
-        igBusinessId: row.igBusinessId,
-        assetId: row.assetId,
-        assetName: asset?.name ?? null,
-        participantId: row.participantId,
-        participantName: row.participantName ?? 'Unknown',
-        participantHandle: row.participantHandle,
-        lastInboundAt: row.lastInboundAt,
-        lastOutboundAt: row.lastOutboundAt,
-        lastMessageAt: row.lastMessageAt,
-        lastMessageBody: row.lastMessageBody,
-        lastMessageDirection: row.lastMessageDirection,
-        needsFollowup: Boolean(row.needsFollowup),
-        followupReasons: parseJsonArray(row.followupReasons),
-        tags: tags.get(row.conversationId) ?? [],
-      };
-    }),
-  });
-});
-
-addRoute(
-  'GET',
-  '/api/inbox/conversations/:id',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const conversationId = params.id;
-    if (!conversationId) {
-      return json({ error: 'Missing conversation id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const conversation = await getConversation(env, userId, conversationId);
-    if (!conversation) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const messages = await env.DB.prepare(
-      `SELECT id,
-            created_time as createdAt,
-            body,
-            direction,
-            sender_id as senderId,
-            sender_name as senderName,
-            attachments,
-            raw,
-            meta_message_id as metaMessageId
-     FROM messages
-     WHERE user_id = ? AND conversation_id = ?
-     ORDER BY created_time ASC`,
-    )
-      .bind(userId, conversationId)
-      .all<{
-        id: string;
-        createdAt: string;
-        body: string | null;
-        direction: string | null;
-        senderId: string | null;
-        senderName: string | null;
-        attachments: string | null;
-        raw: string | null;
-        metaMessageId: string | null;
-      }>();
-    const tags = await listConversationTags(env, userId, [conversationId]);
-    const attribution = await env.DB.prepare(
-      `SELECT campaign_id as campaignId,
-            campaign_name as campaignName,
-            adset_id as adsetId,
-            adset_name as adsetName,
-            ad_id as adId,
-            ad_name as adName,
-            click_ts as clickTs,
-            source,
-            creative_url as creativeUrl,
-            thumb_url as thumbUrl,
-            raw
-     FROM conversation_attribution
-     WHERE user_id = ? AND conversation_id = ?`,
-    )
-      .bind(userId, conversationId)
-      .first<{
-        campaignId: string | null;
-        campaignName: string | null;
-        adsetId: string | null;
-        adsetName: string | null;
-        adId: string | null;
-        adName: string | null;
-        clickTs: string | null;
-        source: string | null;
-        creativeUrl: string | null;
-        thumbUrl: string | null;
-        raw: string | null;
-      }>();
-    const lead = await env.DB.prepare(
-      `SELECT status, stage, disposition, updated_at as updatedAt, raw
-     FROM conversation_leads
-     WHERE user_id = ? AND conversation_id = ?`,
-    )
-      .bind(userId, conversationId)
-      .first<{
-        status: string | null;
-        stage: string | null;
-        disposition: string | null;
-        updatedAt: string;
-        raw: string | null;
-      }>();
-    const assets = await getAssetNameMap(env, userId);
-    const asset =
-      conversation.assetId && assets.has(conversation.assetId)
-        ? assets.get(conversation.assetId)
-        : null;
-
-    return json({
-      conversation: {
-        id: conversation.id,
-        platform: conversation.platform,
-        pageId: conversation.pageId,
-        igBusinessId: conversation.igBusinessId,
-        assetId: conversation.assetId,
-        assetName: asset?.name ?? null,
-        participantId: conversation.participantId,
-        participantName: conversation.participantName ?? 'Unknown',
-        participantHandle: conversation.participantHandle,
-        lastInboundAt: conversation.lastInboundAt,
-        lastOutboundAt: conversation.lastOutboundAt,
-        lastMessageAt: conversation.lastMessageAt,
-        needsFollowup: Boolean(conversation.needsFollowup),
-        followupReasons: parseJsonArray(conversation.followupReasons),
-        tags: tags.get(conversationId) ?? [],
-      },
-      messages: (messages.results ?? []).map((message) => ({
-        id: message.id,
-        createdAt: message.createdAt,
-        body: message.body,
-        direction: message.direction,
-        senderId: message.senderId,
-        senderName: message.senderName,
-        attachments: message.attachments
-          ? JSON.parse(message.attachments)
-          : null,
-        metaMessageId: message.metaMessageId,
-        raw: message.raw ? JSON.parse(message.raw) : null,
-      })),
-      context: {
-        attribution: attribution
-          ? {
-              ...attribution,
-              raw: attribution.raw ? JSON.parse(attribution.raw) : null,
-            }
-          : null,
-        lead: lead
-          ? {
-              status: lead.status,
-              stage: lead.stage,
-              disposition: lead.disposition,
-              updatedAt: lead.updatedAt,
-              raw: lead.raw ? JSON.parse(lead.raw) : null,
-            }
-          : null,
-      },
-    });
-  },
-);
-
-addRoute(
-  'POST',
-  '/api/inbox/conversations/:id/send',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const conversationId = params.id;
-    if (!conversationId) {
-      return json({ error: 'Missing conversation id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const body = await readJson<{
-      text?: string;
-      templateId?: string;
-    }>(req);
-    const text = body?.text?.trim();
-    if (!text) {
-      return json({ error: 'Message text required' }, { status: 400 });
-    }
-    const conversation = await getConversation(env, userId, conversationId);
-    if (!conversation) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const page = await getPage(env, userId, conversation.pageId);
-    if (!page) {
-      return json({ error: 'Page not connected' }, { status: 404 });
-    }
-    const recipientId =
-      conversation.participantId ??
-      (
-        await env.DB.prepare(
-          `SELECT sender_id as senderId
-         FROM messages
-         WHERE user_id = ? AND conversation_id = ? AND direction = 'inbound'
-         ORDER BY created_time DESC
-         LIMIT 1`,
-        )
-          .bind(userId, conversationId)
-          .first<{ senderId: string | null }>()
-      )?.senderId ??
-      null;
-    if (!recipientId) {
-      return json({ error: 'Missing recipient id' }, { status: 400 });
-    }
-    try {
-      const payload = {
-        recipient: { id: recipientId },
-        message: { text },
-        messaging_type: 'RESPONSE',
-      };
-      const result = await sendMessage({
-        env,
-        accessToken: page.access_token,
-        version: getApiVersion(env),
-        payload,
-        workspaceId: userId,
-        assetId: conversation.assetId ?? conversation.pageId,
-      });
-      const now = new Date().toISOString();
-      const messageId = result.message_id ?? crypto.randomUUID();
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO messages
-         (user_id, id, conversation_id, page_id, sender_type, body, created_time,
-          asset_id, platform, ig_business_id, direction, sender_id, sender_name,
-          attachments, raw, meta_message_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
-          userId,
-          messageId,
-          conversationId,
-          conversation.pageId,
-          'business',
-          text,
-          now,
-          conversation.assetId ?? conversation.pageId,
-          conversation.platform,
-          conversation.igBusinessId ?? null,
-          'outbound',
-          conversation.assetId ?? conversation.pageId,
-          page.name ?? 'Business',
-          null,
-          null,
-          result.message_id ?? null,
-        )
-        .run();
-      await env.DB.prepare(
-        `UPDATE conversations
-         SET last_outbound_at = ?,
-             last_message_at = ?,
-             needs_followup = 0,
-             followup_reasons = ?
-         WHERE user_id = ? AND id = ?`,
-      )
-        .bind(now, now, JSON.stringify([]), userId, conversationId)
-        .run();
-      await notifyInboxEvent(env, {
-        userId,
-        conversationId,
-        type: 'message_sent',
-        payload: { createdAt: now },
-      });
-      return json({ ok: true, messageId });
-    } catch (error) {
-      console.error('Send message failed', error);
-      const message =
-        error instanceof MetaApiError
-          ? `Meta API error: ${error.message}`
-          : error instanceof Error
-            ? error.message
-            : 'Failed to send message';
-      return json({ error: message }, { status: 502 });
-    }
-  },
-);
-
-addRoute(
-  'GET',
-  '/api/inbox/conversations/:id/tags',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const conversationId = params.id;
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    if (!conversationId) {
-      return json({ error: 'Missing conversation id' }, { status: 400 });
-    }
-    const tags = await listConversationTags(env, userId, [conversationId]);
-    return json({ tags: tags.get(conversationId) ?? [] });
-  },
-);
-
-addRoute(
-  'POST',
-  '/api/inbox/conversations/:id/tags',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const conversationId = params.id;
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    if (!conversationId) {
-      return json({ error: 'Missing conversation id' }, { status: 400 });
-    }
-    const body = await readJson<{ tags?: string[] }>(req);
-    const tags = (body?.tags ?? []).map(normalizeTag).filter(Boolean);
-    if (!tags.length) {
-      return json({ error: 'Tags required' }, { status: 400 });
-    }
-    const now = new Date().toISOString();
-    const statements = tags.map((tag) =>
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO conversation_tags
-         (user_id, conversation_id, tag, created_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(userId, conversationId, tag, now),
-    );
-    if (statements.length) {
-      await env.DB.batch(statements);
-    }
-    await recomputeFollowupForConversation(env, userId, conversationId);
-    await notifyInboxEvent(env, {
-      userId,
-      conversationId,
-      type: 'tags_updated',
-    });
-    const updated = await listConversationTags(env, userId, [conversationId]);
-    return json({ tags: updated.get(conversationId) ?? [] });
-  },
-);
-
-addRoute(
-  'DELETE',
-  '/api/inbox/conversations/:id/tags/:tag',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const conversationId = params.id;
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    if (!conversationId || !params.tag) {
-      return json({ error: 'Missing tag' }, { status: 400 });
-    }
-    const tag = normalizeTag(decodeURIComponent(params.tag));
-    await env.DB.prepare(
-      `DELETE FROM conversation_tags
-       WHERE user_id = ? AND conversation_id = ? AND tag = ?`,
-    )
-      .bind(userId, conversationId, tag)
-      .run();
-    await recomputeFollowupForConversation(env, userId, conversationId);
-    await notifyInboxEvent(env, {
-      userId,
-      conversationId,
-      type: 'tags_updated',
-    });
-    const updated = await listConversationTags(env, userId, [conversationId]);
-    return json({ tags: updated.get(conversationId) ?? [] });
-  },
-);
-
-addRoute('GET', '/api/inbox/templates', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const url = new URL(req.url);
-  const assetId = url.searchParams.get('assetId')?.trim() || null;
-  let query = `SELECT id, asset_id as assetId, title, body, created_at as createdAt, updated_at as updatedAt
-               FROM saved_responses
-               WHERE user_id = ?`;
-  const bindings: unknown[] = [userId];
-  if (assetId) {
-    query += ' AND (asset_id = ? OR asset_id IS NULL)';
-    bindings.push(assetId);
-  }
-  query += ' ORDER BY updated_at DESC';
-  const rows = await env.DB.prepare(query)
-    .bind(...bindings)
-    .all<{
-      id: string;
-      assetId: string | null;
-      title: string;
-      body: string;
-      createdAt: string;
-      updatedAt: string;
-    }>();
-  return json({ templates: rows.results ?? [] });
-});
-
-addRoute('POST', '/api/inbox/templates', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const body = await readJson<{
-    title?: string;
-    body?: string;
-    assetId?: string | null;
-  }>(req);
-  const title = body?.title?.trim();
-  const text = body?.body?.trim();
-  if (!title || !text) {
-    return json({ error: 'Title and body required' }, { status: 400 });
-  }
-  const now = new Date().toISOString();
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO saved_responses
-     (id, user_id, asset_id, title, body, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(id, userId, body?.assetId ?? null, title, text, now, now)
-    .run();
-  return json({ id, title, body: text, assetId: body?.assetId ?? null });
-});
-
-addRoute('PUT', '/api/inbox/templates/:id', async (req, env, _ctx, params) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const templateId = params.id;
-  if (!templateId) {
-    return json({ error: 'Missing template id' }, { status: 400 });
-  }
-  const body = await readJson<{
-    title?: string;
-    body?: string;
-    assetId?: string | null;
-  }>(req);
-  const title = body?.title?.trim();
-  const text = body?.body?.trim();
-  if (!title || !text) {
-    return json({ error: 'Title and body required' }, { status: 400 });
-  }
-  const now = new Date().toISOString();
-  await env.DB.prepare(
-    `UPDATE saved_responses
-     SET title = ?, body = ?, asset_id = ?, updated_at = ?
-     WHERE id = ? AND user_id = ?`,
-  )
-    .bind(title, text, body?.assetId ?? null, now, templateId, userId)
-    .run();
-  return json({
-    id: templateId,
-    title,
-    body: text,
-    assetId: body?.assetId ?? null,
-  });
-});
-
-addRoute(
-  'DELETE',
-  '/api/inbox/templates/:id',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const templateId = params.id;
-    if (!templateId) {
-      return json({ error: 'Missing template id' }, { status: 400 });
-    }
-    await env.DB.prepare(
-      'DELETE FROM saved_responses WHERE id = ? AND user_id = ?',
-    )
-      .bind(templateId, userId)
-      .run();
-    return json({ ok: true });
-  },
-);
-
-addRoute('POST', '/api/inbox/bulk', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const body = await readJson<{
-    conversationIds?: string[];
-    action?: 'tag' | 'close' | 'send_template';
-    tags?: string[];
-    templateId?: string;
-  }>(req);
-  const conversationIds = (body?.conversationIds ?? []).filter(Boolean);
-  if (!conversationIds.length || !body?.action) {
-    return json({ error: 'Invalid bulk request' }, { status: 400 });
-  }
-  const placeholders = conversationIds.map(() => '?').join(',');
-  const conversations = await env.DB.prepare(
-    `SELECT id, page_id as pageId, ig_business_id as igBusinessId, asset_id as assetId, platform
-     FROM conversations
-     WHERE user_id = ? AND id IN (${placeholders})`,
-  )
-    .bind(userId, ...conversationIds)
-    .all<{
-      id: string;
-      pageId: string;
-      igBusinessId: string | null;
-      assetId: string | null;
-      platform: string;
-    }>();
-  const results: Array<{ id: string; ok: boolean; error?: string }> = [];
-  const now = new Date().toISOString();
-  if (body.action === 'tag') {
-    const tags = (body.tags ?? []).map(normalizeTag).filter(Boolean);
-    if (!tags.length) {
-      return json({ error: 'Tags required' }, { status: 400 });
-    }
-    for (const convo of conversations.results ?? []) {
-      const statements = tags.map((tag) =>
-        env.DB.prepare(
-          `INSERT OR IGNORE INTO conversation_tags
-           (user_id, conversation_id, tag, created_at)
-           VALUES (?, ?, ?, ?)`,
-        ).bind(userId, convo.id, tag, now),
-      );
-      if (statements.length) {
-        await env.DB.batch(statements);
-      }
-      await recomputeFollowupForConversation(env, userId, convo.id);
-      await notifyInboxEvent(env, {
-        userId,
-        conversationId: convo.id,
-        type: 'tags_updated',
-      });
-      results.push({ id: convo.id, ok: true });
-    }
-    return json({ results });
-  }
-  if (body.action === 'close') {
-    for (const convo of conversations.results ?? []) {
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO conversation_tags
-         (user_id, conversation_id, tag, created_at)
-         VALUES (?, ?, 'closed', ?)`,
-      )
-        .bind(userId, convo.id, now)
-        .run();
-      await recomputeFollowupForConversation(env, userId, convo.id);
-      await notifyInboxEvent(env, {
-        userId,
-        conversationId: convo.id,
-        type: 'tags_updated',
-      });
-      results.push({ id: convo.id, ok: true });
-    }
-    return json({ results });
-  }
-  if (body.action === 'send_template') {
-    if (!body.templateId) {
-      return json({ error: 'Template required' }, { status: 400 });
-    }
-    const template = await env.DB.prepare(
-      `SELECT id, title, body, asset_id as assetId
-       FROM saved_responses
-       WHERE id = ? AND user_id = ?`,
-    )
-      .bind(body.templateId, userId)
-      .first<{ id: string; body: string; assetId: string | null }>();
-    if (!template) {
-      return json({ error: 'Template not found' }, { status: 404 });
-    }
-    for (const convo of conversations.results ?? []) {
-      try {
-        const conversation = await getConversation(env, userId, convo.id);
-        if (!conversation) {
-          results.push({ id: convo.id, ok: false, error: 'Not found' });
-          continue;
-        }
-        const page = await getPage(env, userId, conversation.pageId);
-        if (!page) {
-          results.push({
-            id: convo.id,
-            ok: false,
-            error: 'Page not connected',
-          });
-          continue;
-        }
-        const recipientId =
-          conversation.participantId ??
-          (
-            await env.DB.prepare(
-              `SELECT sender_id as senderId
-             FROM messages
-             WHERE user_id = ? AND conversation_id = ? AND direction = 'inbound'
-             ORDER BY created_time DESC
-             LIMIT 1`,
-            )
-              .bind(userId, convo.id)
-              .first<{ senderId: string | null }>()
-          )?.senderId ??
-          null;
-        if (!recipientId) {
-          results.push({ id: convo.id, ok: false, error: 'Missing recipient' });
-          continue;
-        }
-        const payload = {
-          recipient: { id: recipientId },
-          message: { text: template.body },
-          messaging_type: 'RESPONSE',
-        };
-        const result = await sendMessage({
-          env,
-          accessToken: page.access_token,
-          version: getApiVersion(env),
-          payload,
-          workspaceId: userId,
-          assetId: conversation.assetId ?? conversation.pageId,
-        });
-        const sentAt = new Date().toISOString();
-        const messageId = result.message_id ?? crypto.randomUUID();
-        await env.DB.prepare(
-          `INSERT OR IGNORE INTO messages
-           (user_id, id, conversation_id, page_id, sender_type, body, created_time,
-            asset_id, platform, ig_business_id, direction, sender_id, sender_name,
-            attachments, raw, meta_message_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-          .bind(
-            userId,
-            messageId,
-            convo.id,
-            conversation.pageId,
-            'business',
-            template.body,
-            sentAt,
-            conversation.assetId ?? conversation.pageId,
-            conversation.platform,
-            conversation.igBusinessId ?? null,
-            'outbound',
-            conversation.assetId ?? conversation.pageId,
-            page.name ?? 'Business',
-            null,
-            null,
-            result.message_id ?? null,
-          )
-          .run();
-        await env.DB.prepare(
-          `UPDATE conversations
-           SET last_outbound_at = ?,
-               last_message_at = ?,
-               needs_followup = 0,
-               followup_reasons = ?
-           WHERE user_id = ? AND id = ?`,
-        )
-          .bind(sentAt, sentAt, JSON.stringify([]), userId, convo.id)
-          .run();
-        await notifyInboxEvent(env, {
-          userId,
-          conversationId: convo.id,
-          type: 'message_sent',
-          payload: { createdAt: sentAt },
-        });
-        results.push({ id: convo.id, ok: true });
-        await sleepMs(400);
-      } catch (error) {
-        const message =
-          error instanceof MetaApiError
-            ? `Meta API error: ${error.message}`
-            : error instanceof Error
-              ? error.message
-              : 'Failed to send';
-        results.push({ id: convo.id, ok: false, error: message });
-        if (error instanceof MetaApiError && error.status === 429) {
-          await sleepMs(1500);
-        }
-      }
-    }
-    return json({ results });
-  }
-
-  return json({ error: 'Unsupported action' }, { status: 400 });
-});
-
-addRoute('GET', '/api/meta/webhook', async (req, env) => {
-  const url = new URL(req.url);
-  const mode = url.searchParams.get('hub.mode');
-  const token = url.searchParams.get('hub.verify_token');
-  const challenge = url.searchParams.get('hub.challenge');
-  if (
-    mode === 'subscribe' &&
-    token &&
-    env.META_WEBHOOK_VERIFY_TOKEN &&
-    token === env.META_WEBHOOK_VERIFY_TOKEN
-  ) {
-    return new Response(challenge ?? '', { status: 200 });
-  }
-  return new Response('Forbidden', { status: 403 });
-});
-
-addRoute('POST', '/api/meta/webhook', async (req, env) => {
-  const body = await readJson<{
-    object?: string;
-    entry?: Array<{ id?: string; messaging?: unknown[]; time?: number }>;
-  }>(req);
-  if (!body?.entry?.length) {
-    return new Response('No content', { status: 204 });
-  }
-
-  for (const entry of body.entry ?? []) {
-    const entryId = entry.id;
-    if (!entryId) continue;
-
-    const pageMatch = await env.DB.prepare(
-      'SELECT user_id as userId FROM meta_pages WHERE id = ?',
-    )
-      .bind(entryId)
-      .first<{ userId: string }>();
-    if (pageMatch?.userId) {
-      await callSyncScopeOrchestrator(
-        env,
-        {
-          userId: pageMatch.userId,
-          pageId: entryId,
-          platform: 'messenger',
-          igBusinessId: null,
-        },
-        'webhook',
-      );
-      continue;
-    }
-
-    const igMatch = await env.DB.prepare(
-      'SELECT user_id as userId, page_id as pageId FROM ig_assets WHERE id = ?',
-    )
-      .bind(entryId)
-      .first<{ userId: string; pageId: string }>();
-    if (igMatch?.userId) {
-      await callSyncScopeOrchestrator(
-        env,
-        {
-          userId: igMatch.userId,
-          pageId: igMatch.pageId,
-          platform: 'instagram',
-          igBusinessId: entryId,
-        },
-        'webhook',
-      );
-    }
-  }
-
-  return new Response('ok', { status: 200 });
-});
-
-addRoute('GET', '/api/ops/summary', async (_req, env) => {
-  const counters = await env.DB.prepare(
-    'SELECT key, value, updated_at as updatedAt FROM ops_counters',
-  ).all<{ key: string; value: number; updatedAt: string }>();
-  const map = new Map((counters.results ?? []).map((row) => [row.key, row]));
-  const updatedAt = (counters.results ?? []).reduce<string | null>(
-    (latest, row) => {
-      if (!latest) {
-        return row.updatedAt ?? null;
-      }
-      return row.updatedAt && row.updatedAt > latest ? row.updatedAt : latest;
-    },
-    null,
-  );
-  return json({
-    usersTotal: map.get('users_total')?.value ?? 0,
-    assetsTotal: map.get('assets_total')?.value ?? 0,
-    conversationsTotal: map.get('conversations_total')?.value ?? 0,
-    messagesTotal: map.get('messages_total')?.value ?? 0,
-    updatedAt,
-  });
-});
-
-addRoute('GET', '/api/ops/sync-runs', async (req, env) => {
-  if (!isFollowupInboxEnabled(env)) {
-    return json({ error: 'Not found' }, { status: 404 });
-  }
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const url = new URL(req.url);
-  const status = url.searchParams.get('status');
-  const limit = Math.min(
-    50,
-    Math.max(5, Number(url.searchParams.get('limit') ?? 20)),
-  );
-  let query = `SELECT id,
-            user_id as userId,
-            page_id as pageId,
-            platform,
-            ig_business_id as igBusinessId,
-            status,
-            started_at as startedAt,
-            finished_at as finishedAt,
-            last_error as lastError
-     FROM sync_runs
-     WHERE user_id = ?`;
-  const bindings: unknown[] = [userId];
-  if (status) {
-    query += ' AND status = ?';
-    bindings.push(status);
-  }
-  query += ' ORDER BY started_at DESC LIMIT ?';
-  bindings.push(limit);
-  const rows = await env.DB.prepare(query)
-    .bind(...bindings)
-    .all<{
-      id: string;
-      userId: string;
-      pageId: string;
-      platform: string;
-      igBusinessId: string | null;
-      status: string;
-      startedAt: string;
-      finishedAt: string | null;
-      lastError: string | null;
-    }>();
-  return json({ runs: rows.results ?? [] });
-});
-
-addRoute(
-  'POST',
-  '/api/ops/sync-runs/:id/cancel',
-  async (req, env, _ctx, params) => {
-    if (!isFollowupInboxEnabled(env)) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const runId = params.id;
-    if (!runId) {
-      return json({ error: 'Missing run id' }, { status: 400 });
-    }
-    const now = new Date().toISOString();
-    const result = await env.DB.prepare(
-      `UPDATE sync_runs
-       SET status = 'failed',
-           finished_at = ?,
-           last_error = 'cancelled',
-           updated_at = ?
-       WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')`,
-    )
-      .bind(now, now, runId, userId)
-      .run();
-    if ((result.meta?.changes ?? 0) < 1) {
-      return json({ ok: false, error: 'Not running' }, { status: 409 });
-    }
-    return json({ ok: true });
-  },
-);
-
-addRoute('GET', '/api/ops/messages-per-hour', async (req, env) => {
-  const url = new URL(req.url);
-  const rawHours = url.searchParams.get('hours');
-  const parsed = rawHours ? Number.parseInt(rawHours, 10) : Number.NaN;
-  const clamped = Number.isFinite(parsed) ? parsed : 168;
-  const hours = Math.max(24, Math.min(720, clamped));
-
-  const now = new Date();
-  const endHourIso = toHourBucket(now);
-  const endMs = Date.parse(endHourIso);
-  const startMs = endMs - (hours - 1) * 60 * 60 * 1000;
-  const startIso = new Date(startMs).toISOString();
-
-  const rows = await env.DB.prepare(
-    `SELECT hour, count
-     FROM ops_messages_hourly
-     WHERE hour >= ? AND hour <= ?
-     ORDER BY hour ASC`,
-  )
-    .bind(startIso, endHourIso)
-    .all<{ hour: string; count: number }>();
-  const countsByHour = new Map(
-    (rows.results ?? []).map((row) => [row.hour, row.count]),
-  );
-
-  const points = Array.from({ length: hours }, (_, index) => {
-    const hour = new Date(startMs + index * 60 * 60 * 1000).toISOString();
-    return { hour, count: countsByHour.get(hour) ?? 0 };
-  });
-
-  return json({ hours, points });
-});
-
-addRoute('GET', '/api/ops/metrics/meta', async (req, env, ctx) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const url = new URL(req.url);
-  const parsed = parseMetricsWindow(url.searchParams.get('window'), '15m');
-  if (!parsed) {
-    return json({ error: 'Invalid window' }, { status: 400 });
-  }
-  const cacheKey = `https://cache.msgstats/ops/meta?window=${parsed}`;
-  return cachedJson(req, ctx, cacheKey, 45, async () => {
-    try {
-      const metrics = await getMetaMetrics(env, parsed);
-      return json({ window: parsed, ...metrics });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error('Failed to load meta metrics', message);
-      return json(
-        { error: 'Failed to load metrics', detail: message },
-        { status: 500 },
-      );
-    }
-  });
-});
-
-addRoute('GET', '/api/ops/metrics/errors', async (req, env, ctx) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const url = new URL(req.url);
-  const parsed = parseMetricsWindow(url.searchParams.get('window'), '60m');
-  if (!parsed) {
-    return json({ error: 'Invalid window' }, { status: 400 });
-  }
-  const cacheKey = `https://cache.msgstats/ops/errors?window=${parsed}`;
-  return cachedJson(req, ctx, cacheKey, 45, async () => {
-    try {
-      const metrics = await getAppErrorMetrics(env, parsed);
-      return json({ window: parsed, ...metrics });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error('Failed to load error metrics', message);
-      return json(
-        { error: 'Failed to load metrics', detail: message },
-        { status: 500 },
-      );
-    }
-  });
-});
-
-addRoute(
-  'POST',
-  '/api/sync/pages/:pageId/messenger',
-  async (req, env, ctx, params) => {
-    const pageId = params.pageId;
-    if (!pageId) {
-      return json({ error: 'Missing page id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const result = await callSyncScopeOrchestrator(
-      env,
-      { userId, pageId, platform: 'messenger', igBusinessId: null },
-      'manual',
-    );
-    return json(result);
-  },
-);
-
-addRoute(
-  'POST',
-  '/api/sync/pages/:pageId/instagram/:igId',
-  async (req, env, ctx, params) => {
-    const pageId = params.pageId;
-    const igId = params.igId;
-    if (!pageId || !igId) {
-      return json({ error: 'Missing page or Instagram id' }, { status: 400 });
-    }
-    const userId = await requireUser(req, env);
-    if (!userId) {
-      return json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const result = await callSyncScopeOrchestrator(
-      env,
-      { userId, pageId, platform: 'instagram', igBusinessId: igId },
-      'manual',
-    );
-    return json(result);
-  },
-);
-
-addRoute('GET', '/api/reports/weekly', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ data: [] });
-  }
-  const url = new URL(req.url);
-  const pageId = url.searchParams.get('pageId');
-  const platform = url.searchParams.get('platform');
-  const bucketParam = url.searchParams.get('bucket');
-  const bucket = bucketParam === 'last' ? 'last' : 'started';
-  const data = await buildReportFromDb({
-    db: env.DB,
-    userId,
-    interval: 'weekly',
-    bucket,
-    pageId: pageId || null,
-    platform: platform || null,
-  });
-  return json({ data });
-});
-
-addRoute('GET', '/api/reports/monthly', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ data: [] });
-  }
-  const url = new URL(req.url);
-  const pageId = url.searchParams.get('pageId');
-  const platform = url.searchParams.get('platform');
-  const bucketParam = url.searchParams.get('bucket');
-  const bucket = bucketParam === 'last' ? 'last' : 'started';
-  const data = await buildReportFromDb({
-    db: env.DB,
-    userId,
-    interval: 'monthly',
-    bucket,
-    pageId: pageId || null,
-    platform: platform || null,
-  });
-  return json({ data });
-});
-
-addRoute('POST', '/api/reports/recompute', async (req, env) => {
-  const userId = await requireUser(req, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const body = await readJson<{ pageId?: string | null }>(req);
-  const pageId = body?.pageId ?? null;
-  const result = await recomputeConversationStats(env, { userId, pageId });
-  return json(result);
-});
-
-addRoute('POST', '/auth/facebook/deletion', async (req, env) => {
-  const payload = await readJson<{ signed_request?: string }>(req);
-  const signedRequest = payload?.signed_request;
-  if (!signedRequest) {
-    return json({ error: 'Missing signed_request' }, { status: 400 });
-  }
-  const [encodedSig, encodedPayload] = signedRequest.split('.');
-  if (!encodedSig || !encodedPayload) {
-    return json({ error: 'Invalid signed_request' }, { status: 400 });
-  }
-  const sig = Uint8Array.from(
-    atob(encodedSig.replace(/-/g, '+').replace(/_/g, '/')),
-    (c) => c.charCodeAt(0),
-  );
-  const payloadBytes = new TextEncoder().encode(encodedPayload);
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(env.META_APP_SECRET),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
-  const valid = await crypto.subtle.verify('HMAC', key, sig, payloadBytes);
-  if (!valid) {
-    return json({ error: 'Invalid signature' }, { status: 400 });
-  }
-  const decoded = JSON.parse(
-    new TextDecoder().decode(
-      Uint8Array.from(
-        atob(encodedPayload.replace(/-/g, '+').replace(/_/g, '/')),
-        (c) => c.charCodeAt(0),
-      ),
-    ),
-  ) as { user_id?: string };
-  if (!decoded.user_id) {
-    return json({ error: 'Missing user_id' }, { status: 400 });
-  }
-  const userId = decoded.user_id;
-
-  await env.DB.prepare('DELETE FROM messages WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM conversations WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM ig_assets WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM meta_pages WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM sync_states WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM sync_runs WHERE user_id = ?')
-    .bind(userId)
-    .run();
-  await env.DB.prepare('DELETE FROM meta_users WHERE id = ?')
-    .bind(userId)
-    .run();
-
-  const confirmationCode = crypto.randomUUID();
-  const statusUrl = `${env.APP_ORIGIN ?? ''}/deletion?code=${confirmationCode}`;
-  return json({ url: statusUrl, confirmation_code: confirmationCode });
+registerRoutes({
+  addRoute,
+  json,
+  cachedJson,
+  readJson,
+  getMetaScopes,
+  getApiVersion,
+  isFollowupInboxEnabled,
+  exchangeCodeForToken,
+  exchangeForLongLivedToken,
+  debugToken,
+  fetchPermissions,
+  fetchBusinesses,
+  fetchBusinessPages,
+  fetchClassicPages,
+  fetchPageToken,
+  fetchInstagramAssets,
+  fetchPageIgDebug,
+  sendMessage,
+  fetchUserProfile,
+  buildSessionCookie,
+  clearSessionCookie,
+  createSessionToken,
+  requireSession,
+  requireUser,
+  getUserToken,
+  upsertMetaUser,
+  upsertPage,
+  getPage,
+  upsertIgAsset,
+  listIgAssets,
+  listPagesWithStats,
+  getAssetNameMap,
+  getConversation,
+  listConversationTags,
+  recomputeConversationState,
+  recordStateEvent,
+  annotateMessage,
+  notifyInboxEvent,
+  callSyncScopeOrchestrator,
+  parseMetricsWindow,
+  buildReportFromDb,
+  getMetaMetrics,
+  getAppErrorMetrics,
+  classifyMetaErrorKey,
+  normalizeUnknownError,
+  recomputeConversationStats,
+  sleepMs,
+  toHourBucket,
+  parseJsonArray,
+  reportError,
 });
 
 export default {

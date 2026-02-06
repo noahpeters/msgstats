@@ -15,6 +15,7 @@ type OpsSummary = {
 
 type SyncRun = {
   id: string;
+  userId: string;
   pageId: string;
   platform: string;
   igBusinessId: string | null;
@@ -123,9 +124,7 @@ export default function OpsDashboard(): React.ReactElement {
   const [errorMetrics, setErrorMetrics] =
     React.useState<AppErrorMetrics | null>(null);
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
-  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
-    null,
-  );
+  const [runsError, setRunsError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -139,22 +138,34 @@ export default function OpsDashboard(): React.ReactElement {
   const yAxisRef = React.useRef<SVGGElement | null>(null);
   const errorAxisRef = React.useRef<SVGGElement | null>(null);
 
+  const loadSyncRuns = React.useCallback(async () => {
+    setRunsError(null);
+    const runsRes = await fetch('/api/ops/sync-runs?status=active&limit=25', {
+      cache: 'no-store',
+    });
+    if (runsRes.ok) {
+      const runsData = (await runsRes.json()) as { runs: SyncRun[] };
+      setSyncRuns(runsData.runs ?? []);
+    } else {
+      setRunsError('Failed to load sync runs.');
+      setSyncRuns([]);
+    }
+  }, []);
+
   React.useEffect(() => {
     let active = true;
     const load = async () => {
       setLoading(true);
       setError(null);
       try {
-        const [summaryRes, pointsRes, metaRes, errorsRes, flagsRes] =
-          await Promise.all([
-            fetch('/api/ops/summary', { cache: 'no-store' }),
-            fetch('/api/ops/messages-per-hour?hours=168', {
-              cache: 'no-store',
-            }),
-            fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
-            fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
-            fetch('/api/feature-flags', { cache: 'no-store' }),
-          ]);
+        const [summaryRes, pointsRes, metaRes, errorsRes] = await Promise.all([
+          fetch('/api/ops/summary', { cache: 'no-store' }),
+          fetch('/api/ops/messages-per-hour?hours=168', {
+            cache: 'no-store',
+          }),
+          fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
+          fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
+        ]);
         if (!summaryRes.ok) {
           throw new Error('Failed to load ops summary.');
         }
@@ -171,28 +182,21 @@ export default function OpsDashboard(): React.ReactElement {
         const pointsData = (await pointsRes.json()) as { points: HourPoint[] };
         const metaData = (await metaRes.json()) as MetaMetrics;
         const errorsData = (await errorsRes.json()) as AppErrorMetrics;
-        const flagsData = (await flagsRes.json()) as {
-          followupInbox?: boolean;
-        };
-        let runsData: { runs: SyncRun[] } = { runs: [] };
-        if (flagsData.followupInbox) {
-          const runsRes = await fetch(
-            '/api/ops/sync-runs?status=running&limit=25',
-            {
-              cache: 'no-store',
-            },
-          );
-          if (runsRes.ok) {
-            runsData = (await runsRes.json()) as { runs: SyncRun[] };
-          }
-        }
         if (active) {
           setSummary(summaryData);
           setPoints(pointsData.points ?? []);
           setMetaMetrics(metaData);
           setErrorMetrics(errorsData);
-          setFlags(flagsData ?? null);
-          setSyncRuns(runsData.runs ?? []);
+          const runsRes = await fetch(
+            '/api/ops/sync-runs?status=active&limit=25',
+            { cache: 'no-store' },
+          );
+          if (runsRes.ok) {
+            const runsData = (await runsRes.json()) as { runs: SyncRun[] };
+            setSyncRuns(runsData.runs ?? []);
+          } else {
+            setRunsError('Failed to load sync runs.');
+          }
         }
       } catch (err) {
         if (active) {
@@ -209,6 +213,15 @@ export default function OpsDashboard(): React.ReactElement {
       active = false;
     };
   }, []);
+
+  React.useEffect(() => {
+    const interval = window.setInterval(() => {
+      void loadSyncRuns();
+    }, 15000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [loadSyncRuns]);
 
   const cancelRun = async (runId: string) => {
     const confirm = window.confirm('Cancel this sync run?');
@@ -388,63 +401,77 @@ export default function OpsDashboard(): React.ReactElement {
           </div>
         </div>
 
-        {flags?.followupInbox ? (
-          <div
-            style={{
-              marginTop: '18px',
-              display: 'grid',
-              gap: '8px',
-            }}
-          >
-            <h2 style={{ margin: 0 }}>Running syncs</h2>
-            <p {...stylex.props(layout.note)}>
-              Active sync runs and their start time. Cancel if stuck.
-            </p>
-            {syncRuns.length ? (
-              <table {...stylex.props(layout.table)}>
-                <thead>
-                  <tr {...stylex.props(layout.tableRow)}>
-                    <th {...stylex.props(layout.tableHead)}>Run ID</th>
-                    <th {...stylex.props(layout.tableHead)}>Platform</th>
-                    <th {...stylex.props(layout.tableHead)}>Started</th>
-                    <th {...stylex.props(layout.tableHead)}>Status</th>
-                    <th {...stylex.props(layout.tableHead)}>Last error</th>
-                    <th {...stylex.props(layout.tableHead)}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {syncRuns.map((run) => (
-                    <tr key={run.id} {...stylex.props(layout.tableRow)}>
-                      <td {...stylex.props(layout.tableCell)}>
-                        <code>{run.id.slice(0, 8)}</code>
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {run.platform}
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {new Date(run.startedAt).toLocaleString()}
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>{run.status}</td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {run.lastError ?? '—'}
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        <button
-                          {...stylex.props(layout.ghostButton)}
-                          onClick={() => cancelRun(run.id)}
-                        >
-                          Cancel
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p {...stylex.props(layout.note)}>No running syncs.</p>
-            )}
+        <div
+          style={{
+            marginTop: '18px',
+            display: 'grid',
+            gap: '8px',
+          }}
+        >
+          <h2 style={{ margin: 0 }}>Running syncs</h2>
+          <p {...stylex.props(layout.note)}>
+            Active sync runs and their start time. Cancel if stuck.
+          </p>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => loadSyncRuns()}
+            >
+              Refresh
+            </button>
+            <span {...stylex.props(layout.note)}>
+              Auto-refreshes every 15s.
+            </span>
           </div>
-        ) : null}
+          {runsError ? (
+            <p style={{ color: colors.coral }}>{runsError}</p>
+          ) : null}
+          {syncRuns.length ? (
+            <table {...stylex.props(layout.table)}>
+              <thead>
+                <tr {...stylex.props(layout.tableRow)}>
+                  <th {...stylex.props(layout.tableHead)}>Run ID</th>
+                  <th {...stylex.props(layout.tableHead)}>User</th>
+                  <th {...stylex.props(layout.tableHead)}>Platform</th>
+                  <th {...stylex.props(layout.tableHead)}>Started</th>
+                  <th {...stylex.props(layout.tableHead)}>Status</th>
+                  <th {...stylex.props(layout.tableHead)}>Last error</th>
+                  <th {...stylex.props(layout.tableHead)}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {syncRuns.map((run) => (
+                  <tr key={run.id} {...stylex.props(layout.tableRow)}>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <code>{run.id.slice(0, 8)}</code>
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <code>{run.userId.slice(0, 8)}</code>
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>{run.platform}</td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {new Date(run.startedAt).toLocaleString()}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>{run.status}</td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      {run.lastError ?? '—'}
+                    </td>
+                    <td {...stylex.props(layout.tableCell)}>
+                      <button
+                        {...stylex.props(layout.ghostButton)}
+                        onClick={() => cancelRun(run.id)}
+                      >
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p {...stylex.props(layout.note)}>No running syncs.</p>
+          )}
+        </div>
 
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>

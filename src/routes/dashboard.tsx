@@ -58,8 +58,6 @@ type AssetsResponse = {
 
 type FollowupCount = {
   count: number;
-  windowDays: number;
-  slaHours: number;
 };
 
 type SyncRun = {
@@ -351,7 +349,7 @@ export default function Dashboard(): React.ReactElement {
         return;
       }
       const { ok, data } = await fetchJson<FollowupCount>(
-        '/api/inbox/follow-up/count',
+        '/api/inbox/conversations/count?needs_followup=true',
         undefined,
         { force },
       );
@@ -748,20 +746,17 @@ export default function Dashboard(): React.ReactElement {
 
       {flags?.followupInbox ? (
         <section {...stylex.props(layout.card)}>
-          <h2>Needs Follow-Up</h2>
+          <h2>Conversations Needing Attention</h2>
           <p {...stylex.props(layout.note)}>
-            Global count of conversations that need a reply in the last{' '}
-            {followupCount?.windowDays ?? 30} days.
+            Conversations with a follow-up suggestion that are waiting on you.
           </p>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <a href="/inbox/follow-up" title="Global">
+            <a href="/inbox" title="Inbox">
               <button {...stylex.props(layout.button)}>
                 {followupCount?.count ?? 0} conversations
               </button>
             </a>
-            <span {...stylex.props(layout.note)}>
-              SLA threshold: {followupCount?.slaHours ?? 24}h · Scope: Global
-            </span>
+            <span {...stylex.props(layout.note)}>Scope: All assets</span>
           </div>
         </section>
       ) : null}

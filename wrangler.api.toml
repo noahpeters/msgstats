@@ -55,6 +55,9 @@ invocation_logs = true
 [triggers]
 crons = ["*/5 * * * *"]
 
+[ai]
+binding = "AI"
+
 
 [env.staging]
 name = "msgstats-api-staging"
@@ -111,6 +114,9 @@ invocation_logs = true
 [env.staging.triggers]
 crons = ["0 * * * *"]
 
+[env.staging.ai]
+binding = "AI"
+
 [env.production]
 name = "msgstats-api"
 
@@ -165,3 +171,6 @@ invocation_logs = true
 
 [env.production.triggers]
 crons = ["0 * * * *"]
+
+[env.production.ai]
+binding = "AI"

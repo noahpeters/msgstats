@@ -112,13 +112,13 @@ export default function RootRoute(): React.ReactElement {
           {flags?.followupInbox ? (
             <>
               <Link
-                to="/inbox/follow-up"
+                to="/inbox"
                 {...stylex.props(
                   layout.navLink,
                   location.pathname.startsWith('/inbox') && activeLink.active,
                 )}
               >
-                Follow-Up Inbox
+                Inbox
               </Link>
               <Link
                 to="/inbox/templates"
