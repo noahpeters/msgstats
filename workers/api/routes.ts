@@ -1,4 +1,5 @@
 import { MetaApiError } from './meta';
+import { summarizeAiRunStats, type AiRunStats } from './aiStats';
 import type { Env } from './worker';
 
 type RouteHandler = (
@@ -811,6 +812,72 @@ export function registerRoutes(deps: any) {
       }>();
 
     const assets = await getAssetNameMap(env, userId);
+    const conversationIds = (rows.results ?? []).map(
+      (row) => row.conversationId,
+    );
+    const aiSummaryByConversation = new Map<
+      string,
+      {
+        has_ai_processed: boolean;
+        has_ai_handoff_true: boolean;
+        has_ai_deferred_true: boolean;
+      }
+    >();
+    if (conversationIds.length) {
+      const placeholders = conversationIds.map(() => '?').join(',');
+      const aiRows = await env.DB.prepare(
+        `SELECT conversation_id as conversationId,
+                features_json as featuresJson
+         FROM messages
+         WHERE user_id = ?
+           AND conversation_id IN (${placeholders})
+           AND features_json LIKE '%"ai"%'`,
+      )
+        .bind(userId, ...conversationIds)
+        .all<{ conversationId: string; featuresJson: string | null }>();
+      for (const row of aiRows.results ?? []) {
+        if (!row.featuresJson) continue;
+        let parsed: { ai?: unknown } | null = null;
+        try {
+          parsed = JSON.parse(row.featuresJson) as { ai?: unknown };
+        } catch {
+          parsed = null;
+        }
+        const ai = parsed?.ai;
+        if (!ai || typeof ai !== 'object') continue;
+        const aiRecord = ai as Record<string, unknown>;
+        const existing = aiSummaryByConversation.get(row.conversationId) ?? {
+          has_ai_processed: false,
+          has_ai_handoff_true: false,
+          has_ai_deferred_true: false,
+        };
+        const attempted =
+          typeof aiRecord.attempted === 'boolean' ? aiRecord.attempted : false;
+        const interpretation =
+          typeof aiRecord.interpretation === 'object' && aiRecord.interpretation
+            ? (aiRecord.interpretation as Record<string, unknown>)
+            : null;
+        const handoff =
+          typeof interpretation?.handoff === 'object' && interpretation?.handoff
+            ? (interpretation.handoff as Record<string, unknown>)
+            : null;
+        const deferred =
+          typeof interpretation?.deferred === 'object' &&
+          interpretation?.deferred
+            ? (interpretation.deferred as Record<string, unknown>)
+            : null;
+        const hasAiProcessed = attempted || Boolean(interpretation);
+        const handoffTrue =
+          handoff?.is_handoff === true || handoff?.is_handoff === 'true';
+        const deferredTrue =
+          deferred?.is_deferred === true || deferred?.is_deferred === 'true';
+        aiSummaryByConversation.set(row.conversationId, {
+          has_ai_processed: existing.has_ai_processed || hasAiProcessed,
+          has_ai_handoff_true: existing.has_ai_handoff_true || handoffTrue,
+          has_ai_deferred_true: existing.has_ai_deferred_true || deferredTrue,
+        });
+      }
+    }
 
     return json({
       conversations: (rows.results ?? []).map((row) => {
@@ -818,6 +885,11 @@ export function registerRoutes(deps: any) {
           row.assetId && assets.has(row.assetId)
             ? assets.get(row.assetId)
             : null;
+        const aiSummary = aiSummaryByConversation.get(row.conversationId) ?? {
+          has_ai_processed: false,
+          has_ai_handoff_true: false,
+          has_ai_deferred_true: false,
+        };
         const inboundAgeHours = row.lastInboundAt
           ? (Date.now() - Date.parse(row.lastInboundAt)) / (1000 * 60 * 60)
           : null;
@@ -840,6 +912,7 @@ export function registerRoutes(deps: any) {
           followupDueAt: row.followupDueAt,
           followupSuggestion: row.followupSuggestion,
           lastInboundAgeHours: inboundAgeHours,
+          aiSummary,
         };
       }),
       nextCursor: rows.results?.length
@@ -1987,6 +2060,148 @@ export function registerRoutes(deps: any) {
         lastError: string | null;
       }>();
     return json({ runs: rows.results ?? [] });
+  });
+
+  addRoute('GET', '/api/ops/ai/runs', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const url = new URL(req.url);
+    const limit = Math.min(
+      50,
+      Math.max(5, Number(url.searchParams.get('limit') ?? 20)),
+    );
+    const rows = await env.DB.prepare(
+      `SELECT id,
+              user_id as userId,
+              page_id as pageId,
+              platform,
+              ig_business_id as igBusinessId,
+              status,
+              started_at as startedAt,
+              finished_at as finishedAt,
+              ai_stats_json as aiStatsJson
+       FROM sync_runs
+       WHERE ai_stats_json IS NOT NULL
+       ORDER BY started_at DESC
+       LIMIT ?`,
+    )
+      .bind(limit)
+      .all<{
+        id: string;
+        userId: string;
+        pageId: string;
+        platform: string;
+        igBusinessId: string | null;
+        status: string;
+        startedAt: string;
+        finishedAt: string | null;
+        aiStatsJson: string | null;
+      }>();
+    const runs = (rows.results ?? []).map((row) => {
+      let stats: AiRunStats | null = null;
+      try {
+        stats = row.aiStatsJson
+          ? (JSON.parse(row.aiStatsJson) as AiRunStats)
+          : null;
+      } catch {
+        stats = null;
+      }
+      const durationMs =
+        row.finishedAt && row.startedAt
+          ? Date.parse(row.finishedAt) - Date.parse(row.startedAt)
+          : null;
+      return {
+        id: row.id,
+        userId: row.userId,
+        pageId: row.pageId,
+        platform: row.platform,
+        igBusinessId: row.igBusinessId,
+        status: row.status,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        durationMs: Number.isFinite(durationMs ?? NaN) ? durationMs : null,
+        stats: stats ? summarizeAiRunStats(stats) : null,
+      };
+    });
+    return json({ runs });
+  });
+
+  addRoute('GET', '/api/ops/ai/runs/:runId', async (req, env, _ctx, params) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const runId = params.runId;
+    if (!runId) {
+      return json({ error: 'Missing run id' }, { status: 400 });
+    }
+    const row = await env.DB.prepare(
+      `SELECT id,
+              user_id as userId,
+              page_id as pageId,
+              platform,
+              ig_business_id as igBusinessId,
+              status,
+              started_at as startedAt,
+              finished_at as finishedAt,
+              ai_stats_json as aiStatsJson,
+              ai_config_json as aiConfigJson
+       FROM sync_runs
+       WHERE id = ?`,
+    )
+      .bind(runId)
+      .first<{
+        id: string;
+        userId: string;
+        pageId: string;
+        platform: string;
+        igBusinessId: string | null;
+        status: string;
+        startedAt: string;
+        finishedAt: string | null;
+        aiStatsJson: string | null;
+        aiConfigJson: string | null;
+      }>();
+    if (!row) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    let aiStats: AiRunStats | null = null;
+    let aiConfig: Record<string, unknown> | null = null;
+    try {
+      aiStats = row.aiStatsJson
+        ? (JSON.parse(row.aiStatsJson) as AiRunStats)
+        : null;
+    } catch {
+      aiStats = null;
+    }
+    try {
+      aiConfig = row.aiConfigJson
+        ? (JSON.parse(row.aiConfigJson) as Record<string, unknown>)
+        : null;
+    } catch {
+      aiConfig = null;
+    }
+    const durationMs =
+      row.finishedAt && row.startedAt
+        ? Date.parse(row.finishedAt) - Date.parse(row.startedAt)
+        : null;
+    return json({
+      run: {
+        id: row.id,
+        userId: row.userId,
+        pageId: row.pageId,
+        platform: row.platform,
+        igBusinessId: row.igBusinessId,
+        status: row.status,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        durationMs: Number.isFinite(durationMs ?? NaN) ? durationMs : null,
+        aiStats,
+        aiConfig,
+      },
+    });
   });
 
   addRoute(

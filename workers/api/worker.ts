@@ -26,17 +26,14 @@ import {
   type InferenceConfig,
   type MessageFeatures,
 } from './inference';
+import { buildContextDigest } from './aiInterpreter';
+import { getAiConfig, runAiAttemptForMessage } from './aiRun';
 import {
-  buildContextDigest,
-  computeInputHash,
-  defaultAiModel,
-  getAiMode,
-  interpretAmbiguity,
-  shouldAllowAiCall,
-  shouldRunAI,
-  normalizeText,
-  type AiInterpretation,
-} from './aiInterpreter';
+  createAiRunStats,
+  recordAiRunAttempt,
+  recordAiRunSkip,
+  type AiRunStats,
+} from './aiStats';
 import { reportError } from './observability/reportError';
 import { queryAnalyticsEngine } from './observability/analyticsEngine';
 import {
@@ -86,6 +83,7 @@ export type Env = {
   CLASSIFIER_AI_PROMPT_VERSION?: string;
   CLASSIFIER_AI_TIMEOUT_MS?: string;
   CLASSIFIER_AI_MAX_OUTPUT_TOKENS?: string;
+  CLASSIFIER_AI_MAX_INPUT_CHARS?: string;
   CLASSIFIER_AI_DAILY_BUDGET_CALLS?: string;
   CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY?: string;
   FEATURE_FOLLOWUP_INBOX?: string;
@@ -142,6 +140,8 @@ type SyncRunRow = {
   statsStartedAt: string | null;
   statsFinishedAt: string | null;
   statsError: string | null;
+  aiStatsJson?: string | null;
+  aiConfigJson?: string | null;
 };
 
 type SyncScope = {
@@ -425,31 +425,6 @@ function getInferenceConfig(env: Env): InferenceConfig {
     parseNumberEnv(env.INBOX_DEFER_DEFAULT_DAYS, 30),
   );
   return { slaHours, lostAfterPriceDays, resurrectGapDays, deferDefaultDays };
-}
-
-function getAiConfig(env: Env) {
-  const mode = getAiMode(env.CLASSIFIER_AI_MODE);
-  return {
-    mode,
-    model: env.CLASSIFIER_AI_MODEL?.trim() || defaultAiModel,
-    promptVersion: env.CLASSIFIER_AI_PROMPT_VERSION?.trim() || 'v1',
-    timeoutMs: Math.max(
-      1000,
-      parseNumberEnv(env.CLASSIFIER_AI_TIMEOUT_MS, 8000),
-    ),
-    maxOutputTokens: Math.max(
-      32,
-      parseNumberEnv(env.CLASSIFIER_AI_MAX_OUTPUT_TOKENS, 128),
-    ),
-    dailyBudget: Math.max(
-      0,
-      parseNumberEnv(env.CLASSIFIER_AI_DAILY_BUDGET_CALLS, 25),
-    ),
-    maxCallsPerConversation: Math.max(
-      0,
-      parseNumberEnv(env.CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY, 1),
-    ),
-  };
 }
 
 function getAiDateKey(now: Date) {
@@ -890,6 +865,7 @@ async function loadConversationMessagesForInference(
   userId: string,
   conversationId: string,
   forceRecompute = false,
+  aiRunStats?: AiRunStats,
 ): Promise<AnnotatedMessage[]> {
   const rows = await env.DB.prepare(
     `SELECT id, created_time as createdAt, body, direction, sender_type as senderType,
@@ -962,6 +938,9 @@ async function loadConversationMessagesForInference(
       ruleHits = ruleHits.filter(
         (hit) => hit !== 'AI_HANDOFF_INTERPRET' && hit !== 'AI_DEFER_INTERPRET',
       );
+      if (aiRunStats && direction === 'inbound' && row.body) {
+        recordAiRunSkip(aiRunStats, 'mode_off');
+      }
     } else if (direction === 'inbound' && row.body) {
       const contextDigest = buildContextDigest(
         [...annotated, { ...baseAnnotated }].map((msg) => ({
@@ -970,62 +949,31 @@ async function loadConversationMessagesForInference(
         })),
         4,
       );
-      const inputSeed = `${normalizeText(row.body)}|${aiConfig.promptVersion}|${aiConfig.model}|${contextDigest}`;
-      const inputHash = await computeInputHash(inputSeed);
-      const decision = shouldRunAI({
-        messageText: row.body,
-        extractedFeatures: {
-          has_phone_number: features.has_phone_number,
-          has_email: features.has_email,
-          deferral_date_hint: features.deferral_date_hint,
-        },
-        mode: aiMode,
-      });
-
       let aiRecord: MessageFeatures['ai'] | undefined = existingAi;
-      let interpretation: AiInterpretation | null = null;
-      let skippedReason: string | undefined;
-      let errors: string[] = [];
-      if (!decision.run) {
-        skippedReason = decision.reason;
-      } else if (
-        existingAi?.input_hash === inputHash &&
-        existingAi.interpretation
-      ) {
-        interpretation = existingAi.interpretation as AiInterpretation;
-      } else {
-        const budget = shouldAllowAiCall({
-          dailyCalls,
-          conversationCalls,
-          maxDaily: aiConfig.dailyBudget,
-          maxPerConversation: aiConfig.maxCallsPerConversation,
-        });
-        if (!budget.allowed) {
-          skippedReason = budget.reason ?? 'budget_exceeded';
-        } else {
-          try {
-            interpretation = await interpretAmbiguity({
-              envAi: env.AI,
-              mode: aiMode,
-              model: aiConfig.model,
-              promptVersion: aiConfig.promptVersion,
-              timeoutMs: aiConfig.timeoutMs,
-              maxOutputTokens: aiConfig.maxOutputTokens,
-              inputHash,
-              messageText: row.body,
-              contextDigest,
-              extractedFeatures: features,
-            });
-            if (aiMode === 'workers_ai' || interpretation) {
-              await incrementAiUsage(env, conversationId, dateKey);
-              dailyCalls += 1;
-              conversationCalls += 1;
-            }
-          } catch (error) {
-            errors = [error instanceof Error ? error.message : 'ai_error'];
-          }
-        }
+      const aiAttempt = await runAiAttemptForMessage({
+        aiMode,
+        aiConfig,
+        envAi: env.AI,
+        messageText: row.body,
+        contextDigest,
+        extractedFeatures: features,
+        existingAi,
+        dailyCalls,
+        conversationCalls,
+        incrementUsage: () => incrementAiUsage(env, conversationId, dateKey),
+      });
+      if (aiRunStats) {
+        recordAiRunAttempt(aiRunStats, aiAttempt);
       }
+      dailyCalls = aiAttempt.dailyCalls;
+      conversationCalls = aiAttempt.conversationCalls;
+      const inputHash = aiAttempt.inputHash;
+      const interpretation = aiAttempt.interpretation;
+      const skippedReason = aiAttempt.skippedReason;
+      const errors = aiAttempt.errors;
+      const ranAt = aiAttempt.attempted
+        ? new Date().toISOString()
+        : existingAi?.ran_at;
 
       if (interpretation) {
         aiRecord = {
@@ -1033,6 +981,13 @@ async function loadConversationMessagesForInference(
           mode: aiMode,
           model: aiConfig.model,
           prompt_version: aiConfig.promptVersion,
+          input_truncated: aiAttempt.inputTruncated,
+          input_chars: aiAttempt.inputChars,
+          attempted: aiAttempt.attempted || undefined,
+          attempt_outcome: aiAttempt.attemptOutcome,
+          skipped_reason: skippedReason,
+          errors: errors.length ? errors : undefined,
+          ran_at: ranAt,
           interpretation,
           updated_at: new Date().toISOString(),
         };
@@ -1048,8 +1003,13 @@ async function loadConversationMessagesForInference(
           mode: aiMode,
           model: aiConfig.model,
           prompt_version: aiConfig.promptVersion,
+          input_truncated: aiAttempt.inputTruncated,
+          input_chars: aiAttempt.inputChars,
+          attempted: aiAttempt.attempted || undefined,
+          attempt_outcome: aiAttempt.attemptOutcome,
           skipped_reason: skippedReason,
           errors: errors.length ? errors : undefined,
+          ran_at: ranAt,
           updated_at: new Date().toISOString(),
         };
       }
@@ -1126,6 +1086,7 @@ async function recomputeConversationState(
   env: Env,
   userId: string,
   conversationId: string,
+  aiRunStats?: AiRunStats,
 ) {
   const conversation = await getConversation(env, userId, conversationId);
   if (!conversation) return null;
@@ -1134,6 +1095,7 @@ async function recomputeConversationState(
     userId,
     conversationId,
     true,
+    aiRunStats,
   );
   if (!messages.length) return null;
   const config = getInferenceConfig(env);
@@ -1148,11 +1110,17 @@ async function recomputeConversationState(
   let finalState = inference.state;
   let finalConfidence = inference.confidence;
   const reasons = inference.reasons.slice();
+  const objectReason = reasons.find((reason) => {
+    if (typeof reason !== 'object' || reason === null) return false;
+    const code = (reason as { code?: unknown }).code;
+    return typeof code === 'string' && code.startsWith('LOST_');
+  });
   const lostReasonCode =
-    reasons.find(
-      (reason) =>
-        typeof reason === 'object' && reason.code?.startsWith('LOST_'),
-    )?.code ??
+    (typeof objectReason === 'object' &&
+    objectReason !== null &&
+    'code' in objectReason
+      ? (objectReason as { code: string }).code
+      : null) ??
     reasons.find(
       (reason) => typeof reason === 'string' && reason.startsWith('LOST_'),
     ) ??
@@ -1353,7 +1321,9 @@ async function getSyncRunRow(env: Env, id: string) {
             stats_status as statsStatus,
             stats_started_at as statsStartedAt,
             stats_finished_at as statsFinishedAt,
-            stats_error as statsError
+            stats_error as statsError,
+            ai_stats_json as aiStatsJson,
+            ai_config_json as aiConfigJson
      FROM sync_runs
      WHERE id = ?`,
   )
@@ -1534,6 +1504,42 @@ async function updateSyncRunStats(
   const now = new Date().toISOString();
   setParts.push('updated_at = ?');
   bindings.push(now);
+
+  await env.DB.prepare(
+    `UPDATE sync_runs
+     SET ${setParts.join(', ')}
+     WHERE id = ?`,
+  )
+    .bind(...bindings, data.id)
+    .run();
+
+  return await getSyncRunRow(env, data.id);
+}
+
+async function updateSyncRunAiStats(
+  env: Env,
+  data: {
+    id: string;
+    aiStatsJson?: string | null;
+    aiConfigJson?: string | null;
+  },
+) {
+  const setParts: string[] = [];
+  const bindings: unknown[] = [];
+
+  if ('aiStatsJson' in data) {
+    setParts.push('ai_stats_json = ?');
+    bindings.push(data.aiStatsJson ?? null);
+  }
+  if ('aiConfigJson' in data) {
+    setParts.push('ai_config_json = ?');
+    bindings.push(data.aiConfigJson ?? null);
+  }
+  if (!setParts.length) {
+    return await getSyncRunRow(env, data.id);
+  }
+  setParts.push('updated_at = ?');
+  bindings.push(new Date().toISOString());
 
   await env.DB.prepare(
     `UPDATE sync_runs
@@ -2652,6 +2658,21 @@ async function recomputeStatsForRun(env: Env, runId: string) {
     throw new Error('Sync run not found');
   }
 
+  const aiConfig = getAiConfig(env);
+  const aiStats = createAiRunStats();
+  await updateSyncRunAiStats(env, {
+    id: runId,
+    aiStatsJson: JSON.stringify(aiStats),
+    aiConfigJson: JSON.stringify({
+      mode: aiConfig.mode,
+      model: aiConfig.model,
+      prompt_version: aiConfig.promptVersion,
+      max_output_tokens: aiConfig.maxOutputTokens,
+      max_input_chars: aiConfig.maxInputChars,
+      timeout_ms: aiConfig.timeoutMs,
+    }),
+  });
+
   await updateSyncRunStatsAndNotify(env, {
     id: runId,
     statsStatus: 'running',
@@ -2665,6 +2686,7 @@ async function recomputeStatsForRun(env: Env, runId: string) {
     pageId: run.pageId,
     platform: run.platform,
     igBusinessId: run.igBusinessId,
+    aiRunStats: aiStats,
   });
 
   await updateSyncRunStatsAndNotify(env, {
@@ -2672,6 +2694,10 @@ async function recomputeStatsForRun(env: Env, runId: string) {
     statsStatus: 'completed',
     statsFinishedAt: new Date().toISOString(),
     statsError: null,
+  });
+  await updateSyncRunAiStats(env, {
+    id: runId,
+    aiStatsJson: JSON.stringify(aiStats),
   });
 
   return result;
@@ -2684,6 +2710,7 @@ async function recomputeConversationStatsForRun(
     pageId: string;
     platform: string;
     igBusinessId: string | null;
+    aiRunStats?: AiRunStats;
   },
 ) {
   const bindings = [
@@ -2767,7 +2794,12 @@ async function recomputeConversationStatsForRun(
     .all<{ id: string }>();
   if (isFollowupInboxEnabled(env)) {
     for (const row of convoIds.results ?? []) {
-      await recomputeConversationState(env, data.userId, row.id);
+      await recomputeConversationState(
+        env,
+        data.userId,
+        row.id,
+        data.aiRunStats,
+      );
     }
   }
 
