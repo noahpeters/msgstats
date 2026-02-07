@@ -3,6 +3,10 @@ import { Link, useLocation, useSearchParams } from 'react-router';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
 import { inboxStyles } from './inbox.styles';
+import {
+  renderTemplate,
+  type TemplateRenderContext,
+} from '../templates/renderTemplate';
 
 const palette = {
   ink: '#0c1b1a',
@@ -231,6 +235,37 @@ const getStoredInspectorTab = (): InspectorTab => {
   return 'conversation';
 };
 
+const TEMPLATE_HELPER_VARIABLES: Array<{ label: string; snippet: string }> = [
+  { label: 'Lead first name', snippet: '{{lead.first_name}}' },
+  { label: 'Lead full name', snippet: '{{lead.full_name}}' },
+  { label: 'Platform', snippet: '{{conversation.platform}}' },
+  { label: 'Channel', snippet: '{{conversation.channel}}' },
+  { label: 'Current state', snippet: '{{conversation.state}}' },
+  { label: 'Asset name', snippet: '{{asset.name}}' },
+];
+
+const TEMPLATE_HELPER_CONDITIONALS: Array<{
+  label: string;
+  snippet: string;
+  placeholder: string;
+}> = [
+  {
+    label: 'If state is DEFERRED',
+    snippet: `{{#if stateIs:DEFERRED}}\nYOUR_TEXT_HERE\n{{/if}}`,
+    placeholder: 'YOUR_TEXT_HERE',
+  },
+  {
+    label: 'If had PRICE_GIVEN',
+    snippet: `{{#if hadState:PRICE_GIVEN}}\nYOUR_TEXT_HERE\n{{else}}\nYOUR_TEXT_HERE\n{{/if}}`,
+    placeholder: 'YOUR_TEXT_HERE',
+  },
+  {
+    label: 'Fallback greeting',
+    snippet: `{{#if lead.first_name}}\nHi {{lead.first_name}},\n{{else}}\nHi there,\n{{/if}}`,
+    placeholder: 'Hi there,',
+  },
+];
+
 export default function Inbox(): React.ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
@@ -287,16 +322,31 @@ export default function Inbox(): React.ReactElement {
     null,
   );
   const [templateSaving, setTemplateSaving] = React.useState(false);
+  const [previewTemplate, setPreviewTemplate] = React.useState<Template | null>(
+    null,
+  );
+  const [previewRendered, setPreviewRendered] = React.useState('');
+  const [previewMissingVars, setPreviewMissingVars] = React.useState<string[]>(
+    [],
+  );
+  const [previewErrors, setPreviewErrors] = React.useState<string[]>([]);
   const inspectorToggleRef = React.useRef<HTMLButtonElement | null>(null);
   const inspectorDrawerRef = React.useRef<HTMLDivElement | null>(null);
   const conversationDrawerRef = React.useRef<HTMLDivElement | null>(null);
   const messageTimelineRef = React.useRef<HTMLDivElement | null>(null);
   const composerTextAreaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const templateBodyTextAreaRef = React.useRef<HTMLTextAreaElement | null>(
+    null,
+  );
+  const templateBodySelectionRef = React.useRef<{ start: number; end: number }>(
+    { start: 0, end: 0 },
+  );
   const useTemplateSelectionRef = React.useRef<{
     start: number;
     end: number;
   } | null>(null);
   const useTemplateFromComposerFocusRef = React.useRef(false);
+  const composerWasLastFocusedRef = React.useRef(false);
   const inspectorWasOpenRef = React.useRef(inspectorOpen);
   const showAiErrors =
     typeof window !== 'undefined' &&
@@ -550,6 +600,26 @@ export default function Inbox(): React.ReactElement {
     });
   }, [detail, selectedId]);
 
+  React.useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      const composer = composerTextAreaRef.current;
+      if (!(target instanceof HTMLElement)) return;
+      if (target === composer) {
+        composerWasLastFocusedRef.current = true;
+        return;
+      }
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement
+      ) {
+        composerWasLastFocusedRef.current = false;
+      }
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, []);
+
   const handleSelectConversation = (id: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -590,8 +660,75 @@ export default function Inbox(): React.ReactElement {
   };
 
   const handleUseTemplate = (template: Template) => {
+    const selectedConversation = conversations.find(
+      (conversation) => conversation.id === selectedId,
+    );
+    const renderContext: TemplateRenderContext = {
+      lead: {
+        first_name:
+          (
+            detail?.conversation.participantName ??
+            selectedConversation?.participantName ??
+            ''
+          )
+            .split(' ')
+            .filter(Boolean)[0] ?? '',
+        full_name:
+          detail?.conversation.participantName ??
+          selectedConversation?.participantName ??
+          '',
+      },
+      conversation: {
+        id: detail?.conversation.id ?? selectedConversation?.id ?? '',
+        platform:
+          detail?.conversation.channel ??
+          selectedConversation?.channel ??
+          'unknown',
+        channel:
+          detail?.conversation.channel ??
+          selectedConversation?.channel ??
+          'unknown',
+        state:
+          detail?.conversation.currentState ??
+          selectedConversation?.currentState ??
+          '',
+        timeline:
+          detail?.stateEvents.map((event) => ({
+            state: event.toState,
+            at: event.triggeredAt,
+          })) ?? [],
+      },
+      asset: {
+        id: detail?.conversation.assetId ?? selectedConversation?.assetId ?? '',
+        name:
+          detail?.conversation.assetName ??
+          selectedConversation?.assetName ??
+          '',
+      },
+      business: {
+        display_name:
+          detail?.conversation.assetName ??
+          selectedConversation?.assetName ??
+          '',
+      },
+      user: {
+        display_name: '',
+      },
+    };
+    const rendered = renderTemplate(template.body, renderContext);
+    if (rendered.errors.length) {
+      setTemplateError(rendered.errors.join(' '));
+      return;
+    }
     setTemplateError(null);
-    const insertion = template.body.trim();
+    if (rendered.missingVars.length) {
+      setTemplateStatus(
+        `Inserted with missing variables: ${rendered.missingVars.join(', ')}`,
+      );
+    } else {
+      setTemplateStatus('Template inserted.');
+    }
+    const insertion = rendered.text.trim();
     if (!insertion) return;
     const fromComposerFocus = useTemplateFromComposerFocusRef.current;
     const selection = useTemplateSelectionRef.current;
@@ -605,6 +742,7 @@ export default function Inbox(): React.ReactElement {
           const node = composerTextAreaRef.current;
           if (!node) return;
           node.focus();
+          composerWasLastFocusedRef.current = true;
           node.setSelectionRange(caret, caret);
         });
         return next;
@@ -612,11 +750,145 @@ export default function Inbox(): React.ReactElement {
       const next = previous
         ? `${previous}${previous.endsWith('\n') ? '' : '\n'}${insertion}`
         : insertion;
+      window.requestAnimationFrame(() => {
+        const node = composerTextAreaRef.current;
+        if (!node) return;
+        node.focus();
+        composerWasLastFocusedRef.current = true;
+        const caret = next.length;
+        node.setSelectionRange(caret, caret);
+      });
       return next;
     });
     useTemplateFromComposerFocusRef.current = false;
     useTemplateSelectionRef.current = null;
-    setTemplateStatus('Template inserted.');
+  };
+
+  const captureTemplateInsertionAnchor = () => {
+    const node = composerTextAreaRef.current;
+    const focusedInComposer = Boolean(node) && document.activeElement === node;
+    const useSelectionAnchor =
+      focusedInComposer || composerWasLastFocusedRef.current;
+    useTemplateFromComposerFocusRef.current = useSelectionAnchor;
+    if (!useSelectionAnchor) {
+      useTemplateSelectionRef.current = null;
+      return;
+    }
+    if (focusedInComposer && node) {
+      useTemplateSelectionRef.current = {
+        start: node.selectionStart ?? 0,
+        end: node.selectionEnd ?? 0,
+      };
+    }
+  };
+
+  const insertTemplateSnippet = (options: {
+    snippetText: string;
+    placeholderText?: string;
+  }) => {
+    const bodyNode = templateBodyTextAreaRef.current;
+    const isBodyFocused =
+      Boolean(bodyNode) && document.activeElement === bodyNode;
+    const bodySelection = {
+      start: isBodyFocused ? bodyNode?.selectionStart ?? 0 : 0,
+      end: isBodyFocused ? bodyNode?.selectionEnd ?? 0 : 0,
+    };
+
+    setTemplateBody((previous) => {
+      const start = isBodyFocused
+        ? Math.max(0, Math.min(bodySelection.start, previous.length))
+        : previous.length;
+      const end = isBodyFocused
+        ? Math.max(start, Math.min(bodySelection.end, previous.length))
+        : previous.length;
+      const next = `${previous.slice(0, start)}${options.snippetText}${previous.slice(end)}`;
+      const placeholder = options.placeholderText;
+      const placeholderIdx = placeholder
+        ? options.snippetText.indexOf(placeholder)
+        : -1;
+      const selectionStart =
+        placeholderIdx >= 0
+          ? start + placeholderIdx
+          : start + options.snippetText.length;
+      const selectionEnd =
+        placeholderIdx >= 0
+          ? selectionStart + (placeholder?.length ?? 0)
+          : selectionStart;
+      window.requestAnimationFrame(() => {
+        const node = templateBodyTextAreaRef.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(selectionStart, selectionEnd);
+        templateBodySelectionRef.current = {
+          start: selectionStart,
+          end: selectionEnd,
+        };
+      });
+      return next;
+    });
+  };
+
+  const handlePreviewTemplate = (template: Template) => {
+    const selectedConversation = conversations.find(
+      (conversation) => conversation.id === selectedId,
+    );
+    const renderContext: TemplateRenderContext = {
+      lead: {
+        first_name:
+          (
+            detail?.conversation.participantName ??
+            selectedConversation?.participantName ??
+            ''
+          )
+            .split(' ')
+            .filter(Boolean)[0] ?? '',
+        full_name:
+          detail?.conversation.participantName ??
+          selectedConversation?.participantName ??
+          '',
+      },
+      conversation: {
+        id: detail?.conversation.id ?? selectedConversation?.id ?? '',
+        platform:
+          detail?.conversation.channel ??
+          selectedConversation?.channel ??
+          'unknown',
+        channel:
+          detail?.conversation.channel ??
+          selectedConversation?.channel ??
+          'unknown',
+        state:
+          detail?.conversation.currentState ??
+          selectedConversation?.currentState ??
+          '',
+        timeline:
+          detail?.stateEvents.map((event) => ({
+            state: event.toState,
+            at: event.triggeredAt,
+          })) ?? [],
+      },
+      asset: {
+        id: detail?.conversation.assetId ?? selectedConversation?.assetId ?? '',
+        name:
+          detail?.conversation.assetName ??
+          selectedConversation?.assetName ??
+          '',
+      },
+      business: {
+        display_name:
+          detail?.conversation.assetName ??
+          selectedConversation?.assetName ??
+          '',
+      },
+      user: {
+        display_name: '',
+      },
+    };
+    const rendered = renderTemplate(template.body, renderContext);
+    setPreviewTemplate(template);
+    setPreviewRendered(rendered.text);
+    setPreviewMissingVars(rendered.missingVars);
+    setPreviewErrors(rendered.errors);
   };
 
   const resetTemplateCreate = () => {
@@ -1046,9 +1318,16 @@ export default function Inbox(): React.ReactElement {
             <label {...stylex.props(inboxStyles.fieldLabel)}>
               Body
               <textarea
+                ref={templateBodyTextAreaRef}
                 {...stylex.props(inboxStyles.templateTextArea)}
                 value={templateBody}
                 onChange={(event) => setTemplateBody(event.target.value)}
+                onSelect={(event) => {
+                  templateBodySelectionRef.current = {
+                    start: event.currentTarget.selectionStart ?? 0,
+                    end: event.currentTarget.selectionEnd ?? 0,
+                  };
+                }}
                 placeholder="Template message"
               />
             </label>
@@ -1062,12 +1341,63 @@ export default function Inbox(): React.ReactElement {
                 {templateSaving ? 'Saving…' : 'Save template'}
               </button>
             </div>
+            <section {...stylex.props(inboxStyles.templateHelpers)}>
+              <div {...stylex.props(inboxStyles.templateHelpersTitle)}>
+                Template helpers
+              </div>
+              <div {...stylex.props(inboxStyles.templateHelpersHint)}>
+                Inserts into the template body.
+              </div>
+              <div {...stylex.props(inboxStyles.templateHelperGroup)}>
+                <div {...stylex.props(inboxStyles.templateHelperHeading)}>
+                  Variables
+                </div>
+                <div {...stylex.props(inboxStyles.templateHelperChips)}>
+                  {TEMPLATE_HELPER_VARIABLES.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      {...stylex.props(inboxStyles.templateHelperChip)}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() =>
+                        insertTemplateSnippet({ snippetText: item.snippet })
+                      }
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div {...stylex.props(inboxStyles.templateHelperGroup)}>
+                <div {...stylex.props(inboxStyles.templateHelperHeading)}>
+                  Conditionals
+                </div>
+                <div {...stylex.props(inboxStyles.templateHelperChips)}>
+                  {TEMPLATE_HELPER_CONDITIONALS.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      {...stylex.props(inboxStyles.templateHelperChip)}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() =>
+                        insertTemplateSnippet({
+                          snippetText: item.snippet,
+                          placeholderText: item.placeholder,
+                        })
+                      }
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
           </div>
         ) : (
           <>
             {!selectedId ? (
               <div {...stylex.props(inboxStyles.emptyState)}>
-                Select a conversation to send templates.
+                Select a conversation for richer preview context.
               </div>
             ) : null}
             <div {...stylex.props(inboxStyles.templateList)}>
@@ -1091,29 +1421,63 @@ export default function Inbox(): React.ReactElement {
                     <button
                       type="button"
                       {...stylex.props(layout.button)}
-                      disabled={!selectedId}
-                      onMouseDown={() => {
-                        const node = composerTextAreaRef.current;
-                        const focusedInComposer =
-                          Boolean(node) && document.activeElement === node;
-                        useTemplateFromComposerFocusRef.current =
-                          focusedInComposer;
-                        useTemplateSelectionRef.current =
-                          focusedInComposer && node
-                            ? {
-                                start: node.selectionStart ?? 0,
-                                end: node.selectionEnd ?? 0,
-                              }
-                            : null;
-                      }}
+                      onMouseDown={captureTemplateInsertionAnchor}
                       onClick={() => handleUseTemplate(template)}
                     >
                       Use
+                    </button>
+                    <button
+                      type="button"
+                      {...stylex.props(layout.ghostButton)}
+                      onClick={() => handlePreviewTemplate(template)}
+                    >
+                      Preview
                     </button>
                   </div>
                 </div>
               ))}
             </div>
+            {previewTemplate ? (
+              <div {...stylex.props(inboxStyles.previewPanel)}>
+                <div {...stylex.props(inboxStyles.previewHeader)}>
+                  <strong>{previewTemplate.title}</strong>
+                </div>
+                <pre {...stylex.props(inboxStyles.previewText)}>
+                  {previewRendered || '(empty output)'}
+                </pre>
+                {previewMissingVars.length ? (
+                  <div {...stylex.props(inboxStyles.warningBox)}>
+                    Missing variables: {previewMissingVars.join(', ')}
+                  </div>
+                ) : null}
+                {previewErrors.length ? (
+                  <div {...stylex.props(inboxStyles.errorBox)}>
+                    {previewErrors.join(' ')}
+                  </div>
+                ) : null}
+                <div {...stylex.props(inboxStyles.actionsRow)}>
+                  <button
+                    type="button"
+                    {...stylex.props(layout.button)}
+                    disabled={previewErrors.length > 0}
+                    onMouseDown={captureTemplateInsertionAnchor}
+                    onClick={() => {
+                      handleUseTemplate(previewTemplate);
+                      setPreviewTemplate(null);
+                    }}
+                  >
+                    Use
+                  </button>
+                  <button
+                    type="button"
+                    {...stylex.props(layout.ghostButton)}
+                    onClick={() => setPreviewTemplate(null)}
+                  >
+                    Back
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </>
         )}
       </div>
@@ -1509,7 +1873,16 @@ export default function Inbox(): React.ReactElement {
                 {...stylex.props(inboxStyles.textarea)}
                 placeholder="Write a reply"
                 value={composerText}
-                onChange={(event) => setComposerText(event.target.value)}
+                onChange={(event) => {
+                  setComposerText(event.target.value);
+                  useTemplateSelectionRef.current = {
+                    start: event.currentTarget.selectionStart ?? 0,
+                    end: event.currentTarget.selectionEnd ?? 0,
+                  };
+                }}
+                onFocus={() => {
+                  composerWasLastFocusedRef.current = true;
+                }}
                 onSelect={(event) => {
                   useTemplateSelectionRef.current = {
                     start: event.currentTarget.selectionStart ?? 0,
