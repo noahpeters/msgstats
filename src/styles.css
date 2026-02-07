@@ -7,3 +7,15 @@
 body {
   margin: 0;
 }
+
+button {
+  border-style: solid;
+  border-width: 0;
+}
+
+input,
+select,
+textarea {
+  border-style: solid;
+  border-width: 1px;
+}

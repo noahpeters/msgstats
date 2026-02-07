@@ -65,6 +65,7 @@ const parseBuildInfo = (raw: string) => {
 
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
+  const isEdgeToEdgeInbox = location.pathname === '/inbox';
   const [flags, setFlags] = React.useState<{
     followupInbox?: boolean;
     opsDashboard?: boolean;
@@ -118,6 +119,14 @@ export default function RootRoute(): React.ReactElement {
       window.clearInterval(interval);
     };
   }, []);
+
+  if (isEdgeToEdgeInbox) {
+    return (
+      <div {...stylex.props(layout.page)}>
+        <Outlet />
+      </div>
+    );
+  }
 
   return (
     <div {...stylex.props(layout.page)}>
