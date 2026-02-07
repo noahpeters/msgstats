@@ -59,6 +59,22 @@ export default {
       upgrade: request.headers.get('Upgrade'),
     });
 
+    if (url.pathname === '/build-info.json') {
+      try {
+        const assetResponse = await env.ASSETS.fetch(request);
+        if (!assetResponse.ok) return assetResponse;
+        const headers = new Headers(assetResponse.headers);
+        headers.set('cache-control', 'no-store');
+        return new Response(assetResponse.body, {
+          status: assetResponse.status,
+          headers,
+        });
+      } catch (error) {
+        console.error(error);
+        return new Response('Not Found', { status: 404 });
+      }
+    }
+
     if (url.pathname === '/sync/runs/subscribe') {
       // auth gate only
       const cookie = request.headers.get('cookie') ?? '';

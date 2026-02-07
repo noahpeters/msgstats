@@ -761,7 +761,7 @@ export default function OpsDashboard(): React.ReactElement {
         <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
           <h2 style={{ margin: 0 }}>User feature flags</h2>
           <p {...stylex.props(layout.note)}>
-            Per-user overrides for Feature flags.
+            Per-user overrides for Feature flags. blah blah
           </p>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button

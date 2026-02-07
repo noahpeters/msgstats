@@ -89,6 +89,36 @@ export default function RootRoute(): React.ReactElement {
     })();
   }, []);
 
+  React.useEffect(() => {
+    const host = window.location.hostname;
+    if (!(host === 'localhost' || host === '127.0.0.1')) return;
+    let active = true;
+    let lastStamp: string | null = null;
+    const check = async () => {
+      try {
+        const res = await fetch(`/build-info.json?t=${Date.now()}`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { ts?: number; builtAt?: string };
+        const next = data?.builtAt ?? (data?.ts ? String(data.ts) : null);
+        if (!next) return;
+        if (lastStamp && lastStamp !== next && active) {
+          window.location.reload();
+        }
+        lastStamp = next;
+      } catch {
+        // ignore
+      }
+    };
+    const interval = window.setInterval(check, 1000);
+    void check();
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
   return (
     <div {...stylex.props(layout.page)}>
       <div {...stylex.props(layout.shell)}>
