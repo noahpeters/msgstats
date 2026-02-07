@@ -5,7 +5,6 @@ export default [
     index('routes/dashboard.tsx'),
     route('inbox', 'routes/inbox.tsx'),
     route('inbox/follow-up', 'routes/inbox-follow-up.tsx'),
-    route('inbox/templates', 'routes/inbox-templates.tsx'),
     route('ops-dashboard', 'routes/ops-dashboard.tsx'),
     route('reports', 'routes/reports.tsx'),
     route('terms', 'routes/terms.tsx'),

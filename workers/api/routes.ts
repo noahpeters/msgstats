@@ -1600,27 +1600,17 @@ export function registerRoutes(deps: any) {
     if (!(await isFollowupInboxEnabledForUser(env, userId))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
-    const url = new URL(req.url);
-    const assetId = url.searchParams.get('assetId')?.trim() || null;
-    let query = `SELECT id, asset_id as assetId, title, body, created_at as createdAt, updated_at as updatedAt
+    const query = `SELECT id, title, body, created_at as createdAt, updated_at as updatedAt
                FROM saved_responses
-               WHERE user_id = ?`;
-    const bindings: unknown[] = [userId];
-    if (assetId) {
-      query += ' AND (asset_id = ? OR asset_id IS NULL)';
-      bindings.push(assetId);
-    }
-    query += ' ORDER BY updated_at DESC';
-    const rows = await env.DB.prepare(query)
-      .bind(...bindings)
-      .all<{
-        id: string;
-        assetId: string | null;
-        title: string;
-        body: string;
-        createdAt: string;
-        updatedAt: string;
-      }>();
+               WHERE user_id = ?
+               ORDER BY updated_at DESC`;
+    const rows = await env.DB.prepare(query).bind(userId).all<{
+      id: string;
+      title: string;
+      body: string;
+      createdAt: string;
+      updatedAt: string;
+    }>();
     return json({ templates: rows.results ?? [] });
   });
 
@@ -1635,7 +1625,6 @@ export function registerRoutes(deps: any) {
     const body = await readJson<{
       title?: string;
       body?: string;
-      assetId?: string | null;
     }>(req);
     const title = body?.title?.trim();
     const text = body?.body?.trim();
@@ -1649,9 +1638,9 @@ export function registerRoutes(deps: any) {
      (id, user_id, asset_id, title, body, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(id, userId, body?.assetId ?? null, title, text, now, now)
+      .bind(id, userId, null, title, text, now, now)
       .run();
-    return json({ id, title, body: text, assetId: body?.assetId ?? null });
+    return json({ id, title, body: text });
   });
 
   addRoute(
@@ -1672,7 +1661,6 @@ export function registerRoutes(deps: any) {
       const body = await readJson<{
         title?: string;
         body?: string;
-        assetId?: string | null;
       }>(req);
       const title = body?.title?.trim();
       const text = body?.body?.trim();
@@ -1685,13 +1673,12 @@ export function registerRoutes(deps: any) {
      SET title = ?, body = ?, asset_id = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
       )
-        .bind(title, text, body?.assetId ?? null, now, templateId, userId)
+        .bind(title, text, null, now, templateId, userId)
         .run();
       return json({
         id: templateId,
         title,
         body: text,
-        assetId: body?.assetId ?? null,
       });
     },
   );

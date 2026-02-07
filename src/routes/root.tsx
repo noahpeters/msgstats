@@ -163,15 +163,6 @@ export default function RootRoute(): React.ReactElement {
               >
                 Inbox
               </Link>
-              <Link
-                to="/inbox/templates"
-                {...stylex.props(
-                  layout.navLink,
-                  location.pathname === '/inbox/templates' && activeLink.active,
-                )}
-              >
-                Templates
-              </Link>
             </>
           ) : null}
           <Link

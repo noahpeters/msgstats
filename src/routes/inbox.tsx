@@ -105,7 +105,6 @@ type Template = {
   id: string;
   title: string;
   body: string;
-  assetId: string | null;
 };
 
 type AssetsResponse = {
@@ -211,14 +210,25 @@ const buildInboxWsUrl = () => {
 };
 
 type ViewportMode = 'small' | 'medium' | 'wide';
+type InspectorTab = 'conversation' | 'templates';
 
 const INSPECTOR_STORAGE_KEY = 'msgstats:inbox:inspector-open';
+const INSPECTOR_TAB_STORAGE_KEY = 'inbox.inspector.activeTab';
 
 const getViewportMode = (): ViewportMode => {
   if (typeof window === 'undefined') return 'wide';
   if (window.innerWidth < 960) return 'small';
   if (window.innerWidth < 1280) return 'medium';
   return 'wide';
+};
+
+const getStoredInspectorTab = (): InspectorTab => {
+  if (typeof window === 'undefined') return 'conversation';
+  const value = window.localStorage.getItem(INSPECTOR_TAB_STORAGE_KEY);
+  if (value === 'templates' || value === 'conversation') {
+    return value;
+  }
+  return 'conversation';
 };
 
 export default function Inbox(): React.ReactElement {
@@ -261,19 +271,32 @@ export default function Inbox(): React.ReactElement {
     messageText: string | null;
     ai: AiMeta;
   } | null>(null);
-  const [viewportMode, setViewportMode] = React.useState<ViewportMode>(() =>
-    getViewportMode(),
-  );
-  const [inspectorOpen, setInspectorOpen] = React.useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    return localStorage.getItem(INSPECTOR_STORAGE_KEY) !== '0';
-  });
+  const [viewportMode, setViewportMode] = React.useState<ViewportMode>('wide');
+  const [inspectorOpen, setInspectorOpen] = React.useState<boolean>(true);
   const [conversationDrawerOpen, setConversationDrawerOpen] =
     React.useState(false);
+  const [inspectorTab, setInspectorTab] =
+    React.useState<InspectorTab>('conversation');
+  const [templateMode, setTemplateMode] = React.useState<'list' | 'create'>(
+    'list',
+  );
+  const [templateTitle, setTemplateTitle] = React.useState('');
+  const [templateBody, setTemplateBody] = React.useState('');
+  const [templateError, setTemplateError] = React.useState<string | null>(null);
+  const [templateStatus, setTemplateStatus] = React.useState<string | null>(
+    null,
+  );
+  const [templateSaving, setTemplateSaving] = React.useState(false);
   const inspectorToggleRef = React.useRef<HTMLButtonElement | null>(null);
   const inspectorDrawerRef = React.useRef<HTMLDivElement | null>(null);
   const conversationDrawerRef = React.useRef<HTMLDivElement | null>(null);
   const messageTimelineRef = React.useRef<HTMLDivElement | null>(null);
+  const composerTextAreaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const useTemplateSelectionRef = React.useRef<{
+    start: number;
+    end: number;
+  } | null>(null);
+  const useTemplateFromComposerFocusRef = React.useRef(false);
   const inspectorWasOpenRef = React.useRef(inspectorOpen);
   const showAiErrors =
     typeof window !== 'undefined' &&
@@ -445,6 +468,9 @@ export default function Inbox(): React.ReactElement {
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
+    setViewportMode(getViewportMode());
+    setInspectorOpen(localStorage.getItem(INSPECTOR_STORAGE_KEY) !== '0');
+    setInspectorTab(getStoredInspectorTab());
     const onResize = () => setViewportMode(getViewportMode());
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
@@ -454,6 +480,11 @@ export default function Inbox(): React.ReactElement {
     if (typeof window === 'undefined') return;
     localStorage.setItem(INSPECTOR_STORAGE_KEY, inspectorOpen ? '1' : '0');
   }, [inspectorOpen]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(INSPECTOR_TAB_STORAGE_KEY, inspectorTab);
+  }, [inspectorTab]);
 
   React.useEffect(() => {
     if (viewportMode === 'wide') {
@@ -558,6 +589,75 @@ export default function Inbox(): React.ReactElement {
     }
   };
 
+  const handleUseTemplate = (template: Template) => {
+    setTemplateError(null);
+    const insertion = template.body.trim();
+    if (!insertion) return;
+    const fromComposerFocus = useTemplateFromComposerFocusRef.current;
+    const selection = useTemplateSelectionRef.current;
+    setComposerText((previous) => {
+      if (fromComposerFocus && selection) {
+        const start = Math.max(0, Math.min(selection.start, previous.length));
+        const end = Math.max(start, Math.min(selection.end, previous.length));
+        const next = `${previous.slice(0, start)}${insertion}${previous.slice(end)}`;
+        const caret = start + insertion.length;
+        window.requestAnimationFrame(() => {
+          const node = composerTextAreaRef.current;
+          if (!node) return;
+          node.focus();
+          node.setSelectionRange(caret, caret);
+        });
+        return next;
+      }
+      const next = previous
+        ? `${previous}${previous.endsWith('\n') ? '' : '\n'}${insertion}`
+        : insertion;
+      return next;
+    });
+    useTemplateFromComposerFocusRef.current = false;
+    useTemplateSelectionRef.current = null;
+    setTemplateStatus('Template inserted.');
+  };
+
+  const resetTemplateCreate = () => {
+    setTemplateTitle('');
+    setTemplateBody('');
+    setTemplateError(null);
+  };
+
+  const handleSaveTemplate = async () => {
+    setTemplateError(null);
+    setTemplateStatus(null);
+    if (!templateTitle.trim() || !templateBody.trim()) {
+      setTemplateError('Title and body are required.');
+      return;
+    }
+    setTemplateSaving(true);
+    try {
+      const response = await fetch('/api/inbox/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: templateTitle.trim(),
+          body: templateBody.trim(),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to save template.');
+      }
+      await loadTemplates();
+      setTemplateStatus('Template saved.');
+      setTemplateMode('list');
+      resetTemplateCreate();
+    } catch (error) {
+      setTemplateError(
+        error instanceof Error ? error.message : 'Failed to save template.',
+      );
+    } finally {
+      setTemplateSaving(false);
+    }
+  };
+
   const handleOutcome = async (outcome: 'converted' | 'lost' | 'unknown') => {
     if (!selectedId) return;
     const response = await fetch(
@@ -648,6 +748,7 @@ export default function Inbox(): React.ReactElement {
   const latestReasons = detail?.stateEvents?.length
     ? detail.stateEvents[detail.stateEvents.length - 1]?.reasons ?? []
     : [];
+
   const conversationList = (
     <ul {...stylex.props(inboxStyles.list)}>
       {conversations.length === 0 ? (
@@ -688,14 +789,20 @@ export default function Inbox(): React.ReactElement {
     </ul>
   );
 
-  const inspectorContent = (
-    <div {...stylex.props(inboxStyles.metaScroll)}>
+  const conversationInspectorPanel = (
+    <div
+      id="inbox-inspector-conversation-panel"
+      role="tabpanel"
+      aria-labelledby="inbox-inspector-tab-conversation"
+      hidden={inspectorTab !== 'conversation'}
+      {...stylex.props(inboxStyles.panelScroll)}
+    >
       {!detail ? (
-        <span {...stylex.props(layout.note)}>
-          Select a conversation to inspect metadata.
-        </span>
+        <div {...stylex.props(inboxStyles.emptyState)}>
+          Select a conversation to view details.
+        </div>
       ) : (
-        <>
+        <div {...stylex.props(inboxStyles.metaScroll)}>
           <div {...stylex.props(inboxStyles.detailCard)}>
             <h3 style={{ margin: 0 }}>Conversation State</h3>
             <div>
@@ -873,8 +980,184 @@ export default function Inbox(): React.ReactElement {
               </button>
             </div>
           ) : null}
-        </>
+        </div>
       )}
+    </div>
+  );
+
+  const templatesInspectorPanel = (
+    <div
+      id="inbox-inspector-templates-panel"
+      role="tabpanel"
+      aria-labelledby="inbox-inspector-tab-templates"
+      hidden={inspectorTab !== 'templates'}
+      {...stylex.props(inboxStyles.panelScroll)}
+    >
+      <div {...stylex.props(inboxStyles.metaScroll)}>
+        <div {...stylex.props(inboxStyles.templatesHeaderRow)}>
+          <h3 style={{ margin: 0 }}>Templates</h3>
+          {templateMode === 'list' ? (
+            <button
+              type="button"
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => {
+                setTemplateMode('create');
+                setTemplateError(null);
+              }}
+            >
+              New template
+            </button>
+          ) : (
+            <button
+              type="button"
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => {
+                setTemplateMode('list');
+                resetTemplateCreate();
+              }}
+            >
+              Back to list
+            </button>
+          )}
+        </div>
+
+        {templateError ? (
+          <div {...stylex.props(inboxStyles.templateError)}>
+            {templateError}
+          </div>
+        ) : null}
+        {templateStatus ? (
+          <div {...stylex.props(inboxStyles.templateStatus)}>
+            {templateStatus}
+          </div>
+        ) : null}
+
+        {templateMode === 'create' ? (
+          <div {...stylex.props(inboxStyles.detailCard)}>
+            <label {...stylex.props(inboxStyles.fieldLabel)}>
+              Title
+              <input
+                {...stylex.props(inboxStyles.templateInput)}
+                value={templateTitle}
+                onChange={(event) => setTemplateTitle(event.target.value)}
+                placeholder="Template title"
+              />
+            </label>
+            <label {...stylex.props(inboxStyles.fieldLabel)}>
+              Body
+              <textarea
+                {...stylex.props(inboxStyles.templateTextArea)}
+                value={templateBody}
+                onChange={(event) => setTemplateBody(event.target.value)}
+                placeholder="Template message"
+              />
+            </label>
+            <div {...stylex.props(inboxStyles.actionsRow)}>
+              <button
+                type="button"
+                {...stylex.props(layout.button)}
+                disabled={templateSaving}
+                onClick={handleSaveTemplate}
+              >
+                {templateSaving ? 'Saving…' : 'Save template'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {!selectedId ? (
+              <div {...stylex.props(inboxStyles.emptyState)}>
+                Select a conversation to send templates.
+              </div>
+            ) : null}
+            <div {...stylex.props(inboxStyles.templateList)}>
+              {templates.length === 0 ? (
+                <div {...stylex.props(inboxStyles.emptyState)}>
+                  No templates yet.
+                </div>
+              ) : null}
+              {templates.map((template) => (
+                <div
+                  key={template.id}
+                  {...stylex.props(inboxStyles.detailCard)}
+                >
+                  <div {...stylex.props(inboxStyles.templateRowHeader)}>
+                    <strong>{template.title}</strong>
+                  </div>
+                  <div {...stylex.props(inboxStyles.templatePreview)}>
+                    {template.body}
+                  </div>
+                  <div {...stylex.props(inboxStyles.actionsRow)}>
+                    <button
+                      type="button"
+                      {...stylex.props(layout.button)}
+                      disabled={!selectedId}
+                      onMouseDown={() => {
+                        const node = composerTextAreaRef.current;
+                        const focusedInComposer =
+                          Boolean(node) && document.activeElement === node;
+                        useTemplateFromComposerFocusRef.current =
+                          focusedInComposer;
+                        useTemplateSelectionRef.current =
+                          focusedInComposer && node
+                            ? {
+                                start: node.selectionStart ?? 0,
+                                end: node.selectionEnd ?? 0,
+                              }
+                            : null;
+                      }}
+                      onClick={() => handleUseTemplate(template)}
+                    >
+                      Use
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const inspectorContent = (
+    <div {...stylex.props(inboxStyles.inspectorContainer)}>
+      <div
+        {...stylex.props(inboxStyles.tabBar)}
+        role="tablist"
+        aria-label="Inspector tabs"
+      >
+        <button
+          id="inbox-inspector-tab-conversation"
+          type="button"
+          role="tab"
+          aria-selected={inspectorTab === 'conversation'}
+          aria-controls="inbox-inspector-conversation-panel"
+          {...stylex.props(
+            inboxStyles.tab,
+            inspectorTab === 'conversation' && inboxStyles.tabSelected,
+          )}
+          onClick={() => setInspectorTab('conversation')}
+        >
+          Conversation
+        </button>
+        <button
+          id="inbox-inspector-tab-templates"
+          type="button"
+          role="tab"
+          aria-selected={inspectorTab === 'templates'}
+          aria-controls="inbox-inspector-templates-panel"
+          {...stylex.props(
+            inboxStyles.tab,
+            inspectorTab === 'templates' && inboxStyles.tabSelected,
+          )}
+          onClick={() => setInspectorTab('templates')}
+        >
+          Templates
+        </button>
+      </div>
+      {conversationInspectorPanel}
+      {templatesInspectorPanel}
     </div>
   );
 
@@ -907,8 +1190,6 @@ export default function Inbox(): React.ReactElement {
         : {
             gridTemplateColumns: 'minmax(0, 1fr)',
           };
-  const isWideCollapsedInspector = viewportMode === 'wide' && !inspectorOpen;
-
   return (
     <div {...stylex.props(inboxStyles.root)}>
       <header {...stylex.props(inboxStyles.header)}>
@@ -931,16 +1212,6 @@ export default function Inbox(): React.ReactElement {
               )}
             >
               Inbox
-            </Link>
-            <Link
-              to="/inbox/templates"
-              {...stylex.props(
-                inboxStyles.pageTab,
-                location.pathname === '/inbox/templates' &&
-                  inboxStyles.pageTabActive,
-              )}
-            >
-              Templates
             </Link>
             <Link
               to="/reports"
@@ -966,21 +1237,6 @@ export default function Inbox(): React.ReactElement {
             ) : null}
           </nav>
           <div {...stylex.props(inboxStyles.controlsGroup)}>
-            {viewportMode !== 'wide' ? (
-              <button
-                type="button"
-                ref={inspectorToggleRef}
-                {...stylex.props(
-                  inboxStyles.toggleButton,
-                  inspectorOpen && inboxStyles.toggleButtonActive,
-                )}
-                onClick={() => setInspectorOpen((prev) => !prev)}
-                aria-expanded={inspectorOpen}
-                aria-controls="inbox-inspector-drawer"
-              >
-                Inspector
-              </button>
-            ) : null}
             <button
               type="button"
               {...stylex.props(
@@ -995,6 +1251,7 @@ export default function Inbox(): React.ReactElement {
             </button>
           </div>
         </div>
+        <div {...stylex.props(inboxStyles.horizontalDivider)} />
 
         <div {...stylex.props(inboxStyles.toolbarRow)}>
           {[
@@ -1097,38 +1354,40 @@ export default function Inbox(): React.ReactElement {
             inboxStyles.messagesPane,
           )}
         >
-          {isWideCollapsedInspector ? (
-            <button
-              type="button"
-              ref={inspectorToggleRef}
-              {...stylex.props(
-                inboxStyles.toggleButton,
-                inboxStyles.floatingInspector,
-              )}
-              onClick={() => setInspectorOpen(true)}
-              aria-expanded={inspectorOpen}
-              aria-controls="inbox-inspector-drawer"
-            >
-              Inspector
-            </button>
-          ) : null}
-
           <div {...stylex.props(inboxStyles.section)}>
-            {!detail ? (
-              <span {...stylex.props(layout.note)}>
-                Select a conversation to inspect its state and message history.
-              </span>
-            ) : (
-              <>
-                <h3 style={{ margin: 0 }}>
-                  {detail.conversation.participantName}
-                </h3>
-                <p {...stylex.props(layout.note)}>
-                  {detail.conversation.participantHandle ?? '—'} ·{' '}
-                  {detail.conversation.assetName ?? 'Unassigned asset'}
-                </p>
-              </>
-            )}
+            <div {...stylex.props(inboxStyles.messageHeaderRow)}>
+              <div {...stylex.props(inboxStyles.messageHeaderInfo)}>
+                {!detail ? (
+                  <span {...stylex.props(layout.note)}>
+                    Select a conversation to inspect its state and message
+                    history.
+                  </span>
+                ) : (
+                  <>
+                    <h3 style={{ margin: 0 }}>
+                      {detail.conversation.participantName}
+                    </h3>
+                    <p {...stylex.props(layout.note)}>
+                      {detail.conversation.participantHandle ?? '—'} ·{' '}
+                      {detail.conversation.assetName ?? 'Unassigned asset'}
+                    </p>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                ref={inspectorToggleRef}
+                {...stylex.props(
+                  inboxStyles.toggleButton,
+                  inspectorOpen && inboxStyles.toggleButtonActive,
+                )}
+                onClick={() => setInspectorOpen((prev) => !prev)}
+                aria-expanded={inspectorOpen}
+                aria-controls="inbox-inspector-drawer"
+              >
+                Inspector
+              </button>
+            </div>
           </div>
 
           <div
@@ -1241,38 +1500,22 @@ export default function Inbox(): React.ReactElement {
           {detail ? (
             <div {...stylex.props(inboxStyles.composer)}>
               <div {...stylex.props(inboxStyles.actionsRow)}>
-                <select
-                  {...stylex.props(inboxStyles.select)}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (!value) return;
-                    const selected = templates.find(
-                      (template) => template.id === value,
-                    );
-                    if (selected) {
-                      setComposerText((prev) =>
-                        prev ? `${prev}\n${selected.body}` : selected.body,
-                      );
-                    }
-                    event.currentTarget.value = '';
-                  }}
-                >
-                  <option value="">Insert saved response</option>
-                  {templates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.title}
-                    </option>
-                  ))}
-                </select>
                 {status ? (
                   <span {...stylex.props(layout.note)}>{status}</span>
                 ) : null}
               </div>
               <textarea
+                ref={composerTextAreaRef}
                 {...stylex.props(inboxStyles.textarea)}
                 placeholder="Write a reply"
                 value={composerText}
                 onChange={(event) => setComposerText(event.target.value)}
+                onSelect={(event) => {
+                  useTemplateSelectionRef.current = {
+                    start: event.currentTarget.selectionStart ?? 0,
+                    end: event.currentTarget.selectionEnd ?? 0,
+                  };
+                }}
               />
               <div {...stylex.props(inboxStyles.actionsRow)}>
                 <button
@@ -1288,7 +1531,9 @@ export default function Inbox(): React.ReactElement {
         </main>
 
         {viewportMode === 'wide' && inspectorOpen ? (
-          <aside {...stylex.props(inboxStyles.pane)}>{inspectorContent}</aside>
+          <aside {...stylex.props(inboxStyles.pane, inboxStyles.inspectorPane)}>
+            {inspectorContent}
+          </aside>
         ) : null}
       </div>
 
@@ -1351,7 +1596,14 @@ export default function Inbox(): React.ReactElement {
             Close
           </button>
         </div>
-        <div {...stylex.props(inboxStyles.drawerBody)}>{inspectorContent}</div>
+        <div
+          {...stylex.props(
+            inboxStyles.drawerBody,
+            inboxStyles.inspectorDrawerBody,
+          )}
+        >
+          {inspectorContent}
+        </div>
       </div>
 
       <footer {...stylex.props(inboxStyles.footer)}>
