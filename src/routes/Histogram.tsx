@@ -38,27 +38,38 @@ export default function Histogram({
           const xValue = index + 1;
           const count = histogram[xValue] ?? 0;
           const barHeight = maxY > 0 ? yScale(count) : 0;
+          const slotWidth =
+            index === NUM_BARS - 1 ? BAR_WIDTH : BAR_WIDTH + GAP;
           const x = index * (BAR_WIDTH + GAP);
           const y = height - barHeight;
           const label = xValue === NUM_BARS ? '≥30' : String(xValue);
           return (
-            <rect
-              key={xValue}
-              x={x}
-              y={y}
-              width={BAR_WIDTH}
-              height={barHeight}
-              fill="#888"
-              aria-label={`${label} messages: ${count} conversations`}
-              onMouseEnter={(event) =>
-                show(event, {
-                  title: label,
-                  lines: [`${label} messages: ${count} conversations`],
-                })
-              }
-              onMouseMove={move}
-              onMouseLeave={hide}
-            />
+            <g key={xValue}>
+              <rect
+                x={x}
+                y={0}
+                width={slotWidth}
+                height={height}
+                fill="transparent"
+                aria-label={`${label} messages: ${count} conversations`}
+                onMouseEnter={(event) =>
+                  show(event, {
+                    title: label,
+                    lines: [`${label} messages: ${count} conversations`],
+                  })
+                }
+                onMouseMove={move}
+                onMouseLeave={hide}
+              />
+              <rect
+                x={x}
+                y={y}
+                width={BAR_WIDTH}
+                height={barHeight}
+                fill="#888"
+                pointerEvents="none"
+              />
+            </g>
           );
         })}
       </svg>

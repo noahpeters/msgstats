@@ -2,6 +2,8 @@ import * as React from 'react';
 import * as stylex from '@stylexjs/stylex';
 import { useOutletContext } from 'react-router';
 import { layout } from '../app/styles';
+import { ChartTooltip } from '../components/charts/ChartTooltip';
+import { useChartTooltip } from '../components/charts/useChartTooltip';
 import Histogram from './Histogram';
 import type { AppShellOutletContext } from './root';
 
@@ -19,6 +21,20 @@ type ReportRow = {
 type PageAsset = {
   id: string;
   name: string;
+};
+
+const COLUMN_DEFINITIONS: Record<string, string> = {
+  Period: 'Reporting bucket start date.',
+  Total: 'Total conversations in the period.',
+  Productive:
+    'Conversations with customer >=3 and business >=3 messages, excluding highly productive.',
+  'Highly productive':
+    'Conversations with customer >=5 and business >=5 messages.',
+  'Price given': "Conversations where any business message includes '$'.",
+  'Low response after price':
+    'Conversations where customer sent <=2 messages after first price message.',
+  'Qualified rate': '(productive + highly productive) / total conversations.',
+  Distribution: 'Spark histogram of conversation message-count distribution.',
 };
 
 async function fetchReport(
@@ -115,8 +131,32 @@ const reportStyles = stylex.create({
     borderBottom: '1px solid rgba(12, 27, 26, 0.14)',
     padding: '8px 8px 10px 0',
     color: '#284b63',
-    whiteSpace: 'nowrap',
+    whiteSpace: 'normal',
+    lineHeight: 1.2,
     fontWeight: 600,
+    verticalAlign: 'top',
+  },
+  tableHeadLabel: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '6px',
+    minWidth: 0,
+  },
+  tableHeadText: {
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+    flex: 1,
+  },
+  infoTrigger: {
+    flexShrink: 0,
+    width: '16px',
+    height: '16px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'help',
+    outline: 'none',
   },
   tableRow: {
     borderBottom: '1px solid rgba(12, 27, 26, 0.08)',
@@ -177,6 +217,92 @@ function ReportTable({
   separated?: boolean;
 }) {
   const maxY = React.useMemo(() => computeMaxY(rows), [rows]);
+  const { tooltip, show, move, hide } = useChartTooltip();
+
+  React.useEffect(() => {
+    if (!tooltip.visible) {
+      return;
+    }
+    const handleMouseMove = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element) {
+        if (target.closest('[data-report-info-trigger="true"]')) {
+          return;
+        }
+      }
+      hide();
+    };
+    window.addEventListener('mousemove', handleMouseMove, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+    };
+  }, [hide, tooltip.visible]);
+
+  const InfoIcon = ({ label }: { label: string }) => (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      role="img"
+      aria-label={label}
+    >
+      <circle cx="8" cy="8" r="8" fill="#7b8794" />
+      <text
+        x="8"
+        y="11"
+        textAnchor="middle"
+        fill="#ffffff"
+        fontSize="10"
+        fontWeight="700"
+        fontFamily='"IBM Plex Sans", "Helvetica", sans-serif'
+      >
+        i
+      </text>
+    </svg>
+  );
+  const showDefinitionFromFocus = (
+    event: React.FocusEvent<HTMLSpanElement>,
+    label: keyof typeof COLUMN_DEFINITIONS,
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    show(
+      {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      },
+      {
+        title: label,
+        lines: [COLUMN_DEFINITIONS[label]!],
+      },
+    );
+  };
+  const renderHead = (label: keyof typeof COLUMN_DEFINITIONS) => (
+    <span {...stylex.props(reportStyles.tableHeadLabel)}>
+      <span {...stylex.props(reportStyles.tableHeadText)}>{label}</span>
+      <span
+        tabIndex={0}
+        role="img"
+        aria-label={`${label} definition`}
+        data-report-info-trigger="true"
+        {...stylex.props(reportStyles.infoTrigger)}
+        onMouseDown={(event) => {
+          event.preventDefault();
+        }}
+        onMouseEnter={(event) =>
+          show(event, {
+            title: label,
+            lines: [COLUMN_DEFINITIONS[label]!],
+          })
+        }
+        onMouseMove={move}
+        onMouseLeave={hide}
+        onFocus={(event) => showDefinitionFromFocus(event, label)}
+        onBlur={hide}
+      >
+        <InfoIcon label={`${label} definition`} />
+      </span>
+    </span>
+  );
 
   return (
     <section
@@ -186,7 +312,9 @@ function ReportTable({
       )}
     >
       <h2 {...stylex.props(reportStyles.sectionTitle)}>{title}</h2>
-      <p {...stylex.props(reportStyles.sectionNote)}>{subtitle}</p>
+      {subtitle ? (
+        <p {...stylex.props(reportStyles.sectionNote)}>{subtitle}</p>
+      ) : null}
       <div {...stylex.props(reportStyles.tableWrap)}>
         <table {...stylex.props(reportStyles.table)}>
           <colgroup>
@@ -195,24 +323,36 @@ function ReportTable({
             <col style={{ width: '90px' }} />
             <col style={{ width: '130px' }} />
             <col style={{ width: '90px' }} />
-            <col style={{ width: '150px' }} />
+            <col style={{ width: '190px' }} />
             <col style={{ width: '110px' }} />
             <col style={{ width: 'auto' }} />
           </colgroup>
           <thead>
             <tr {...stylex.props(reportStyles.tableRow)}>
-              <th {...stylex.props(reportStyles.tableHead)}>Period</th>
-              <th {...stylex.props(reportStyles.tableHead)}>Total</th>
-              <th {...stylex.props(reportStyles.tableHead)}>Productive</th>
               <th {...stylex.props(reportStyles.tableHead)}>
-                Highly productive
+                {renderHead('Period')}
               </th>
-              <th {...stylex.props(reportStyles.tableHead)}>Price given</th>
               <th {...stylex.props(reportStyles.tableHead)}>
-                Low response after price
+                {renderHead('Total')}
               </th>
-              <th {...stylex.props(reportStyles.tableHead)}>Qualified rate</th>
-              <th {...stylex.props(reportStyles.tableHead)}>Distribution</th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Productive')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Highly productive')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Price given')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Low response after price')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Qualified rate')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Distribution')}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -258,6 +398,7 @@ function ReportTable({
           </tbody>
         </table>
       </div>
+      <ChartTooltip tooltip={tooltip} />
     </section>
   );
 }
@@ -399,14 +540,10 @@ export default function ReportsRoute(): React.ReactElement {
       {actionError ? (
         <p {...stylex.props(reportStyles.error)}>{actionError}</p>
       ) : null}
-      <ReportTable
-        title="Weekly report"
-        subtitle="Productive: customer ≥3 and business ≥3 (excluding highly productive). Highly productive: customer ≥5 and business ≥5."
-        rows={weekly}
-      />
+      <ReportTable title="Weekly report" subtitle="" rows={weekly} />
       <ReportTable
         title="Monthly report"
-        subtitle="Price given: business message includes '$'. Low response after price: customer sent 2 or fewer messages after first price. Qualified rate = (productive + highly productive) / total."
+        subtitle=""
         rows={monthly}
         separated
       />

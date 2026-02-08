@@ -12,7 +12,10 @@ export function useChartTooltip() {
   });
 
   const show = React.useCallback(
-    (event: React.MouseEvent, data: { title: string; lines: string[] }) => {
+    (
+      event: { clientX: number; clientY: number },
+      data: { title: string; lines: string[] },
+    ) => {
       setTooltip({
         visible: true,
         x: event.clientX,
