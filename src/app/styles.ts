@@ -19,9 +19,9 @@ export const layout = stylex.create({
     fontFamily: '"DM Serif Display", "Georgia", serif',
   },
   shell: {
-    maxWidth: '1100px',
-    margin: '0 auto',
-    padding: '32px 24px 64px',
+    width: '100%',
+    margin: 0,
+    padding: '24px 24px 40px',
   },
   title: {
     fontSize: '42px',

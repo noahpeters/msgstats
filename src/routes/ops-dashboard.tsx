@@ -1,7 +1,7 @@
 import * as React from 'react';
 import * as d3 from 'd3';
 import * as stylex from '@stylexjs/stylex';
-import { layout, colors } from '../app/styles';
+import { layout } from '../app/styles';
 import { ChartTooltip } from '../components/charts/ChartTooltip';
 import { useChartTooltip } from '../components/charts/useChartTooltip';
 
@@ -108,27 +108,258 @@ type AppErrorMetrics = {
   }>;
 };
 
-const cardGridStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-  gap: '12px',
-};
+const opsStyles = stylex.create({
+  page: {
+    display: 'grid',
+    gap: '16px',
+  },
+  pageHeader: {
+    display: 'grid',
+    gap: '4px',
+  },
+  title: {
+    margin: 0,
+    fontSize: '30px',
+    lineHeight: 1.1,
+    letterSpacing: '-0.01em',
+    color: '#0c1b1a',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontWeight: 700,
+  },
+  subtitle: {
+    margin: 0,
+    fontSize: '13px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  statusLine: {
+    margin: 0,
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  section: {
+    display: 'grid',
+    gap: '10px',
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    borderRadius: '12px',
+    backgroundColor: '#ffffff',
+    padding: '12px',
+  },
+  sectionHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  sectionTitle: {
+    margin: 0,
+    fontSize: '17px',
+    color: '#0c1b1a',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontWeight: 700,
+  },
+  sectionActions: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap',
+  },
+  autoPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    borderRadius: '999px',
+    padding: '4px 9px',
+    fontSize: '11px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  metricGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(1, minmax(0, 1fr))',
+    gap: '10px',
+    '@media (min-width: 740px)': {
+      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    },
+    '@media (min-width: 1100px)': {
+      gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    },
+  },
+  healthGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(1, minmax(0, 1fr))',
+    gap: '10px',
+    '@media (min-width: 740px)': {
+      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    },
+  },
+  metricCard: {
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    borderRadius: '10px',
+    backgroundColor: '#ffffff',
+    padding: '12px',
+    display: 'grid',
+    gap: '4px',
+  },
+  metricLabel: {
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  metricValue: {
+    fontSize: '26px',
+    lineHeight: 1.1,
+    fontWeight: 700,
+    color: '#0c1b1a',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  metricSubtext: {
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  tableWrap: {
+    overflowX: 'auto',
+    width: '100%',
+  },
+  table: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontSize: '13px',
+    minWidth: '760px',
+  },
+  tableHead: {
+    textAlign: 'left',
+    borderBottom: '1px solid rgba(12, 27, 26, 0.14)',
+    paddingBottom: '8px',
+    color: '#284b63',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
+  },
+  tableRow: {
+    borderBottom: '1px solid rgba(12, 27, 26, 0.08)',
+  },
+  tableCell: {
+    padding: '10px 0',
+    color: '#0c1b1a',
+    verticalAlign: 'top',
+  },
+  chartSurface: {
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    borderRadius: '10px',
+    backgroundColor: '#ffffff',
+    padding: '10px',
+    display: 'grid',
+    gap: '6px',
+  },
+  chartHost: {
+    width: '100%',
+    minHeight: '170px',
+  },
+  panelGrid: {
+    display: 'grid',
+    gap: '10px',
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    '@media (min-width: 1200px)': {
+      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    },
+  },
+  panel: {
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    borderRadius: '10px',
+    backgroundColor: '#ffffff',
+    padding: '10px',
+    display: 'grid',
+    gap: '8px',
+  },
+  panelTitle: {
+    margin: 0,
+    fontSize: '14px',
+    color: '#0c1b1a',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontWeight: 700,
+  },
+  note: {
+    margin: 0,
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  errorBanner: {
+    border: '1px solid #fca5a5',
+    backgroundColor: '#fef2f2',
+    color: '#7f1d1d',
+    borderRadius: '10px',
+    padding: '10px 12px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+    fontSize: '13px',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  detailBlock: {
+    margin: 0,
+    padding: '8px',
+    borderRadius: '8px',
+    border: '1px solid rgba(12, 27, 26, 0.14)',
+    backgroundColor: '#f8fafc',
+    whiteSpace: 'pre-wrap',
+    fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, monospace',
+    fontSize: '11px',
+    lineHeight: 1.45,
+    maxHeight: '220px',
+    overflow: 'auto',
+  },
+});
 
-const metricCardStyle: React.CSSProperties = {
-  borderRadius: '14px',
-  border: '1px solid rgba(12, 27, 26, 0.1)',
-  backgroundColor: '#ffffff',
-  padding: '14px',
-  display: 'grid',
-  gap: '6px',
-};
+function useContainerWidth(defaultWidth = 720) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = React.useState(defaultWidth);
 
-const chartWrapStyle: React.CSSProperties = {
-  padding: '12px',
-  borderRadius: '14px',
-  border: '1px solid rgba(12, 27, 26, 0.1)',
-  backgroundColor: '#ffffff',
-};
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = Math.floor(
+        entries[0]?.contentRect.width ?? defaultWidth,
+      );
+      if (nextWidth > 0) {
+        setWidth(nextWidth);
+      }
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, [defaultWidth]);
+
+  return { ref, width: Math.max(320, width) };
+}
+
+function MetricCard({
+  label,
+  value,
+  subtext,
+}: {
+  label: string;
+  value: string | number;
+  subtext?: string;
+}) {
+  return (
+    <div {...stylex.props(opsStyles.metricCard)}>
+      <span {...stylex.props(opsStyles.metricLabel)}>{label}</span>
+      <strong {...stylex.props(opsStyles.metricValue)}>{value}</strong>
+      {subtext ? (
+        <span {...stylex.props(opsStyles.metricSubtext)}>{subtext}</span>
+      ) : null}
+    </div>
+  );
+}
 
 const formatRelativeTime = (value: string | null) => {
   if (!value) {
@@ -189,6 +420,8 @@ export default function OpsDashboard(): React.ReactElement {
   const xAxisRef = React.useRef<SVGGElement | null>(null);
   const yAxisRef = React.useRef<SVGGElement | null>(null);
   const errorAxisRef = React.useRef<SVGGElement | null>(null);
+  const messagesChart = useContainerWidth(720);
+  const appErrorsChart = useContainerWidth(720);
 
   const loadSyncRuns = React.useCallback(async () => {
     setRunsError(null);
@@ -232,6 +465,44 @@ export default function OpsDashboard(): React.ReactElement {
     }
   }, []);
 
+  const loadOverview = React.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [summaryRes, pointsRes, metaRes, errorsRes] = await Promise.all([
+        fetch('/api/ops/summary', { cache: 'no-store' }),
+        fetch('/api/ops/messages-per-hour?hours=168', { cache: 'no-store' }),
+        fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
+        fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
+      ]);
+      if (!summaryRes.ok) {
+        throw new Error('Failed to load ops summary.');
+      }
+      if (!pointsRes.ok) {
+        throw new Error('Failed to load ops chart.');
+      }
+      if (!metaRes.ok) {
+        throw new Error('Failed to load Meta metrics.');
+      }
+      if (!errorsRes.ok) {
+        throw new Error('Failed to load app error metrics.');
+      }
+      const summaryData = (await summaryRes.json()) as OpsSummary;
+      const pointsData = (await pointsRes.json()) as { points: HourPoint[] };
+      const metaData = (await metaRes.json()) as MetaMetrics;
+      const errorsData = (await errorsRes.json()) as AppErrorMetrics;
+      setSummary(summaryData);
+      setPoints(pointsData.points ?? []);
+      setMetaMetrics(metaData);
+      setErrorMetrics(errorsData);
+      await Promise.all([loadSyncRuns(), loadAiRuns(), loadOpsUsers()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load ops.');
+    } finally {
+      setLoading(false);
+    }
+  }, [loadAiRuns, loadOpsUsers, loadSyncRuns]);
+
   const updateUserFlag = React.useCallback(
     async (userId: string, flag: string, value: boolean | null) => {
       setOpsUsersUpdating(userId);
@@ -260,88 +531,8 @@ export default function OpsDashboard(): React.ReactElement {
   );
 
   React.useEffect(() => {
-    let active = true;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const [summaryRes, pointsRes, metaRes, errorsRes] = await Promise.all([
-          fetch('/api/ops/summary', { cache: 'no-store' }),
-          fetch('/api/ops/messages-per-hour?hours=168', {
-            cache: 'no-store',
-          }),
-          fetch('/api/ops/metrics/meta?window=15m', { cache: 'no-store' }),
-          fetch('/api/ops/metrics/errors?window=60m', { cache: 'no-store' }),
-        ]);
-        if (!summaryRes.ok) {
-          throw new Error('Failed to load ops summary.');
-        }
-        if (!pointsRes.ok) {
-          throw new Error('Failed to load ops chart.');
-        }
-        if (!metaRes.ok) {
-          throw new Error('Failed to load Meta metrics.');
-        }
-        if (!errorsRes.ok) {
-          throw new Error('Failed to load app error metrics.');
-        }
-        const summaryData = (await summaryRes.json()) as OpsSummary;
-        const pointsData = (await pointsRes.json()) as { points: HourPoint[] };
-        const metaData = (await metaRes.json()) as MetaMetrics;
-        const errorsData = (await errorsRes.json()) as AppErrorMetrics;
-        if (active) {
-          setSummary(summaryData);
-          setPoints(pointsData.points ?? []);
-          setMetaMetrics(metaData);
-          setErrorMetrics(errorsData);
-          const runsRes = await fetch(
-            '/api/ops/sync-runs?status=active&limit=25',
-            { cache: 'no-store' },
-          );
-          if (runsRes.ok) {
-            const runsData = (await runsRes.json()) as { runs: SyncRun[] };
-            setSyncRuns(runsData.runs ?? []);
-          } else {
-            setRunsError('Failed to load sync runs.');
-          }
-          const aiRunsRes = await fetch('/api/ops/ai/runs?limit=20', {
-            cache: 'no-store',
-          });
-          if (aiRunsRes.ok) {
-            const aiRunsData = (await aiRunsRes.json()) as {
-              runs: AiRunSummary[];
-            };
-            setAiRuns(aiRunsData.runs ?? []);
-          } else {
-            setAiRunsError('Failed to load AI runs.');
-          }
-          const usersRes = await fetch('/api/ops/users?limit=50', {
-            cache: 'no-store',
-          });
-          if (usersRes.ok) {
-            const usersData = (await usersRes.json()) as {
-              users: OpsUser[];
-            };
-            setOpsUsers(usersData.users ?? []);
-          } else {
-            setOpsUsersError('Failed to load users.');
-          }
-        }
-      } catch (err) {
-        if (active) {
-          setError(err instanceof Error ? err.message : 'Failed to load ops.');
-        }
-      } finally {
-        if (active) {
-          setLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => {
-      active = false;
-    };
-  }, []);
+    void loadOverview();
+  }, [loadOverview]);
 
   React.useEffect(() => {
     const interval = window.setInterval(() => {
@@ -351,7 +542,7 @@ export default function OpsDashboard(): React.ReactElement {
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadSyncRuns, loadAiRuns]);
+  }, [loadAiRuns, loadSyncRuns]);
 
   const cancelRun = async (runId: string) => {
     const confirm = window.confirm('Cancel this sync run?');
@@ -380,11 +571,13 @@ export default function OpsDashboard(): React.ReactElement {
     setAiRunDetail(data.run ?? null);
   };
 
-  const width = 720;
-  const height = 200;
-  const margin = { top: 10, right: 12, bottom: 28, left: 44 };
-  const innerWidth = width - margin.left - margin.right;
-  const innerHeight = height - margin.top - margin.bottom;
+  const messagesChartHeight = 220;
+  const messagesMargin = { top: 10, right: 12, bottom: 28, left: 44 };
+  const messagesWidth = messagesChart.width;
+  const messagesInnerWidth =
+    messagesWidth - messagesMargin.left - messagesMargin.right;
+  const messagesInnerHeight =
+    messagesChartHeight - messagesMargin.top - messagesMargin.bottom;
 
   const parsedPoints = React.useMemo(
     () =>
@@ -406,16 +599,16 @@ export default function OpsDashboard(): React.ReactElement {
         ? [extent[0], extent[1]]
         : [new Date(), new Date()],
     )
-    .range([0, innerWidth]);
+    .range([0, Math.max(1, messagesInnerWidth)]);
   const yScale = d3
     .scaleLog()
     .domain([1, maxCount])
     .nice()
-    .range([innerHeight, 0]);
+    .range([messagesInnerHeight, 0]);
   const gridTicks = yScale.ticks(4);
   const barWidth = parsedPoints.length
-    ? Math.max(1, innerWidth / parsedPoints.length)
-    : innerWidth;
+    ? Math.max(1, messagesInnerWidth / parsedPoints.length)
+    : messagesInnerWidth;
 
   const appErrorMinutes = 60;
   const appErrorPoints = React.useMemo(() => {
@@ -437,11 +630,12 @@ export default function OpsDashboard(): React.ReactElement {
     });
   }, [errorMetrics]);
 
-  const errorWidth = 720;
-  const errorHeight = 140;
+  const appErrorsHeight = 165;
   const errorMargin = { top: 10, right: 12, bottom: 24, left: 44 };
+  const errorWidth = appErrorsChart.width;
   const errorInnerWidth = errorWidth - errorMargin.left - errorMargin.right;
-  const errorInnerHeight = errorHeight - errorMargin.top - errorMargin.bottom;
+  const errorInnerHeight =
+    appErrorsHeight - errorMargin.top - errorMargin.bottom;
   const errorMax = Math.max(1, ...appErrorPoints.map((point) => point.errors));
   const errorXScale = d3
     .scaleTime()
@@ -450,7 +644,7 @@ export default function OpsDashboard(): React.ReactElement {
         ? [appErrorPoints[0]?.minute ?? new Date(), new Date()]
         : [new Date(), new Date()],
     )
-    .range([0, errorInnerWidth]);
+    .range([0, Math.max(1, errorInnerWidth)]);
   const errorYScale = d3
     .scaleLinear()
     .domain([0, errorMax])
@@ -472,11 +666,15 @@ export default function OpsDashboard(): React.ReactElement {
           ? d3.timeDay.every(1)
           : d3.timeDay.every(2);
     const tickFormat =
-      hours <= 48 ? d3.timeFormat('%I %p') : d3.timeFormat('%b %d');
+      messagesInnerWidth < 560
+        ? d3.timeFormat('%b %d')
+        : hours <= 48
+          ? d3.timeFormat('%I %p')
+          : d3.timeFormat('%b %d');
     const xAxis = d3
       .axisBottom(xScale)
       .ticks(tickInterval)
-      .tickFormat(tickFormat);
+      .tickFormat(tickFormat as (d: Date) => string);
     const yAxis = d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('~s'));
     if (xAxisRef.current) {
       d3.select(xAxisRef.current).call(xAxis);
@@ -484,18 +682,28 @@ export default function OpsDashboard(): React.ReactElement {
     if (yAxisRef.current) {
       d3.select(yAxisRef.current).call(yAxis);
     }
-  }, [parsedPoints, xScale, yScale]);
+  }, [messagesInnerWidth, parsedPoints, xScale, yScale]);
 
   React.useEffect(() => {
     if (!appErrorPoints.length) {
       return;
     }
-    const tickFormat = d3.timeFormat('%I:%M %p');
-    const xAxis = d3.axisBottom(errorXScale).ticks(4).tickFormat(tickFormat);
+    const tickFormat =
+      errorInnerWidth < 560
+        ? d3.timeFormat('%H:%M')
+        : d3.timeFormat('%I:%M %p');
+    const tickCount = Math.max(
+      3,
+      Math.min(8, Math.floor(errorInnerWidth / 100)),
+    );
+    const xAxis = d3
+      .axisBottom(errorXScale)
+      .ticks(tickCount)
+      .tickFormat(tickFormat as (d: Date) => string);
     if (errorAxisRef.current) {
       d3.select(errorAxisRef.current).call(xAxis);
     }
-  }, [appErrorPoints, errorXScale]);
+  }, [appErrorPoints, errorInnerWidth, errorXScale]);
 
   const hourFormatter = new Intl.DateTimeFormat('en', {
     month: 'short',
@@ -530,96 +738,101 @@ export default function OpsDashboard(): React.ReactElement {
   };
 
   return (
-    <div {...stylex.props(layout.page)}>
-      <div {...stylex.props(layout.shell)}>
-        <h1 {...stylex.props(layout.title)}>Ops dashboard</h1>
-        <p {...stylex.props(layout.subtitle)}>
+    <div {...stylex.props(opsStyles.page)}>
+      <section {...stylex.props(opsStyles.pageHeader)}>
+        <h1 {...stylex.props(opsStyles.title)}>Ops</h1>
+        <p {...stylex.props(opsStyles.subtitle)}>
           Operational counters and ingestion throughput.
         </p>
+        <p {...stylex.props(opsStyles.statusLine)}>
+          Last updated: {formatRelativeTime(summary?.updatedAt ?? null)}
+        </p>
+      </section>
 
-        {error ? <p style={{ color: colors.coral }}>{error}</p> : null}
-        {loading && !summary ? (
-          <p {...stylex.props(layout.note)}>Loading metrics…</p>
-        ) : null}
+      {error ? (
+        <section {...stylex.props(opsStyles.errorBanner)}>
+          <span>{error}</span>
+          <button
+            {...stylex.props(layout.ghostButton)}
+            onClick={() => void loadOverview()}
+          >
+            Retry
+          </button>
+        </section>
+      ) : null}
 
-        <div style={cardGridStyle}>
-          <div style={metricCardStyle}>
-            <span {...stylex.props(layout.note)}>Users</span>
-            <strong>{summary?.usersTotal ?? 0}</strong>
-          </div>
-          <div style={metricCardStyle}>
-            <span {...stylex.props(layout.note)}>Assets</span>
-            <strong>{summary?.assetsTotal ?? 0}</strong>
-          </div>
-          <div style={metricCardStyle}>
-            <span {...stylex.props(layout.note)}>Conversations</span>
-            <strong>{summary?.conversationsTotal ?? 0}</strong>
-          </div>
-          <div style={metricCardStyle}>
-            <span {...stylex.props(layout.note)}>Messages</span>
-            <strong>{summary?.messagesTotal ?? 0}</strong>
-          </div>
+      {loading && !summary ? (
+        <p {...stylex.props(opsStyles.note)}>Loading metrics…</p>
+      ) : null}
+
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>Core counters</h2>
         </div>
+        <div {...stylex.props(opsStyles.metricGrid)}>
+          <MetricCard label="Users" value={summary?.usersTotal ?? 0} />
+          <MetricCard label="Assets" value={summary?.assetsTotal ?? 0} />
+          <MetricCard
+            label="Conversations"
+            value={summary?.conversationsTotal ?? 0}
+          />
+          <MetricCard label="Messages" value={summary?.messagesTotal ?? 0} />
+        </div>
+      </section>
 
-        <div
-          style={{
-            marginTop: '18px',
-            display: 'grid',
-            gap: '8px',
-          }}
-        >
-          <h2 style={{ margin: 0 }}>Running syncs</h2>
-          <p {...stylex.props(layout.note)}>
-            Active sync runs and their start time. Cancel if stuck.
-          </p>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>Running syncs</h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <span {...stylex.props(opsStyles.autoPill)}>Auto: 15s</span>
             <button
               {...stylex.props(layout.ghostButton)}
-              onClick={() => loadSyncRuns()}
+              onClick={() => void loadSyncRuns()}
             >
               Refresh
             </button>
-            <span {...stylex.props(layout.note)}>
-              Auto-refreshes every 15s.
-            </span>
           </div>
-          {runsError ? (
-            <p style={{ color: colors.coral }}>{runsError}</p>
-          ) : null}
-          {syncRuns.length ? (
-            <table {...stylex.props(layout.table)}>
+        </div>
+        {runsError ? (
+          <p {...stylex.props(opsStyles.errorBanner)}>{runsError}</p>
+        ) : null}
+        {syncRuns.length ? (
+          <div {...stylex.props(opsStyles.tableWrap)}>
+            <table {...stylex.props(opsStyles.table)}>
               <thead>
-                <tr {...stylex.props(layout.tableRow)}>
-                  <th {...stylex.props(layout.tableHead)}>Run ID</th>
-                  <th {...stylex.props(layout.tableHead)}>User</th>
-                  <th {...stylex.props(layout.tableHead)}>Platform</th>
-                  <th {...stylex.props(layout.tableHead)}>Started</th>
-                  <th {...stylex.props(layout.tableHead)}>Status</th>
-                  <th {...stylex.props(layout.tableHead)}>Last error</th>
-                  <th {...stylex.props(layout.tableHead)}>Actions</th>
+                <tr {...stylex.props(opsStyles.tableRow)}>
+                  <th {...stylex.props(opsStyles.tableHead)}>Run ID</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>User</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Platform</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Started</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Status</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Last error</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {syncRuns.map((run) => (
-                  <tr key={run.id} {...stylex.props(layout.tableRow)}>
-                    <td {...stylex.props(layout.tableCell)}>
+                  <tr key={run.id} {...stylex.props(opsStyles.tableRow)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       <code>{run.id.slice(0, 8)}</code>
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       <code>{run.userId.slice(0, 8)}</code>
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>{run.platform}</td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      {run.platform}
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {new Date(run.startedAt).toLocaleString()}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>{run.status}</td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>{run.status}</td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.lastError ?? '—'}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       <button
                         {...stylex.props(layout.ghostButton)}
-                        onClick={() => cancelRun(run.id)}
+                        onClick={() => void cancelRun(run.id)}
                       >
                         Cancel
                       </button>
@@ -628,246 +841,158 @@ export default function OpsDashboard(): React.ReactElement {
                 ))}
               </tbody>
             </table>
-          ) : (
-            <p {...stylex.props(layout.note)}>No running syncs.</p>
-          )}
-        </div>
+          </div>
+        ) : (
+          <p {...stylex.props(opsStyles.note)}>No running syncs.</p>
+        )}
+      </section>
 
-        <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
-          <h2 style={{ margin: 0 }}>AI runs</h2>
-          <p {...stylex.props(layout.note)}>
-            Recent AI inference activity per sync run.
-          </p>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>AI runs</h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <span {...stylex.props(opsStyles.autoPill)}>Auto: 15s</span>
             <button
               {...stylex.props(layout.ghostButton)}
-              onClick={() => loadAiRuns()}
+              onClick={() => void loadAiRuns()}
             >
               Refresh
             </button>
-            <span {...stylex.props(layout.note)}>
-              Auto-refreshes every 15s.
-            </span>
           </div>
-          {aiRunsError ? (
-            <p style={{ color: colors.coral }}>{aiRunsError}</p>
-          ) : null}
-          {aiRuns.length ? (
-            <table {...stylex.props(layout.table)}>
+        </div>
+        {aiRunsError ? (
+          <p {...stylex.props(opsStyles.errorBanner)}>{aiRunsError}</p>
+        ) : null}
+        {aiRuns.length ? (
+          <div {...stylex.props(opsStyles.tableWrap)}>
+            <table {...stylex.props(opsStyles.table)}>
               <thead>
-                <tr {...stylex.props(layout.tableRow)}>
-                  <th {...stylex.props(layout.tableHead)}>Run ID</th>
-                  <th {...stylex.props(layout.tableHead)}>Started</th>
-                  <th {...stylex.props(layout.tableHead)}>Duration</th>
-                  <th {...stylex.props(layout.tableHead)}>Attempted</th>
-                  <th {...stylex.props(layout.tableHead)}>Succeeded</th>
-                  <th {...stylex.props(layout.tableHead)}>Failed</th>
-                  <th {...stylex.props(layout.tableHead)}>Top skip</th>
-                  <th {...stylex.props(layout.tableHead)}>Handoff</th>
-                  <th {...stylex.props(layout.tableHead)}>Deferred</th>
+                <tr {...stylex.props(opsStyles.tableRow)}>
+                  <th {...stylex.props(opsStyles.tableHead)}>Run ID</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Started</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Duration</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Attempted</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Succeeded</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Failed</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Top skip</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Handoff</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Deferred</th>
                 </tr>
               </thead>
               <tbody>
                 {aiRuns.map((run) => (
                   <tr
                     key={run.id}
-                    {...stylex.props(layout.tableRow)}
-                    onClick={() => handleAiRunSelect(run.id)}
+                    {...stylex.props(opsStyles.tableRow)}
+                    onClick={() => void handleAiRunSelect(run.id)}
                     style={{ cursor: 'pointer' }}
                   >
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       <code>{run.id.slice(0, 8)}</code>
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {new Date(run.startedAt).toLocaleString()}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.durationMs != null
                         ? `${Math.round(run.durationMs / 1000)}s`
                         : '—'}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.attempted ?? 0}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.succeeded ?? 0}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.failed ?? 0}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.skippedTop
                         ? `${run.stats.skippedTop.reason} (${run.stats.skippedTop.count})`
                         : '—'}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.results.handoff_true ?? 0}
                     </td>
-                    <td {...stylex.props(layout.tableCell)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
                       {run.stats?.results.deferred_true ?? 0}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          ) : (
-            <p {...stylex.props(layout.note)}>No AI runs yet.</p>
-          )}
-          {aiRunDetail ? (
-            <div {...stylex.props(layout.card)}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
+          </div>
+        ) : (
+          <p {...stylex.props(opsStyles.note)}>No AI runs yet.</p>
+        )}
+
+        {aiRunDetail ? (
+          <div {...stylex.props(opsStyles.panel)}>
+            <div {...stylex.props(opsStyles.sectionHeader)}>
+              <h3 {...stylex.props(opsStyles.panelTitle)}>
+                AI run {aiRunDetail.id.slice(0, 8)}
+              </h3>
+              <button
+                {...stylex.props(layout.ghostButton)}
+                onClick={() => setAiRunDetail(null)}
               >
-                <strong>AI run {aiRunDetail.id.slice(0, 8)}</strong>
-                <button
-                  {...stylex.props(layout.ghostButton)}
-                  onClick={() => setAiRunDetail(null)}
-                >
-                  Close
-                </button>
+                Close
+              </button>
+            </div>
+            <p {...stylex.props(opsStyles.note)}>
+              Status: {aiRunDetail.status} • Started:{' '}
+              {new Date(aiRunDetail.startedAt).toLocaleString()} • Duration:{' '}
+              {aiRunDetail.durationMs != null
+                ? `${Math.round(aiRunDetail.durationMs / 1000)}s`
+                : '—'}
+            </p>
+            <div {...stylex.props(opsStyles.panelGrid)}>
+              <div {...stylex.props(opsStyles.panel)}>
+                <h4 {...stylex.props(opsStyles.panelTitle)}>AI config</h4>
+                <pre {...stylex.props(opsStyles.detailBlock)}>
+                  {JSON.stringify(aiRunDetail.aiConfig ?? {}, null, 2)}
+                </pre>
               </div>
-              <div style={{ marginTop: '8px', display: 'grid', gap: '6px' }}>
-                <div>
-                  Status: {aiRunDetail.status} · Started:{' '}
-                  {new Date(aiRunDetail.startedAt).toLocaleString()}
-                </div>
-                <div>
-                  Duration:{' '}
-                  {aiRunDetail.durationMs != null
-                    ? `${Math.round(aiRunDetail.durationMs / 1000)}s`
-                    : '—'}
-                </div>
-                <div>
-                  <strong>AI config</strong>
-                  <pre style={{ whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(aiRunDetail.aiConfig ?? {}, null, 2)}
-                  </pre>
-                </div>
-                <div>
-                  <strong>AI stats</strong>
-                  <pre style={{ whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(aiRunDetail.aiStats ?? {}, null, 2)}
-                  </pre>
-                </div>
+              <div {...stylex.props(opsStyles.panel)}>
+                <h4 {...stylex.props(opsStyles.panelTitle)}>AI stats</h4>
+                <pre {...stylex.props(opsStyles.detailBlock)}>
+                  {JSON.stringify(aiRunDetail.aiStats ?? {}, null, 2)}
+                </pre>
               </div>
             </div>
-          ) : null}
-        </div>
-
-        <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
-          <h2 style={{ margin: 0 }}>User feature flags</h2>
-          <p {...stylex.props(layout.note)}>
-            Per-user overrides for Feature flags. blah blah
-          </p>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <button
-              {...stylex.props(layout.ghostButton)}
-              onClick={() => loadOpsUsers()}
-            >
-              Refresh
-            </button>
           </div>
-          {opsUsersError ? (
-            <p style={{ color: colors.coral }}>{opsUsersError}</p>
-          ) : null}
-          {opsUsers.length ? (
-            <table {...stylex.props(layout.table)}>
-              <thead>
-                <tr {...stylex.props(layout.tableRow)}>
-                  <th {...stylex.props(layout.tableHead)}>User</th>
-                  <th {...stylex.props(layout.tableHead)}>Assets</th>
-                  <th {...stylex.props(layout.tableHead)}>Followup inbox</th>
-                  <th {...stylex.props(layout.tableHead)}>Ops dashboard</th>
-                </tr>
-              </thead>
-              <tbody>
-                {opsUsers.map((user) => (
-                  <tr key={user.userId} {...stylex.props(layout.tableRow)}>
-                    <td {...stylex.props(layout.tableCell)}>
-                      <code>{user.userId.slice(0, 8)}</code>
-                    </td>
-                    <td {...stylex.props(layout.tableCell)}>
-                      {formatAssets(user.assets)}
-                    </td>
-                    <td {...stylex.props(layout.tableCell)}>
-                      <select
-                        value={readFlagValue(
-                          user.featureFlags,
-                          'FEATURE_FOLLOWUP_INBOX',
-                        )}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          void updateUserFlag(
-                            user.userId,
-                            'FEATURE_FOLLOWUP_INBOX',
-                            next === 'inherit' ? null : next === 'enabled',
-                          );
-                        }}
-                        disabled={opsUsersUpdating === user.userId}
-                      >
-                        <option value="inherit">Inherit</option>
-                        <option value="enabled">Enabled</option>
-                        <option value="disabled">Disabled</option>
-                      </select>
-                    </td>
-                    <td {...stylex.props(layout.tableCell)}>
-                      <select
-                        value={readFlagValue(
-                          user.featureFlags,
-                          'FEATURE_OPS_DASHBOARD',
-                        )}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          void updateUserFlag(
-                            user.userId,
-                            'FEATURE_OPS_DASHBOARD',
-                            next === 'inherit' ? null : next === 'enabled',
-                          );
-                        }}
-                        disabled={opsUsersUpdating === user.userId}
-                      >
-                        <option value="inherit">Inherit</option>
-                        <option value="enabled">Enabled</option>
-                        <option value="disabled">Disabled</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p {...stylex.props(layout.note)}>No users yet.</p>
-          )}
-        </div>
+        ) : null}
+      </section>
 
-        <div style={{ marginTop: '18px', display: 'grid', gap: '8px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <h2 style={{ margin: 0 }}>Messages per hour</h2>
-            <span {...stylex.props(layout.note)}>
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>Messages per hour</h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <span {...stylex.props(opsStyles.autoPill)}>
               Updated {formatRelativeTime(summary?.updatedAt ?? null)}
             </span>
           </div>
-          <div style={chartWrapStyle}>
+        </div>
+        <div {...stylex.props(opsStyles.chartSurface)}>
+          <div ref={messagesChart.ref} {...stylex.props(opsStyles.chartHost)}>
             <svg
               width="100%"
               height="220"
-              viewBox={`0 0 ${width} ${height}`}
+              viewBox={`0 0 ${messagesWidth} ${messagesChartHeight}`}
               role="img"
               aria-label="Messages per hour"
             >
-              <rect width={width} height={height} fill="#f8f5f2" rx="12" />
-              <g transform={`translate(${margin.left}, ${margin.top})`}>
+              <g
+                transform={`translate(${messagesMargin.left}, ${messagesMargin.top})`}
+              >
                 {gridTicks.map((tick) => {
                   const y = yScale(tick);
                   return (
                     <line
                       key={`grid-${tick}`}
                       x1={0}
-                      x2={innerWidth}
+                      x2={messagesInnerWidth}
                       y1={y}
                       y2={y}
                       stroke="#0f766e"
@@ -881,10 +1006,7 @@ export default function OpsDashboard(): React.ReactElement {
                   const clampedCount = Math.max(1, point.count);
                   const y = yScale(clampedCount);
                   const barHeight =
-                    point.count <= 0 ? 0 : Math.max(1, innerHeight - y);
-                  const label = `${hourFormatter.format(
-                    point.date,
-                  )}: ${point.count} messages`;
+                    point.count <= 0 ? 0 : Math.max(1, messagesInnerHeight - y);
                   return (
                     <rect
                       key={point.hour}
@@ -894,7 +1016,6 @@ export default function OpsDashboard(): React.ReactElement {
                       height={barHeight}
                       fill="#0f766e"
                       opacity={0.85}
-                      aria-label={label}
                       onMouseEnter={(event) =>
                         show(event, {
                           title: hourFormatter.format(point.date),
@@ -908,7 +1029,7 @@ export default function OpsDashboard(): React.ReactElement {
                 })}
                 <g
                   ref={xAxisRef}
-                  transform={`translate(0, ${innerHeight})`}
+                  transform={`translate(0, ${messagesInnerHeight})`}
                   style={{ color: '#284b63', fontSize: '11px' }}
                 />
                 <g
@@ -917,118 +1038,154 @@ export default function OpsDashboard(): React.ReactElement {
                 />
               </g>
             </svg>
-            <ChartTooltip tooltip={tooltip} />
+          </div>
+          <ChartTooltip tooltip={tooltip} />
+        </div>
+      </section>
+
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>
+            Meta API health (last 15m)
+          </h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => void loadOverview()}
+            >
+              Refresh
+            </button>
           </div>
         </div>
 
-        <div style={{ marginTop: '24px', display: 'grid', gap: '16px' }}>
-          <h2 style={{ margin: 0 }}>Meta API health (last 15m)</h2>
-          <div style={cardGridStyle}>
-            <div style={metricCardStyle}>
-              <span {...stylex.props(layout.note)}>Error rate</span>
-              <strong>
-                {percentFormatter.format(metaMetrics?.overall.errorRate ?? 0)}
-              </strong>
-            </div>
-            <div style={metricCardStyle}>
-              <span {...stylex.props(layout.note)}>Total calls</span>
-              <strong>
-                {numberFormatter.format(metaMetrics?.overall.total ?? 0)}
-              </strong>
-            </div>
-            <div style={metricCardStyle}>
-              <span {...stylex.props(layout.note)}>Avg latency</span>
-              <strong>
-                {metaMetrics?.overall.avgDurationMs
-                  ? `${Math.round(metaMetrics.overall.avgDurationMs)} ms`
-                  : '—'}
-              </strong>
-            </div>
-          </div>
-          <section style={chartWrapStyle}>
-            <h3 style={{ marginTop: 0 }}>Top failing ops</h3>
+        <div {...stylex.props(opsStyles.healthGrid)}>
+          <MetricCard
+            label="Error rate"
+            value={percentFormatter.format(metaMetrics?.overall.errorRate ?? 0)}
+          />
+          <MetricCard
+            label="Total calls"
+            value={numberFormatter.format(metaMetrics?.overall.total ?? 0)}
+          />
+          <MetricCard
+            label="Avg latency"
+            value={
+              metaMetrics?.overall.avgDurationMs
+                ? `${Math.round(metaMetrics.overall.avgDurationMs)} ms`
+                : '—'
+            }
+          />
+        </div>
+
+        <div {...stylex.props(opsStyles.panelGrid)}>
+          <section {...stylex.props(opsStyles.panel)}>
+            <h3 {...stylex.props(opsStyles.panelTitle)}>Top failing ops</h3>
             {metaMetrics?.byOp.length ? (
-              <table {...stylex.props(layout.table)}>
-                <thead>
-                  <tr {...stylex.props(layout.tableRow)}>
-                    <th {...stylex.props(layout.tableHead)}>Op</th>
-                    <th {...stylex.props(layout.tableHead)}>Errors</th>
-                    <th {...stylex.props(layout.tableHead)}>Error rate</th>
-                    <th {...stylex.props(layout.tableHead)}>Avg ms</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {metaMetrics.byOp.slice(0, 8).map((row) => (
-                    <tr key={row.op} {...stylex.props(layout.tableRow)}>
-                      <td {...stylex.props(layout.tableCell)}>{row.op}</td>
-                      <td {...stylex.props(layout.tableCell)}>{row.errors}</td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {percentFormatter.format(row.errorRate)}
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {row.avgDurationMs
-                          ? Math.round(row.avgDurationMs)
-                          : '—'}
-                      </td>
+              <div {...stylex.props(opsStyles.tableWrap)}>
+                <table {...stylex.props(opsStyles.table)}>
+                  <thead>
+                    <tr {...stylex.props(opsStyles.tableRow)}>
+                      <th {...stylex.props(opsStyles.tableHead)}>Op</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Errors</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Error rate</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Avg ms</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {metaMetrics.byOp.slice(0, 8).map((row) => (
+                      <tr key={row.op} {...stylex.props(opsStyles.tableRow)}>
+                        <td {...stylex.props(opsStyles.tableCell)}>{row.op}</td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.errors}
+                        </td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {percentFormatter.format(row.errorRate)}
+                        </td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.avgDurationMs
+                            ? Math.round(row.avgDurationMs)
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
-              <p {...stylex.props(layout.note)}>No recent failures.</p>
+              <p {...stylex.props(opsStyles.note)}>No recent failures.</p>
             )}
           </section>
-          <section style={chartWrapStyle}>
-            <h3 style={{ marginTop: 0 }}>Meta failures (last 15m)</h3>
+
+          <section {...stylex.props(opsStyles.panel)}>
+            <h3 {...stylex.props(opsStyles.panelTitle)}>Meta failures</h3>
             {metaMetrics?.topRoutes.length ? (
-              <table {...stylex.props(layout.table)}>
-                <thead>
-                  <tr {...stylex.props(layout.tableRow)}>
-                    <th {...stylex.props(layout.tableHead)}>Route</th>
-                    <th {...stylex.props(layout.tableHead)}>Status</th>
-                    <th {...stylex.props(layout.tableHead)}>Meta code</th>
-                    <th {...stylex.props(layout.tableHead)}>Count</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {metaMetrics.topRoutes.slice(0, 8).map((row, index) => (
-                    <tr
-                      key={`${row.route}-${row.status}-${index}`}
-                      {...stylex.props(layout.tableRow)}
-                    >
-                      <td {...stylex.props(layout.tableCell)}>{row.route}</td>
-                      <td {...stylex.props(layout.tableCell)}>{row.status}</td>
-                      <td {...stylex.props(layout.tableCell)}>
-                        {row.metaErrorCode || '—'}
-                        {row.metaErrorSubcode ? `/${row.metaErrorSubcode}` : ''}
-                      </td>
-                      <td {...stylex.props(layout.tableCell)}>{row.count}</td>
+              <div {...stylex.props(opsStyles.tableWrap)}>
+                <table {...stylex.props(opsStyles.table)}>
+                  <thead>
+                    <tr {...stylex.props(opsStyles.tableRow)}>
+                      <th {...stylex.props(opsStyles.tableHead)}>Route</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Status</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Meta code</th>
+                      <th {...stylex.props(opsStyles.tableHead)}>Count</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {metaMetrics.topRoutes.slice(0, 8).map((row, index) => (
+                      <tr
+                        key={`${row.route}-${row.status}-${index}`}
+                        {...stylex.props(opsStyles.tableRow)}
+                      >
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.route}
+                        </td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.status}
+                        </td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.metaErrorCode || '—'}
+                          {row.metaErrorSubcode
+                            ? `/${row.metaErrorSubcode}`
+                            : ''}
+                        </td>
+                        <td {...stylex.props(opsStyles.tableCell)}>
+                          {row.count}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
-              <p {...stylex.props(layout.note)}>No failures in window.</p>
+              <p {...stylex.props(opsStyles.note)}>No failures in window.</p>
             )}
           </section>
         </div>
+      </section>
 
-        <div style={{ marginTop: '24px', display: 'grid', gap: '12px' }}>
-          <h2 style={{ margin: 0 }}>App errors (last 60m)</h2>
-          <div style={chartWrapStyle}>
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>
+            App errors (last 60m)
+          </h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => void loadOverview()}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div {...stylex.props(opsStyles.chartSurface)}>
+          <div ref={appErrorsChart.ref} {...stylex.props(opsStyles.chartHost)}>
             <svg
               width="100%"
-              height="160"
-              viewBox={`0 0 ${errorWidth} ${errorHeight}`}
+              height="165"
+              viewBox={`0 0 ${errorWidth} ${appErrorsHeight}`}
               role="img"
               aria-label="App errors per minute"
             >
-              <rect
-                width={errorWidth}
-                height={errorHeight}
-                fill="#f8f5f2"
-                rx="12"
-              />
               <g
                 transform={`translate(${errorMargin.left}, ${errorMargin.top})`}
               >
@@ -1063,44 +1220,136 @@ export default function OpsDashboard(): React.ReactElement {
                 />
               </g>
             </svg>
-            <ChartTooltip tooltip={errorTooltip} />
           </div>
-          <section style={chartWrapStyle}>
-            <h3 style={{ marginTop: 0 }}>Top error keys</h3>
-            {errorMetrics?.topKeys.length ? (
-              <table {...stylex.props(layout.table)}>
+          <ChartTooltip tooltip={errorTooltip} />
+        </div>
+
+        <section {...stylex.props(opsStyles.panel)}>
+          <h3 {...stylex.props(opsStyles.panelTitle)}>Top error keys</h3>
+          {errorMetrics?.topKeys.length ? (
+            <div {...stylex.props(opsStyles.tableWrap)}>
+              <table {...stylex.props(opsStyles.table)}>
                 <thead>
-                  <tr {...stylex.props(layout.tableRow)}>
-                    <th {...stylex.props(layout.tableHead)}>Error key</th>
-                    <th {...stylex.props(layout.tableHead)}>Kind</th>
-                    <th {...stylex.props(layout.tableHead)}>Severity</th>
-                    <th {...stylex.props(layout.tableHead)}>Count</th>
+                  <tr {...stylex.props(opsStyles.tableRow)}>
+                    <th {...stylex.props(opsStyles.tableHead)}>Error key</th>
+                    <th {...stylex.props(opsStyles.tableHead)}>Kind</th>
+                    <th {...stylex.props(opsStyles.tableHead)}>Severity</th>
+                    <th {...stylex.props(opsStyles.tableHead)}>Count</th>
                   </tr>
                 </thead>
                 <tbody>
                   {errorMetrics.topKeys.map((row) => (
                     <tr
                       key={`${row.errorKey}-${row.kind}`}
-                      {...stylex.props(layout.tableRow)}
+                      {...stylex.props(opsStyles.tableRow)}
                     >
-                      <td {...stylex.props(layout.tableCell)}>
+                      <td {...stylex.props(opsStyles.tableCell)}>
                         {row.errorKey}
                       </td>
-                      <td {...stylex.props(layout.tableCell)}>{row.kind}</td>
-                      <td {...stylex.props(layout.tableCell)}>
+                      <td {...stylex.props(opsStyles.tableCell)}>{row.kind}</td>
+                      <td {...stylex.props(opsStyles.tableCell)}>
                         {row.severity}
                       </td>
-                      <td {...stylex.props(layout.tableCell)}>{row.count}</td>
+                      <td {...stylex.props(opsStyles.tableCell)}>
+                        {row.count}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            ) : (
-              <p {...stylex.props(layout.note)}>No app errors in window.</p>
-            )}
-          </section>
+            </div>
+          ) : (
+            <p {...stylex.props(opsStyles.note)}>No app errors in window.</p>
+          )}
+        </section>
+      </section>
+
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>User feature flags</h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <button
+              {...stylex.props(layout.ghostButton)}
+              onClick={() => void loadOpsUsers()}
+            >
+              Refresh
+            </button>
+          </div>
         </div>
-      </div>
+        {opsUsersError ? (
+          <p {...stylex.props(opsStyles.errorBanner)}>{opsUsersError}</p>
+        ) : null}
+        {opsUsers.length ? (
+          <div {...stylex.props(opsStyles.tableWrap)}>
+            <table {...stylex.props(opsStyles.table)}>
+              <thead>
+                <tr {...stylex.props(opsStyles.tableRow)}>
+                  <th {...stylex.props(opsStyles.tableHead)}>User</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Assets</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Followup inbox</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Ops dashboard</th>
+                </tr>
+              </thead>
+              <tbody>
+                {opsUsers.map((user) => (
+                  <tr key={user.userId} {...stylex.props(opsStyles.tableRow)}>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      <code>{user.userId.slice(0, 8)}</code>
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      {formatAssets(user.assets)}
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      <select
+                        value={readFlagValue(
+                          user.featureFlags,
+                          'FEATURE_FOLLOWUP_INBOX',
+                        )}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          void updateUserFlag(
+                            user.userId,
+                            'FEATURE_FOLLOWUP_INBOX',
+                            next === 'inherit' ? null : next === 'enabled',
+                          );
+                        }}
+                        disabled={opsUsersUpdating === user.userId}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      <select
+                        value={readFlagValue(
+                          user.featureFlags,
+                          'FEATURE_OPS_DASHBOARD',
+                        )}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          void updateUserFlag(
+                            user.userId,
+                            'FEATURE_OPS_DASHBOARD',
+                            next === 'inherit' ? null : next === 'enabled',
+                          );
+                        }}
+                        disabled={opsUsersUpdating === user.userId}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p {...stylex.props(opsStyles.note)}>No users yet.</p>
+        )}
+      </section>
     </div>
   );
 }

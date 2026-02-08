@@ -2,6 +2,7 @@ import * as React from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
+import { AppFooter } from '../app/components/AppFooter';
 import { inboxStyles } from './inbox.styles';
 import {
   renderTemplate,
@@ -114,6 +115,13 @@ type Template = {
 type AssetsResponse = {
   pages: Array<{ id: string; name: string }>;
   igAssets: Array<{ id: string; name: string }>;
+};
+
+type AuthResponse = {
+  authenticated: boolean;
+  userId?: string;
+  name?: string | null;
+  email?: string | null;
 };
 
 const stateTabs = [
@@ -291,6 +299,8 @@ export default function Inbox(): React.ReactElement {
   const [featureEnabled, setFeatureEnabled] = React.useState<boolean | null>(
     null,
   );
+  const [auth, setAuth] = React.useState<AuthResponse | null>(null);
+  const [loggingOut, setLoggingOut] = React.useState(false);
   const [opsDashboardEnabled, setOpsDashboardEnabled] =
     React.useState<boolean>(false);
   const [recomputing, setRecomputing] = React.useState(false);
@@ -366,6 +376,20 @@ export default function Inbox(): React.ReactElement {
     setTemplates(data.templates ?? []);
   }, []);
 
+  const loadAuth = React.useCallback(async () => {
+    try {
+      const response = await fetch('/api/auth/me', { cache: 'no-store' });
+      if (!response.ok) {
+        setAuth({ authenticated: false });
+        return;
+      }
+      const data = (await response.json()) as AuthResponse;
+      setAuth(data ?? { authenticated: false });
+    } catch {
+      setAuth({ authenticated: false });
+    }
+  }, []);
+
   const loadConversations = React.useCallback(async () => {
     if (featureEnabled === false) return;
     const params = new URLSearchParams();
@@ -420,7 +444,8 @@ export default function Inbox(): React.ReactElement {
   React.useEffect(() => {
     void loadAssets();
     void loadTemplates();
-  }, [loadAssets, loadTemplates]);
+    void loadAuth();
+  }, [loadAssets, loadAuth, loadTemplates]);
 
   React.useEffect(() => {
     void (async () => {
@@ -1525,6 +1550,21 @@ export default function Inbox(): React.ReactElement {
     </div>
   );
 
+  const accountLabel = auth?.name || auth?.email || auth?.userId || 'Account';
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    setStatus(null);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    } catch {
+      setStatus('Could not log out. Please try again.');
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
   if (featureEnabled === false) {
     return (
       <section {...stylex.props(layout.card)}>
@@ -1601,6 +1641,17 @@ export default function Inbox(): React.ReactElement {
             ) : null}
           </nav>
           <div {...stylex.props(inboxStyles.controlsGroup)}>
+            <span {...stylex.props(inboxStyles.accountName)}>
+              {accountLabel}
+            </span>
+            <button
+              type="button"
+              {...stylex.props(layout.ghostButton)}
+              onClick={handleLogout}
+              disabled={loggingOut}
+            >
+              {loggingOut ? 'Logging out…' : 'Log out'}
+            </button>
             <button
               type="button"
               {...stylex.props(
@@ -1980,10 +2031,7 @@ export default function Inbox(): React.ReactElement {
       </div>
 
       <footer {...stylex.props(inboxStyles.footer)}>
-        <span>msgstats inbox</span>
-        <span {...stylex.props(inboxStyles.footerSpacer)}>
-          Space reserved for floating controls.
-        </span>
+        <AppFooter />
       </footer>
     </div>
   );

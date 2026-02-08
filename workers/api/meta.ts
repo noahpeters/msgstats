@@ -957,6 +957,29 @@ export type MetaIgAsset = {
   name?: string;
 };
 
+type PageInstagramLinkData = {
+  instagram_business_account?: {
+    id: string;
+    username?: string;
+    name?: string;
+  };
+  connected_instagram_account?: {
+    id: string;
+    username?: string;
+    name?: string;
+  };
+};
+
+function normalizePageInstagramLinks(
+  payload: GraphResponse<PageInstagramLinkData> | PageInstagramLinkData,
+): PageInstagramLinkData {
+  const graphPayload = payload as GraphResponse<PageInstagramLinkData>;
+  if (graphPayload.data && typeof graphPayload.data === 'object') {
+    return graphPayload.data;
+  }
+  return payload as PageInstagramLinkData;
+}
+
 export async function fetchInstagramAssets(options: {
   env: MetaEnv;
   pageId: string;
@@ -984,8 +1007,9 @@ export async function fetchInstagramAssets(options: {
       assetId: options.pageId,
     }),
   );
-  if (payload.data.length) {
-    return payload.data;
+  const igAssets = Array.isArray(payload.data) ? payload.data : [];
+  if (igAssets.length) {
+    return igAssets;
   }
   const pageUrl = buildUrl(
     metaConfig.endpoints.pageDetails(options.pageId),
@@ -996,18 +1020,7 @@ export async function fetchInstagramAssets(options: {
         'instagram_business_account{id,username,name},connected_instagram_account{id,username,name}',
     },
   );
-  const pagePayload = await fetchGraph<{
-    instagram_business_account?: {
-      id: string;
-      username?: string;
-      name?: string;
-    };
-    connected_instagram_account?: {
-      id: string;
-      username?: string;
-      name?: string;
-    };
-  }>(
+  const pagePayload = await fetchGraph<PageInstagramLinkData>(
     pageUrl,
     undefined,
     buildTelemetry({
@@ -1019,21 +1032,22 @@ export async function fetchInstagramAssets(options: {
       assetId: options.pageId,
     }),
   );
+  const pageData = normalizePageInstagramLinks(pagePayload);
   const fallback: MetaIgAsset[] = [];
-  if (pagePayload.data.instagram_business_account?.id) {
+  if (pageData.instagram_business_account?.id) {
     fallback.push({
-      id: pagePayload.data.instagram_business_account.id,
+      id: pageData.instagram_business_account.id,
       name:
-        pagePayload.data.instagram_business_account.name ??
-        pagePayload.data.instagram_business_account.username,
+        pageData.instagram_business_account.name ??
+        pageData.instagram_business_account.username,
     });
   }
-  if (pagePayload.data.connected_instagram_account?.id) {
+  if (pageData.connected_instagram_account?.id) {
     fallback.push({
-      id: pagePayload.data.connected_instagram_account.id,
+      id: pageData.connected_instagram_account.id,
       name:
-        pagePayload.data.connected_instagram_account.name ??
-        pagePayload.data.connected_instagram_account.username,
+        pageData.connected_instagram_account.name ??
+        pageData.connected_instagram_account.username,
     });
   }
   return fallback;
@@ -1085,18 +1099,7 @@ export async function fetchPageIgDebug(options: {
         'instagram_business_account{id,username,name},connected_instagram_account{id,username,name}',
     },
   );
-  const payload = await fetchGraph<{
-    instagram_business_account?: {
-      id: string;
-      username?: string;
-      name?: string;
-    };
-    connected_instagram_account?: {
-      id: string;
-      username?: string;
-      name?: string;
-    };
-  }>(
+  const payload = await fetchGraph<PageInstagramLinkData>(
     url,
     undefined,
     buildTelemetry({
@@ -1108,5 +1111,5 @@ export async function fetchPageIgDebug(options: {
       assetId: options.pageId,
     }),
   );
-  return payload.data;
+  return normalizePageInstagramLinks(payload);
 }

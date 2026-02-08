@@ -73,6 +73,10 @@ type SyncRun = {
   messages: number;
 };
 
+const dashboardTokens = {
+  dividerColor: 'rgba(12, 27, 26, 0.14)',
+} as const;
+
 const formatRelativeTime = (value: string | null) => {
   if (!value) {
     return 'Never';
@@ -115,11 +119,10 @@ const assetGridStyle: React.CSSProperties = {
 };
 
 const assetTileStyle: React.CSSProperties = {
-  borderRadius: '16px',
-  border: '1px solid #f2f4f8',
+  borderRadius: '10px',
+  border: `1px solid ${dashboardTokens.dividerColor}`,
   backgroundColor: '#ffffff',
-  padding: '16px',
-  boxShadow: '0 12px 24px rgba(12, 27, 26, 0.08)',
+  padding: '14px',
   display: 'grid',
   gap: '8px',
 };
@@ -157,6 +160,40 @@ const assetIconStyle: React.CSSProperties = {
   color: colors.slate,
   flexShrink: 0,
 };
+
+const dashboardStyles = stylex.create({
+  card: {
+    backgroundColor: '#ffffff',
+    borderRadius: '12px',
+    padding: '16px',
+    border: `1px solid ${dashboardTokens.dividerColor}`,
+    boxShadow: 'none',
+  },
+  list: {
+    margin: 0,
+    paddingLeft: '18px',
+    display: 'grid',
+    gap: '8px',
+  },
+  degradedBanner: {
+    marginTop: '12px',
+    marginBottom: '14px',
+    padding: '12px',
+    borderRadius: '10px',
+    border: '1px solid #fdba74',
+    backgroundColor: '#fff7ed',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  degradedText: {
+    color: '#7c2d12',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontSize: '14px',
+  },
+});
 
 const AssetPlatformIcon = ({
   platform,
@@ -286,12 +323,12 @@ export default function Dashboard(): React.ReactElement {
   const loadedIgAssets = React.useRef(new Set<string>());
   const [followupCount, setFollowupCount] =
     React.useState<FollowupCount | null>(null);
-  const [flags, setFlags] = React.useState<{ followupInbox?: boolean } | null>(
-    null,
-  );
+  const [flags, setFlags] = React.useState<{
+    followupInbox?: boolean;
+    opsDashboard?: boolean;
+  } | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
-  const [loggingOut, setLoggingOut] = React.useState(false);
 
   const refreshAuth = React.useCallback(
     async (force = false) => {
@@ -362,9 +399,10 @@ export default function Dashboard(): React.ReactElement {
   );
 
   const refreshFlags = React.useCallback(async () => {
-    const { ok, data } = await fetchJson<{ followupInbox?: boolean }>(
-      '/api/feature-flags',
-    );
+    const { ok, data } = await fetchJson<{
+      followupInbox?: boolean;
+      opsDashboard?: boolean;
+    }>('/api/feature-flags');
     if (!ok) return;
     setFlags(data ?? null);
   }, [fetchJson]);
@@ -575,33 +613,6 @@ export default function Dashboard(): React.ReactElement {
     }
   };
 
-  const handleLogout = async () => {
-    setLoggingOut(true);
-    setActionError(null);
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-      setAuth({ authenticated: false });
-      setPermissions(null);
-      setAssets(null);
-      setBusinesses([]);
-      setBusinessPages({});
-      setClassicPages([]);
-      setSyncRuns([]);
-      loadedIgAssets.current.clear();
-      await Promise.all([
-        refreshAuth(true),
-        refreshPermissions(true),
-        refreshAssets(true),
-      ]);
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : 'Failed to log out.',
-      );
-    } finally {
-      setLoggingOut(false);
-    }
-  };
-
   const loadIgAssets = React.useCallback(
     async (pageId: string) => {
       if (loadedIgAssets.current.has(pageId)) {
@@ -698,142 +709,137 @@ export default function Dashboard(): React.ReactElement {
     }))
     .filter((entry) => entry.pages.length > 0);
   const showBusinessesCard = loading || businessPagesToShow.length > 0;
+  const availableClassicCount = filteredClassicPages.length;
+  const availableBusinessCount = businessPagesToShow.reduce(
+    (count, entry) => count + entry.pages.length,
+    0,
+  );
+  const availableEnableCount = availableClassicCount + availableBusinessCount;
+
+  const latestSyncDate = enabledAssets
+    .map((asset) =>
+      asset.lastSyncedAt && !Number.isNaN(Date.parse(asset.lastSyncedAt))
+        ? new Date(asset.lastSyncedAt)
+        : null,
+    )
+    .filter((value): value is Date => value !== null)
+    .sort((a, b) => b.getTime() - a.getTime())[0];
+  const exactLatestSync = latestSyncDate
+    ? latestSyncDate.toLocaleString()
+    : 'Never';
+
+  const recentRuns = syncRuns.slice(0, 20);
+  const failedRuns = recentRuns.filter((run) => run.status === 'failed').length;
+  const runningRuns = recentRuns.filter(
+    (run) => run.status === 'running' || run.status === 'queued',
+  ).length;
+  const errorRateSummary =
+    recentRuns.length > 0
+      ? `${Math.round((failedRuns / recentRuns.length) * 100)}% (${failedRuns}/${recentRuns.length})`
+      : 'No recent runs';
+
+  const hoursSinceSync = latestSyncDate
+    ? (Date.now() - latestSyncDate.getTime()) / (1000 * 60 * 60)
+    : Number.POSITIVE_INFINITY;
+
+  const hasPermissionIssue =
+    Boolean(permissions?.missing.length) || Boolean(permissions?.error);
+  const delayedSync =
+    enabledAssets.length > 0 &&
+    !hasPermissionIssue &&
+    failedRuns === 0 &&
+    runningRuns === 0 &&
+    hoursSinceSync > 24;
+
+  const syncStatus = hasPermissionIssue
+    ? 'Error'
+    : failedRuns > 0
+      ? 'Error'
+      : runningRuns > 0
+        ? 'Healthy'
+        : delayedSync
+          ? 'Delayed'
+          : 'Healthy';
+
+  const showDegradedBanner =
+    hasPermissionIssue || failedRuns > 0 || delayedSync;
 
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
-      <section {...stylex.props(layout.card)}>
-        <h2>Connect Meta</h2>
+      <section {...stylex.props(dashboardStyles.card)}>
+        <h2>Status</h2>
         <p {...stylex.props(layout.note)}>
-          Sign in with Facebook to load your businesses and messaging assets.
+          Current sync health across your enabled messaging assets.
         </p>
-        {!auth?.authenticated ? (
-          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-            <a href="/api/auth/login">
-              <button {...stylex.props(layout.button)}>Connect Meta</button>
-            </a>
+        {showDegradedBanner ? (
+          <div {...stylex.props(dashboardStyles.degradedBanner)}>
+            <span {...stylex.props(dashboardStyles.degradedText)}>
+              {hasPermissionIssue
+                ? `Permissions need attention${permissions?.missing?.length ? `: ${permissions.missing.join(', ')}` : '.'}`
+                : failedRuns > 0
+                  ? `${failedRuns} recent sync runs failed.`
+                  : 'Sync is delayed beyond 24 hours.'}
+            </span>
+            {failedRuns > 0 && flags?.opsDashboard ? (
+              <a href="/ops-dashboard" title="View errors">
+                <button {...stylex.props(layout.button)}>View errors</button>
+              </a>
+            ) : (
+              <button
+                {...stylex.props(layout.button)}
+                onClick={() => {
+                  void Promise.all([
+                    refreshPermissions(true),
+                    refreshAssets(true),
+                    refreshFollowupCount(true),
+                  ]);
+                }}
+              >
+                Refresh status
+              </button>
+            )}
           </div>
-        ) : (
-          <div
-            style={{
-              display: 'flex',
-              gap: '12px',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-            }}
-          >
-            <p {...stylex.props(layout.note)}>
-              Connected as {auth.name || auth.userId}
-            </p>
-            <button
-              {...stylex.props(layout.ghostButton)}
-              onClick={handleLogout}
-              disabled={loggingOut}
-            >
-              {loggingOut ? 'Logging out…' : 'Log out'}
-            </button>
+        ) : null}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: '12px',
+            marginTop: '8px',
+          }}
+        >
+          <div style={assetTileStyle}>
+            <div {...stylex.props(layout.note)}>Last sync</div>
+            <div style={{ fontSize: '24px', fontWeight: 700 }}>
+              {formatRelativeTime(latestSyncDate?.toISOString() ?? null)}
+            </div>
+            <div {...stylex.props(layout.note)}>{exactLatestSync}</div>
           </div>
-        )}
-        {permissions?.missing.length ? (
-          <p style={{ color: colors.coral }}>
-            Missing permissions: {permissions.missing.join(', ')}. Log out and
-            connect again to grant them.
-          </p>
-        ) : null}
-        {permissions?.error ? (
-          <p style={{ color: colors.coral }}>{permissions.error}</p>
-        ) : null}
+          <div style={assetTileStyle}>
+            <div {...stylex.props(layout.note)}>Sync status</div>
+            <div style={{ fontSize: '24px', fontWeight: 700 }}>
+              {syncStatus}
+            </div>
+            <div {...stylex.props(layout.note)}>
+              {runningRuns > 0
+                ? `${runningRuns} runs in progress`
+                : 'No active runs'}
+            </div>
+          </div>
+          <div style={assetTileStyle}>
+            <div {...stylex.props(layout.note)}>Error rate</div>
+            <div style={{ fontSize: '24px', fontWeight: 700 }}>
+              {errorRateSummary}
+            </div>
+            <div {...stylex.props(layout.note)}>Based on recent sync runs</div>
+          </div>
+        </div>
       </section>
 
-      {flags?.followupInbox ? (
-        <section {...stylex.props(layout.card)}>
-          <h2>Conversations Needing Attention</h2>
-          <p {...stylex.props(layout.note)}>
-            Conversations with a follow-up suggestion that are waiting on you.
-          </p>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <a href="/inbox" title="Inbox">
-              <button {...stylex.props(layout.button)}>
-                {followupCount?.count ?? 0} conversations
-              </button>
-            </a>
-            <span {...stylex.props(layout.note)}>Scope: All assets</span>
-          </div>
-        </section>
-      ) : null}
-
-      {showBusinessesCard ? (
-        <section {...stylex.props(layout.card)}>
-          <h2>Businesses & Pages</h2>
-          <p {...stylex.props(layout.note)}>
-            Businesses and pages load automatically. Enable a page to store its
-            token securely.
-          </p>
-          {loading ? (
-            <p {...stylex.props(layout.note)}>Loading businesses…</p>
-          ) : null}
-          {businessPagesToShow.map(({ business, pages }) => (
-            <div key={business.id} style={{ marginTop: '12px' }}>
-              <strong>{business.name}</strong>
-              <div style={{ display: 'grid', gap: '10px', marginTop: '8px' }}>
-                {pages.map((page) => (
-                  <div
-                    key={page.id}
-                    style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}
-                  >
-                    <div>
-                      {page.name}{' '}
-                      <span style={{ color: colors.slate }}>({page.id})</span>
-                      {page.source ? (
-                        <span
-                          {...stylex.props(layout.badge)}
-                          style={{ marginLeft: '8px' }}
-                        >
-                          {page.source.replace('_', ' ')}
-                        </span>
-                      ) : null}
-                    </div>
-                    <button
-                      {...stylex.props(layout.ghostButton)}
-                      onClick={() => handleEnablePage(page.id, page.name)}
-                    >
-                      Enable page
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </section>
-      ) : null}
-
-      {filteredClassicPages.length > 0 ? (
-        <section {...stylex.props(layout.card)}>
-          <h2>Classic Pages</h2>
-          <p {...stylex.props(layout.note)}>
-            Pages discovered via /me/accounts (fallback for non-business pages).
-          </p>
-          <ul>
-            {filteredClassicPages.map((page) => (
-              <li key={page.id}>
-                {page.name}{' '}
-                <span style={{ color: colors.slate }}>({page.id})</span>
-                <button
-                  {...stylex.props(layout.ghostButton)}
-                  style={{ marginLeft: '8px' }}
-                  onClick={() => handleEnablePage(page.id, page.name)}
-                >
-                  Enable page
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      <section {...stylex.props(layout.card)}>
-        <h2>Enabled assets</h2>
+      <section {...stylex.props(dashboardStyles.card)}>
+        <h2>Activity</h2>
         <p {...stylex.props(layout.note)}>
-          Sync Messenger and Instagram. Each asset shows its own sync progress.
+          Sync activity and volume by asset. Window: Last 24 hours.
         </p>
         {actionError ? (
           <p style={{ color: colors.coral }}>{actionError}</p>
@@ -851,6 +857,12 @@ export default function Dashboard(): React.ReactElement {
                     <AssetPlatformIcon platform={asset.platform} />
                     <span>{asset.name}</span>
                   </h3>
+                  <p
+                    {...stylex.props(layout.note)}
+                    style={{ margin: 0, marginTop: '-2px' }}
+                  >
+                    Last 24 hours
+                  </p>
                   <div style={assetBodyRowStyle}>
                     <span {...stylex.props(layout.note)}>
                       Conversations: {asset.conversationCount}
@@ -896,6 +908,126 @@ export default function Dashboard(): React.ReactElement {
           <p {...stylex.props(layout.note)}>No enabled pages yet.</p>
         )}
       </section>
+
+      <section {...stylex.props(dashboardStyles.card)}>
+        <h2>Action</h2>
+        <p {...stylex.props(layout.note)}>
+          Prioritized items that need follow-up or setup work.
+        </p>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: '12px',
+            marginTop: '8px',
+          }}
+        >
+          {flags?.followupInbox ? (
+            <div style={assetTileStyle}>
+              <div {...stylex.props(layout.note)}>Needs follow-up</div>
+              <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                {followupCount?.count ?? 0}
+              </div>
+              <a href="/inbox/follow-up" title="Follow-up inbox">
+                <button {...stylex.props(layout.button)}>Open inbox</button>
+              </a>
+            </div>
+          ) : null}
+          {availableEnableCount > 0 || showBusinessesCard ? (
+            <div style={assetTileStyle}>
+              <div {...stylex.props(layout.note)}>Needs setup</div>
+              <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                {availableEnableCount}
+              </div>
+              <p {...stylex.props(layout.note)} style={{ margin: 0 }}>
+                Pages available to enable and sync.
+              </p>
+            </div>
+          ) : null}
+          {failedRuns > 0 && flags?.opsDashboard ? (
+            <div style={assetTileStyle}>
+              <div {...stylex.props(layout.note)}>Failed syncs</div>
+              <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                {failedRuns}
+              </div>
+              <a href="/ops-dashboard" title="Ops dashboard">
+                <button {...stylex.props(layout.button)}>
+                  Review failures
+                </button>
+              </a>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      {showBusinessesCard ? (
+        <section {...stylex.props(dashboardStyles.card)}>
+          <h3 style={{ marginTop: 0 }}>Available business pages</h3>
+          <p {...stylex.props(layout.note)}>
+            Businesses and pages load automatically. Enable a page to store its
+            token securely.
+          </p>
+          {loading ? (
+            <p {...stylex.props(layout.note)}>Loading businesses…</p>
+          ) : null}
+          {businessPagesToShow.map(({ business, pages }) => (
+            <div key={business.id} style={{ marginTop: '12px' }}>
+              <strong>{business.name}</strong>
+              <div style={{ display: 'grid', gap: '10px', marginTop: '8px' }}>
+                {pages.map((page) => (
+                  <div
+                    key={page.id}
+                    style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}
+                  >
+                    <div>
+                      {page.name}{' '}
+                      <span style={{ color: colors.slate }}>({page.id})</span>
+                      {page.source ? (
+                        <span
+                          {...stylex.props(layout.badge)}
+                          style={{ marginLeft: '8px' }}
+                        >
+                          {page.source.replace('_', ' ')}
+                        </span>
+                      ) : null}
+                    </div>
+                    <button
+                      {...stylex.props(layout.ghostButton)}
+                      onClick={() => handleEnablePage(page.id, page.name)}
+                    >
+                      Enable page
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+      ) : null}
+
+      {filteredClassicPages.length > 0 ? (
+        <section {...stylex.props(dashboardStyles.card)}>
+          <h3 style={{ marginTop: 0 }}>Classic pages</h3>
+          <p {...stylex.props(layout.note)}>
+            Pages discovered via /me/accounts (fallback for non-business pages).
+          </p>
+          <ul {...stylex.props(dashboardStyles.list)}>
+            {filteredClassicPages.map((page) => (
+              <li key={page.id}>
+                {page.name}{' '}
+                <span style={{ color: colors.slate }}>({page.id})</span>
+                <button
+                  {...stylex.props(layout.ghostButton)}
+                  style={{ marginLeft: '8px' }}
+                  onClick={() => handleEnablePage(page.id, page.name)}
+                >
+                  Enable page
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

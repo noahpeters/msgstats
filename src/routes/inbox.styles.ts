@@ -94,6 +94,14 @@ export const inboxStyles = stylex.create({
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
+    marginLeft: 'auto',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+  },
+  accountName: {
+    fontSize: '13px',
+    color: '#284b63',
+    fontWeight: 600,
   },
   select: {
     padding: '6px 10px',
@@ -569,10 +577,6 @@ export const inboxStyles = stylex.create({
     justifyContent: 'space-between',
     fontSize: '12px',
     color: '#284b63',
-  },
-  footerSpacer: {
-    minHeight: '40px',
-    minWidth: '220px',
   },
   drawer: {
     position: 'fixed',

@@ -7,6 +7,7 @@ type HistogramProps = {
   histogram: Record<number, number>;
   maxY: number;
   height?: number;
+  width?: number | string;
 };
 
 const NUM_BARS = 30;
@@ -18,6 +19,7 @@ export default function Histogram({
   histogram,
   maxY,
   height = 24,
+  width = WIDTH,
 }: HistogramProps): React.ReactElement {
   const safeMaxY = Math.max(1, maxY);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -25,7 +27,13 @@ export default function Histogram({
 
   return (
     <>
-      <svg width={WIDTH} height={height} role="img">
+      <svg
+        width={width}
+        height={height}
+        role="img"
+        viewBox={`0 0 ${WIDTH} ${height}`}
+        preserveAspectRatio="none"
+      >
         {Array.from({ length: NUM_BARS }, (_, index) => {
           const xValue = index + 1;
           const count = histogram[xValue] ?? 0;
