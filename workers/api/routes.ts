@@ -1,5 +1,6 @@
 import { MetaApiError } from './meta';
 import { summarizeAiRunStats, type AiRunStats } from './aiStats';
+import { isValidAuditLabel } from './conversationAudit';
 import type { Env } from './worker';
 
 type RouteHandler = (
@@ -25,8 +26,10 @@ export function registerRoutes(deps: any) {
     getApiVersion,
     isFollowupInboxEnabled,
     isOpsDashboardEnabled,
+    isAuditConversationsEnabled,
     isFollowupInboxEnabledForUser,
     isOpsDashboardEnabledForUser,
+    isAuditConversationsEnabledForUser,
     exchangeCodeForToken,
     exchangeForLongLivedToken,
     debugToken,
@@ -53,6 +56,7 @@ export function registerRoutes(deps: any) {
     listPagesWithStats,
     getAssetNameMap,
     getConversation,
+    getConversationClassificationExplain,
     listConversationTags,
     recomputeConversationState,
     recordStateEvent,
@@ -75,6 +79,75 @@ export function registerRoutes(deps: any) {
 
   const normalizeTag = (tag: string) =>
     tag.trim().toLowerCase().replace(/\s+/g, '_');
+  const classifyDeliveryFailure = (
+    error: unknown,
+  ): { blocked: boolean; bounced: boolean } => {
+    if (!(error instanceof MetaApiError)) {
+      return { blocked: false, bounced: false };
+    }
+    const meta =
+      typeof error.meta === 'object' && error.meta !== null
+        ? (error.meta as {
+            error?: {
+              code?: number;
+              error_subcode?: number;
+              message?: string;
+            };
+          })
+        : null;
+    const rawMessage =
+      meta?.error?.message ?? error.message ?? JSON.stringify(meta ?? {});
+    const message = rawMessage.toLowerCase();
+    const code = meta?.error?.code ?? null;
+    const subcode = meta?.error?.error_subcode ?? null;
+    const blockedMessage =
+      /blocked|can't receive your message|cannot receive your message|not allowed to message|has restricted/i.test(
+        rawMessage,
+      );
+    const blocked = blockedMessage || subcode === 1545041;
+    const bounced =
+      /invalid recipient|recipient unavailable|delivery failed|bounced|cannot be reached|not found/i.test(
+        rawMessage,
+      ) ||
+      code === 100 ||
+      subcode === 2018001 ||
+      subcode === 2018292;
+    if (blocked && message.includes('temporary')) {
+      return { blocked: false, bounced: false };
+    }
+    return { blocked, bounced };
+  };
+  const markConversationDeliveryFailure = async (
+    env: Env,
+    input: {
+      conversationId: string;
+      userId: string;
+      blocked: boolean;
+      bounced: boolean;
+    },
+  ) => {
+    if (!input.blocked && !input.bounced) return;
+    const nowIso = new Date().toISOString();
+    await env.DB.prepare(
+      `UPDATE conversations
+       SET blocked_by_recipient = CASE WHEN ? = 1 THEN 1 ELSE blocked_by_recipient END,
+           blocked_at = CASE WHEN ? = 1 AND blocked_at IS NULL THEN ? ELSE blocked_at END,
+           bounced_by_provider = CASE WHEN ? = 1 THEN 1 ELSE bounced_by_provider END,
+           bounced_at = CASE WHEN ? = 1 AND bounced_at IS NULL THEN ? ELSE bounced_at END
+       WHERE user_id = ? AND id = ?`,
+    )
+      .bind(
+        input.blocked ? 1 : 0,
+        input.blocked ? 1 : 0,
+        nowIso,
+        input.bounced ? 1 : 0,
+        input.bounced ? 1 : 0,
+        nowIso,
+        input.userId,
+        input.conversationId,
+      )
+      .run();
+  };
   addRoute('GET', '/api/health', () => json({ status: 'ok' }));
 
   addRoute('GET', '/api/auth/login', async (req, env) => {
@@ -220,11 +293,13 @@ export function registerRoutes(deps: any) {
       return json({
         followupInbox: isFollowupInboxEnabled(env),
         opsDashboard: isOpsDashboardEnabled(env),
+        auditConversations: isAuditConversationsEnabled(env),
       });
     }
     return json({
       followupInbox: await isFollowupInboxEnabledForUser(env, userId),
       opsDashboard: await isOpsDashboardEnabledForUser(env, userId),
+      auditConversations: await isAuditConversationsEnabledForUser(env, userId),
     });
   });
 
@@ -760,7 +835,7 @@ export function registerRoutes(deps: any) {
       bindings.push(assetId);
     }
     if (needsFollowup && ['1', 'true', 'yes'].includes(needsFollowup)) {
-      where.push('c.followup_suggestion IS NOT NULL');
+      where.push('c.needs_followup = 1');
     }
     if (channel) {
       if (channel === 'facebook') {
@@ -950,7 +1025,7 @@ export function registerRoutes(deps: any) {
       bindings.push(state);
     }
     if (needsFollowup && ['1', 'true', 'yes'].includes(needsFollowup)) {
-      where.push('followup_suggestion IS NOT NULL');
+      where.push('needs_followup = 1');
     }
     const row = await env.DB.prepare(
       `SELECT COUNT(*) as count FROM conversations WHERE ${where.join(' AND ')}`,
@@ -1140,6 +1215,218 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute(
+    'GET',
+    '/api/inbox/conversations/:id/classification_explain',
+    async (req, env, _ctx, params) => {
+      const conversationId = params.id;
+      if (!conversationId) {
+        return json({ error: 'Missing conversation id' }, { status: 400 });
+      }
+      const userId = await requireUser(req, env);
+      if (!userId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isAuditConversationsEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+
+      const conversation = await getConversation(env, userId, conversationId);
+      if (!conversation) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+      const url = new URL(req.url);
+      const assetId = url.searchParams.get('assetId')?.trim() || null;
+      if (
+        assetId &&
+        assetId !== conversation.assetId &&
+        assetId !== conversation.pageId
+      ) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+
+      const explanation = await getConversationClassificationExplain(
+        env,
+        userId,
+        conversationId,
+      );
+      if (!explanation) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+      return json({
+        computed_label: explanation.computedLabel,
+        reason_codes: explanation.reasonCodes,
+        feature_snapshot: explanation.featureSnapshot,
+        classifier_version: explanation.classifierVersion,
+        computed_at: explanation.computedAt,
+      });
+    },
+  );
+
+  addRoute(
+    'POST',
+    '/api/inbox/conversations/:id/audit',
+    async (req, env, _ctx, params) => {
+      const conversationId = params.id;
+      if (!conversationId) {
+        return json({ error: 'Missing conversation id' }, { status: 400 });
+      }
+      const userId = await requireUser(req, env);
+      if (!userId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isAuditConversationsEnabledForUser(env, userId))) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+      const body = await readJson<{
+        assetId?: string;
+        is_correct?: boolean;
+        correct_label?: string;
+        followup_is_correct?: boolean;
+        followup_correct_due_at?: number | null;
+        followup_notes?: string;
+        notes?: string;
+      }>(req);
+      if (typeof body?.is_correct !== 'boolean') {
+        return json({ error: 'is_correct must be a boolean' }, { status: 400 });
+      }
+
+      const conversation = await getConversation(env, userId, conversationId);
+      if (!conversation) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+      const assetId = body?.assetId?.trim() || null;
+      if (
+        assetId &&
+        assetId !== conversation.assetId &&
+        assetId !== conversation.pageId
+      ) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+
+      const explanation = await getConversationClassificationExplain(
+        env,
+        userId,
+        conversationId,
+      );
+      if (!explanation) {
+        return json(
+          { error: 'Conversation has no inferred state' },
+          { status: 409 },
+        );
+      }
+
+      const currentLabel = explanation.computedLabel;
+      if (!isValidAuditLabel(currentLabel)) {
+        return json(
+          { error: 'Classifier returned invalid label' },
+          { status: 409 },
+        );
+      }
+      let correctLabel = currentLabel;
+      if (!body.is_correct) {
+        if (!body.correct_label || !isValidAuditLabel(body.correct_label)) {
+          return json({ error: 'Invalid correct_label' }, { status: 400 });
+        }
+        correctLabel = body.correct_label;
+      }
+
+      const notes = body?.notes?.trim() ? body.notes.trim() : null;
+      const followupIsCorrect =
+        typeof body?.followup_is_correct === 'boolean'
+          ? body.followup_is_correct
+          : true;
+      const followupNotes = body?.followup_notes?.trim()
+        ? body.followup_notes.trim()
+        : null;
+      const followupCorrectDueAt =
+        body?.followup_correct_due_at === null ||
+        body?.followup_correct_due_at === undefined
+          ? null
+          : Number(body.followup_correct_due_at);
+      if (
+        followupCorrectDueAt !== null &&
+        (!Number.isFinite(followupCorrectDueAt) || followupCorrectDueAt <= 0)
+      ) {
+        return json(
+          {
+            error:
+              'followup_correct_due_at must be a unix epoch milliseconds value',
+          },
+          { status: 400 },
+        );
+      }
+      if (!followupIsCorrect && !followupNotes && !followupCorrectDueAt) {
+        return json(
+          {
+            error:
+              'followup_notes or followup_correct_due_at is required when followup_is_correct is false',
+          },
+          { status: 400 },
+        );
+      }
+      const auditId = crypto.randomUUID();
+      const feedbackId = crypto.randomUUID();
+      const nowMs = Date.now();
+      const resolvedAssetId = conversation.assetId ?? conversation.pageId;
+
+      const insertAudit = env.DB.prepare(
+        `INSERT INTO conversation_classification_audit
+         (id, asset_id, conversation_id, contact_id, computed_label, reason_codes, feature_snapshot, computed_at, classifier_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        auditId,
+        resolvedAssetId,
+        conversationId,
+        conversation.participantId ?? null,
+        currentLabel,
+        JSON.stringify(explanation.reasonCodes),
+        JSON.stringify(explanation.featureSnapshot),
+        explanation.computedAt,
+        explanation.classifierVersion ?? null,
+      );
+      const insertFeedback = env.DB.prepare(
+        `INSERT INTO conversation_classification_feedback
+         (id, asset_id, conversation_id, contact_id, audit_id, current_label, correct_label, is_correct, notes, created_at, followup_is_correct, followup_correct_due_at, followup_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        feedbackId,
+        resolvedAssetId,
+        conversationId,
+        conversation.participantId ?? null,
+        auditId,
+        currentLabel,
+        correctLabel,
+        body.is_correct ? 1 : 0,
+        notes,
+        nowMs,
+        followupIsCorrect ? 1 : 0,
+        followupCorrectDueAt,
+        followupNotes,
+      );
+      await env.DB.batch([insertAudit, insertFeedback]);
+
+      return json({
+        feedback: {
+          id: feedbackId,
+          asset_id: resolvedAssetId,
+          conversation_id: conversationId,
+          contact_id: conversation.participantId ?? null,
+          audit_id: auditId,
+          current_label: currentLabel,
+          correct_label: correctLabel,
+          is_correct: body.is_correct,
+          notes,
+          created_at: nowMs,
+          followup_is_correct: followupIsCorrect,
+          followup_correct_due_at: followupCorrectDueAt,
+          followup_notes: followupNotes,
+        },
+        audit_id: auditId,
+      });
+    },
+  );
+
+  addRoute(
     'POST',
     '/api/inbox/conversations/:id/send',
     async (req, env, _ctx, params) => {
@@ -1250,6 +1537,16 @@ export function registerRoutes(deps: any) {
         return json({ ok: true, messageId });
       } catch (error) {
         console.error('Send message failed', error);
+        const failure = classifyDeliveryFailure(error);
+        await markConversationDeliveryFailure(env, {
+          conversationId,
+          userId,
+          blocked: failure.blocked,
+          bounced: failure.bounced,
+        });
+        if (failure.blocked || failure.bounced) {
+          await recomputeConversationState(env, userId, conversationId);
+        }
         const message =
           error instanceof MetaApiError
             ? `Meta API error: ${error.message}`
@@ -1401,6 +1698,16 @@ export function registerRoutes(deps: any) {
         return json({ ok: true, messageId });
       } catch (error) {
         console.error('Final touch failed', error);
+        const failure = classifyDeliveryFailure(error);
+        await markConversationDeliveryFailure(env, {
+          conversationId,
+          userId,
+          blocked: failure.blocked,
+          bounced: failure.bounced,
+        });
+        if (failure.blocked || failure.bounced) {
+          await recomputeConversationState(env, userId, conversationId);
+        }
         const message =
           error instanceof MetaApiError
             ? `Meta API error: ${error.message}`
@@ -1900,6 +2207,16 @@ export function registerRoutes(deps: any) {
           results.push({ id: convo.id, ok: true });
           await sleepMs(400);
         } catch (error) {
+          const failure = classifyDeliveryFailure(error);
+          await markConversationDeliveryFailure(env, {
+            conversationId: convo.id,
+            userId,
+            blocked: failure.blocked,
+            bounced: failure.bounced,
+          });
+          if (failure.blocked || failure.bounced) {
+            await recomputeConversationState(env, userId, convo.id);
+          }
           const message =
             error instanceof MetaApiError
               ? `Meta API error: ${error.message}`

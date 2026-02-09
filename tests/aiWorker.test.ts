@@ -14,6 +14,9 @@ import type { MessageFeatures } from '../workers/api/inference';
 const baseFeatures = (messageText: string): MessageFeatures => ({
   has_phone_number: false,
   has_email: false,
+  has_price_rejection_phrase: false,
+  has_indefinite_deferral_phrase: false,
+  has_spam_content: false,
   has_currency: false,
   contains_price_terms: false,
   contains_opt_out: false,

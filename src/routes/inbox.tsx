@@ -124,12 +124,40 @@ type AuthResponse = {
   email?: string | null;
 };
 
+type FeatureFlagsResponse = {
+  followupInbox?: boolean;
+  opsDashboard?: boolean;
+  auditConversations?: boolean;
+};
+
+type ClassificationExplainResponse = {
+  computed_label: string;
+  reason_codes: string[];
+  feature_snapshot: Record<string, unknown>;
+  classifier_version?: string | null;
+  computed_at: number;
+};
+
 const stateTabs = [
+  { key: 'all', label: 'All' },
   { key: 'needs_followup', label: 'Needs follow-up' },
   { key: 'DEFERRED', label: 'Deferred' },
   { key: 'OFF_PLATFORM', label: 'Off-platform' },
   { key: 'LOST', label: 'Lost' },
   { key: 'CONVERTED', label: 'Converted' },
+];
+
+const auditLabelOptions = [
+  'NEW',
+  'ENGAGED',
+  'PRODUCTIVE',
+  'HIGHLY_PRODUCTIVE',
+  'PRICE_GIVEN',
+  'DEFERRED',
+  'OFF_PLATFORM',
+  'CONVERTED',
+  'LOST',
+  'SPAM',
 ];
 
 const formatRelative = (value: string | null) => {
@@ -157,8 +185,19 @@ const ruleDescriptions: Record<string, string> = {
   UNREPLIED: 'Last inbound has not been answered.',
   SLA_BREACH: 'Inbound is older than the SLA threshold.',
   PRICE_STALE: 'Pricing was shared and follow-up stalled.',
+  PRICE_REJECTION: 'Customer rejected pricing as too high.',
+  PRICE_REJECTION_STALE: 'Lost after unresolved price rejection.',
+  INDEFINITE_DEFERRAL: 'Customer deferred with no concrete date.',
+  INDEFINITE_DEFERRAL_STALE: 'Indefinite deferral went stale.',
+  WAIT_TO_PROCEED: 'Customer indicates they must wait to proceed.',
   RESURRECTED: 'New inbound after a long inactivity gap.',
   USER_ANNOTATION: 'User annotation applied.',
+  BLOCKED_BY_RECIPIENT: 'Recipient blocked further messages.',
+  BOUNCED: 'Delivery failed or recipient unreachable.',
+  OFF_PLATFORM_NO_CONTACT_INFO: 'Off-platform inferred without contact info.',
+  OFF_PLATFORM_STALE: 'Off-platform state became stale.',
+  DEFERRAL_SEASON_PARSED: 'Seasonal deferral date parsed.',
+  SPAM_CONTENT: 'Non-actionable ranting or disengagement content.',
   SYSTEM_ASSIGNMENT: 'System assignment message (not a conversion signal).',
   AI_HANDOFF_INTERPRET: 'AI inferred a handoff/off-platform intent.',
   AI_DEFER_INTERPRET: 'AI inferred a deferred follow-up request.',
@@ -284,7 +323,6 @@ export default function Inbox(): React.ReactElement {
   const [channel, setChannel] = React.useState('all');
   const [assetId, setAssetId] = React.useState('all');
   const [query, setQuery] = React.useState('');
-  const [sort, setSort] = React.useState('oldest');
   const [conversations, setConversations] = React.useState<
     ConversationSummary[]
   >([]);
@@ -303,6 +341,30 @@ export default function Inbox(): React.ReactElement {
   const [loggingOut, setLoggingOut] = React.useState(false);
   const [opsDashboardEnabled, setOpsDashboardEnabled] =
     React.useState<boolean>(false);
+  const [auditFeatureEnabled, setAuditFeatureEnabled] =
+    React.useState<boolean>(false);
+  const [auditOpenConversationId, setAuditOpenConversationId] = React.useState<
+    string | null
+  >(null);
+  const [auditMode, setAuditMode] = React.useState<'menu' | 'wrong'>('menu');
+  const [auditCorrectLabel, setAuditCorrectLabel] = React.useState('LOST');
+  const [auditNotes, setAuditNotes] = React.useState('');
+  const [auditFollowupMode, setAuditFollowupMode] = React.useState<
+    'correct' | 'wrong'
+  >('correct');
+  const [auditFollowupDueAt, setAuditFollowupDueAt] = React.useState('');
+  const [auditFollowupNotes, setAuditFollowupNotes] = React.useState('');
+  const [auditSubmitting, setAuditSubmitting] = React.useState(false);
+  const [auditError, setAuditError] = React.useState<string | null>(null);
+  const [auditWhyConversationId, setAuditWhyConversationId] = React.useState<
+    string | null
+  >(null);
+  const [auditWhyLoading, setAuditWhyLoading] = React.useState(false);
+  const [auditExplainByConversation, setAuditExplainByConversation] =
+    React.useState<Record<string, ClassificationExplainResponse>>({});
+  const [auditedConversationIds, setAuditedConversationIds] = React.useState<
+    Record<string, true>
+  >({});
   const [recomputing, setRecomputing] = React.useState(false);
   const [selectedRule, setSelectedRule] = React.useState<{
     hit: string;
@@ -395,7 +457,7 @@ export default function Inbox(): React.ReactElement {
     const params = new URLSearchParams();
     if (tab === 'needs_followup') {
       params.set('needs_followup', 'true');
-    } else {
+    } else if (tab !== 'all') {
       params.set('state', tab);
     }
     if (channel !== 'all') {
@@ -415,14 +477,8 @@ export default function Inbox(): React.ReactElement {
     const data = (await response.json()) as {
       conversations: ConversationSummary[];
     };
-    let list = data.conversations ?? [];
-    if (sort === 'oldest') {
-      list = [...list].sort((a, b) =>
-        (a.lastInboundAt ?? '').localeCompare(b.lastInboundAt ?? ''),
-      );
-    }
-    setConversations(list);
-  }, [assetId, channel, featureEnabled, query, sort, tab]);
+    setConversations(data.conversations ?? []);
+  }, [assetId, channel, featureEnabled, query, tab]);
 
   const loadConversationDetail = React.useCallback(async () => {
     if (featureEnabled === false) return;
@@ -452,15 +508,14 @@ export default function Inbox(): React.ReactElement {
       try {
         const response = await fetch('/api/feature-flags');
         if (!response.ok) return;
-        const data = (await response.json()) as {
-          followupInbox?: boolean;
-          opsDashboard?: boolean;
-        };
+        const data = (await response.json()) as FeatureFlagsResponse;
         setFeatureEnabled(Boolean(data.followupInbox));
         setOpsDashboardEnabled(Boolean(data.opsDashboard));
+        setAuditFeatureEnabled(Boolean(data.auditConversations));
       } catch {
         setFeatureEnabled(null);
         setOpsDashboardEnabled(false);
+        setAuditFeatureEnabled(false);
       }
     })();
   }, []);
@@ -482,6 +537,9 @@ export default function Inbox(): React.ReactElement {
   React.useEffect(() => {
     setSelectedRule(null);
     setSelectedAi(null);
+    setAuditOpenConversationId(null);
+    setAuditWhyConversationId(null);
+    setAuditError(null);
   }, [selectedId]);
 
   React.useEffect(() => {
@@ -655,6 +713,182 @@ export default function Inbox(): React.ReactElement {
       setConversationDrawerOpen(false);
     }
   };
+
+  const getConversationForAudit = React.useCallback(
+    (conversationId: string) => {
+      if (detail?.conversation.id === conversationId) {
+        return detail.conversation;
+      }
+      return (
+        conversations.find(
+          (conversation) => conversation.id === conversationId,
+        ) ?? null
+      );
+    },
+    [conversations, detail],
+  );
+
+  const openAuditPopover = React.useCallback(
+    (conversationId: string) => {
+      const conversation = getConversationForAudit(conversationId);
+      if (!conversation || !conversation.assetId) return;
+      setAuditOpenConversationId(conversationId);
+      setAuditMode('menu');
+      setAuditCorrectLabel(conversation.currentState);
+      setAuditNotes('');
+      setAuditFollowupMode('correct');
+      setAuditFollowupDueAt('');
+      setAuditFollowupNotes('');
+      setAuditSubmitting(false);
+      setAuditError(null);
+      setAuditWhyConversationId(null);
+    },
+    [getConversationForAudit],
+  );
+
+  const closeAuditPopover = React.useCallback(() => {
+    setAuditOpenConversationId(null);
+    setAuditWhyConversationId(null);
+    setAuditMode('menu');
+    setAuditFollowupMode('correct');
+    setAuditFollowupDueAt('');
+    setAuditFollowupNotes('');
+    setAuditError(null);
+    setAuditSubmitting(false);
+  }, []);
+
+  const loadAuditExplanation = React.useCallback(
+    async (conversationId: string, assetId: string) => {
+      if (auditExplainByConversation[conversationId]) {
+        return auditExplainByConversation[conversationId];
+      }
+      setAuditWhyLoading(true);
+      try {
+        const params = new URLSearchParams({ assetId });
+        const response = await fetch(
+          `/api/inbox/conversations/${conversationId}/classification_explain?${params.toString()}`,
+        );
+        if (!response.ok) {
+          const data = (await response.json()) as { error?: string };
+          throw new Error(
+            data?.error ?? 'Failed to load classification reasons',
+          );
+        }
+        const data = (await response.json()) as ClassificationExplainResponse;
+        setAuditExplainByConversation((prev) => ({
+          ...prev,
+          [conversationId]: data,
+        }));
+        return data;
+      } finally {
+        setAuditWhyLoading(false);
+      }
+    },
+    [auditExplainByConversation],
+  );
+
+  const handleAuditToggleWhy = React.useCallback(
+    async (conversationId: string) => {
+      if (auditWhyConversationId === conversationId) {
+        setAuditWhyConversationId(null);
+        return;
+      }
+      const conversation = getConversationForAudit(conversationId);
+      if (!conversation?.assetId) return;
+      setAuditError(null);
+      try {
+        await loadAuditExplanation(conversationId, conversation.assetId);
+        setAuditWhyConversationId(conversationId);
+      } catch (error) {
+        setAuditError(
+          error instanceof Error ? error.message : 'Failed to load explanation',
+        );
+      }
+    },
+    [auditWhyConversationId, getConversationForAudit, loadAuditExplanation],
+  );
+
+  const submitAudit = React.useCallback(
+    async (conversationId: string, isCorrect: boolean) => {
+      const conversation = getConversationForAudit(conversationId);
+      if (!conversation?.assetId || auditSubmitting) return;
+      setAuditSubmitting(true);
+      setAuditError(null);
+      try {
+        const body: {
+          assetId: string;
+          is_correct: boolean;
+          correct_label?: string;
+          followup_is_correct?: boolean;
+          followup_correct_due_at?: number;
+          followup_notes?: string;
+          notes?: string;
+        } = {
+          assetId: conversation.assetId,
+          is_correct: isCorrect,
+        };
+        if (!isCorrect) {
+          body.correct_label = auditCorrectLabel;
+          if (auditNotes.trim()) {
+            body.notes = auditNotes.trim();
+          }
+        } else if (auditNotes.trim()) {
+          body.notes = auditNotes.trim();
+        }
+        if (auditFollowupMode === 'wrong') {
+          const dueAtMs = auditFollowupDueAt
+            ? Date.parse(auditFollowupDueAt)
+            : Number.NaN;
+          if (!auditFollowupNotes.trim() && Number.isNaN(dueAtMs)) {
+            throw new Error(
+              'Add follow-up notes or a corrected follow-up date.',
+            );
+          }
+          body.followup_is_correct = false;
+          if (!Number.isNaN(dueAtMs)) {
+            body.followup_correct_due_at = dueAtMs;
+          }
+          if (auditFollowupNotes.trim()) {
+            body.followup_notes = auditFollowupNotes.trim();
+          }
+        }
+        const response = await fetch(
+          `/api/inbox/conversations/${conversationId}/audit`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!response.ok) {
+          const data = (await response.json()) as { error?: string };
+          throw new Error(data?.error ?? 'Failed to save audit');
+        }
+        setAuditedConversationIds((prev) => ({
+          ...prev,
+          [conversationId]: true,
+        }));
+        setStatus('Audit saved.');
+        closeAuditPopover();
+      } catch (error) {
+        setAuditError(
+          error instanceof Error ? error.message : 'Failed to save audit',
+        );
+      } finally {
+        setAuditSubmitting(false);
+      }
+    },
+    [
+      auditCorrectLabel,
+      auditFollowupDueAt,
+      auditFollowupMode,
+      auditFollowupNotes,
+      auditNotes,
+      auditSubmitting,
+      closeAuditPopover,
+      getConversationForAudit,
+    ],
+  );
 
   const handleSend = async () => {
     if (!selectedId || !composerText.trim()) return;
@@ -1042,6 +1276,152 @@ export default function Inbox(): React.ReactElement {
     }
   };
 
+  const renderAuditPopover = (conversationId: string) => {
+    const conversation = getConversationForAudit(conversationId);
+    if (!conversation || !conversation.assetId) return null;
+    const explain = auditExplainByConversation[conversationId];
+    const showWhy = auditWhyConversationId === conversationId;
+    return (
+      <div {...stylex.props(inboxStyles.auditPopover)}>
+        <div {...stylex.props(inboxStyles.auditPopoverTitle)}>
+          Audit {conversation.currentState}
+        </div>
+        <div {...stylex.props(inboxStyles.actionsRow)}>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            onClick={() => setAuditMode('menu')}
+          >
+            Label correct
+          </button>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            onClick={() => setAuditMode('wrong')}
+          >
+            Label wrong
+          </button>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            disabled={auditWhyLoading}
+            onClick={() => void handleAuditToggleWhy(conversationId)}
+          >
+            {showWhy ? 'Hide why' : auditWhyLoading ? 'Loading…' : 'Why?'}
+          </button>
+        </div>
+        {showWhy && explain ? (
+          <div {...stylex.props(inboxStyles.auditReasonRow)}>
+            {explain.reason_codes.length ? (
+              explain.reason_codes.map((code) => (
+                <span key={code} {...stylex.props(inboxStyles.auditReasonChip)}>
+                  {ruleDescriptions[code] ?? code}
+                </span>
+              ))
+            ) : (
+              <span {...stylex.props(inboxStyles.auditPopoverLabel)}>
+                No reason codes.
+              </span>
+            )}
+          </div>
+        ) : null}
+        {auditMode === 'wrong' ? (
+          <>
+            <label {...stylex.props(inboxStyles.auditPopoverLabel)}>
+              Correct label
+            </label>
+            <select
+              {...stylex.props(inboxStyles.select)}
+              value={auditCorrectLabel}
+              onChange={(event) => setAuditCorrectLabel(event.target.value)}
+            >
+              {auditLabelOptions.map((label) => (
+                <option key={label} value={label}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : null}
+        <label {...stylex.props(inboxStyles.auditPopoverLabel)}>
+          Label notes
+        </label>
+        <textarea
+          {...stylex.props(inboxStyles.auditTextArea)}
+          placeholder="Optional notes"
+          value={auditNotes}
+          onChange={(event) => setAuditNotes(event.target.value)}
+        />
+        <label {...stylex.props(inboxStyles.auditPopoverLabel)}>
+          Follow-up schedule
+        </label>
+        <div {...stylex.props(inboxStyles.actionsRow)}>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            onClick={() => setAuditFollowupMode('correct')}
+          >
+            Correct
+          </button>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            onClick={() => setAuditFollowupMode('wrong')}
+          >
+            Wrong
+          </button>
+        </div>
+        {auditFollowupMode === 'wrong' ? (
+          <>
+            <label {...stylex.props(inboxStyles.auditPopoverLabel)}>
+              Correct follow-up date
+            </label>
+            <input
+              type="datetime-local"
+              {...stylex.props(inboxStyles.input)}
+              value={auditFollowupDueAt}
+              onChange={(event) => setAuditFollowupDueAt(event.target.value)}
+            />
+            <label {...stylex.props(inboxStyles.auditPopoverLabel)}>
+              Follow-up notes
+            </label>
+            <textarea
+              {...stylex.props(inboxStyles.auditTextArea)}
+              placeholder="Required if no corrected date"
+              value={auditFollowupNotes}
+              onChange={(event) => setAuditFollowupNotes(event.target.value)}
+            />
+          </>
+        ) : null}
+        <div {...stylex.props(inboxStyles.actionsRow)}>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            disabled={auditSubmitting}
+            onClick={() =>
+              void submitAudit(conversationId, auditMode !== 'wrong')
+            }
+          >
+            {auditSubmitting ? 'Saving…' : 'Submit'}
+          </button>
+          <button
+            type="button"
+            {...stylex.props(layout.ghostButton)}
+            disabled={auditSubmitting}
+            onClick={closeAuditPopover}
+          >
+            Cancel
+          </button>
+        </div>
+        {auditError ? (
+          <span {...stylex.props(layout.note)} style={{ color: '#7f1d1d' }}>
+            {auditError}
+          </span>
+        ) : null}
+      </div>
+    );
+  };
+
   const latestReasons = detail?.stateEvents?.length
     ? detail.stateEvents[detail.stateEvents.length - 1]?.reasons ?? []
     : [];
@@ -1055,32 +1435,36 @@ export default function Inbox(): React.ReactElement {
       ) : null}
       {conversations.map((conversation) => (
         <li key={conversation.id}>
-          <button
-            type="button"
-            {...stylex.props(
-              inboxStyles.row,
-              selectedId === conversation.id && inboxStyles.rowSelected,
-            )}
-            onClick={() => handleSelectConversation(conversation.id)}
-            aria-pressed={selectedId === conversation.id}
-          >
-            <span
+          <div {...stylex.props(inboxStyles.rowItem)}>
+            <button
+              type="button"
               {...stylex.props(
-                inboxStyles.rowTitle,
-                selectedId === conversation.id && inboxStyles.rowTitleSelected,
+                inboxStyles.row,
+                inboxStyles.rowMainButton,
+                selectedId === conversation.id && inboxStyles.rowSelected,
               )}
+              onClick={() => handleSelectConversation(conversation.id)}
+              aria-pressed={selectedId === conversation.id}
             >
-              {conversation.participantName}
-            </span>
-            <span {...stylex.props(inboxStyles.rowMeta)}>
-              {(conversation.participantHandle ?? '—') + ' · '}
-              {formatRelative(conversation.lastInboundAt)} ·{' '}
-              {conversation.channel.toUpperCase()}
-            </span>
-            <span {...stylex.props(inboxStyles.rowSnippet)}>
-              {conversation.lastSnippet ?? 'No message yet'}
-            </span>
-          </button>
+              <span
+                {...stylex.props(
+                  inboxStyles.rowTitle,
+                  selectedId === conversation.id &&
+                    inboxStyles.rowTitleSelected,
+                )}
+              >
+                {conversation.participantName}
+              </span>
+              <span {...stylex.props(inboxStyles.rowMeta)}>
+                {(conversation.participantHandle ?? '—') + ' · '}
+                {formatRelative(conversation.lastInboundAt)} ·{' '}
+                {conversation.channel.toUpperCase()}
+              </span>
+              <span {...stylex.props(inboxStyles.rowSnippet)}>
+                {conversation.lastSnippet ?? 'No message yet'}
+              </span>
+            </button>
+          </div>
         </li>
       ))}
     </ul>
@@ -1712,14 +2096,6 @@ export default function Inbox(): React.ReactElement {
             <option value="facebook">Facebook</option>
             <option value="instagram">Instagram</option>
           </select>
-          <select
-            {...stylex.props(inboxStyles.select)}
-            value={sort}
-            onChange={(event) => setSort(event.target.value)}
-          >
-            <option value="oldest">Oldest unanswered</option>
-            <option value="recent">Newest first</option>
-          </select>
           <label
             style={{ display: 'inline-flex', gap: '6px', alignItems: 'center' }}
           >
@@ -1786,22 +2162,44 @@ export default function Inbox(): React.ReactElement {
                       {detail.conversation.participantHandle ?? '—'} ·{' '}
                       {detail.conversation.assetName ?? 'Unassigned asset'}
                     </p>
+                    {auditFeatureEnabled &&
+                    auditedConversationIds[detail.conversation.id] ? (
+                      <span {...stylex.props(inboxStyles.auditedChip)}>
+                        Audited
+                      </span>
+                    ) : null}
                   </>
                 )}
               </div>
-              <button
-                type="button"
-                ref={inspectorToggleRef}
-                {...stylex.props(
-                  inboxStyles.toggleButton,
-                  inspectorOpen && inboxStyles.toggleButtonActive,
-                )}
-                onClick={() => setInspectorOpen((prev) => !prev)}
-                aria-expanded={inspectorOpen}
-                aria-controls="inbox-inspector-drawer"
-              >
-                Inspector
-              </button>
+              <div {...stylex.props(inboxStyles.messageHeaderActions)}>
+                {auditFeatureEnabled && detail?.conversation.assetId ? (
+                  <div {...stylex.props(inboxStyles.auditAnchor)}>
+                    <button
+                      type="button"
+                      {...stylex.props(inboxStyles.toggleButton)}
+                      onClick={() => openAuditPopover(detail.conversation.id)}
+                    >
+                      Audit
+                    </button>
+                    {auditOpenConversationId === detail.conversation.id
+                      ? renderAuditPopover(detail.conversation.id)
+                      : null}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  ref={inspectorToggleRef}
+                  {...stylex.props(
+                    inboxStyles.toggleButton,
+                    inspectorOpen && inboxStyles.toggleButtonActive,
+                  )}
+                  onClick={() => setInspectorOpen((prev) => !prev)}
+                  aria-expanded={inspectorOpen}
+                  aria-controls="inbox-inspector-drawer"
+                >
+                  Inspector
+                </button>
+              </div>
             </div>
           </div>
 

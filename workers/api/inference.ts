@@ -35,6 +35,9 @@ export type ExplicitLostEvidence = {
 export type MessageFeatures = {
   has_phone_number: boolean;
   has_email: boolean;
+  has_price_rejection_phrase: boolean;
+  has_indefinite_deferral_phrase: boolean;
+  has_spam_content: boolean;
   has_currency: boolean;
   contains_price_terms: boolean;
   contains_opt_out: boolean;
@@ -95,6 +98,10 @@ export type InferenceConfig = {
   lostAfterPriceDays: number;
   resurrectGapDays: number;
   deferDefaultDays: number;
+  lostAfterPriceRejectionDays?: number;
+  lostAfterOffPlatformNoContactDays?: number;
+  lostAfterIndefiniteDeferralDays?: number;
+  dueSoonDays?: number;
 };
 
 const PHONE_REGEX = /(?:(?:\+?\d{1,3})?[\s\-()]*)?(?:\d[\s\-()]*){8,}\d/g;
@@ -102,17 +109,33 @@ const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const CURRENCY_REGEX =
   /(\$|€|£)\s?\d+|\d+(?:\.\d{2})?\s?(usd|eur|gbp|dollars)/i;
 const PRICE_TERMS = /(price|pricing|cost|quote|rate|budget)/i;
+const PRICE_REJECTION_TERMS =
+  /\b(too expensive|out of my budget|can't afford|cant afford|can['’]?t swing that|price is too high|that's too high|thats too high|cant aford)\b/i;
+const TOO_MUCH_VARIANTS = /\b(?:too|to|2)\s*much\b|\btoomuch\b/i;
+const PRICE_CONTEXT_TERMS =
+  /\b(price|pricing|cost|quote|budget|dollars?|usd|expensive|afford|payment|pay)\b/i;
+const POLITE_DECLINE_TERMS = /\b(thank(?:s| you)?|thank u|thx|ty)\b/i;
+const WAIT_TO_PROCEED_TERMS =
+  /\b(i['’]?ll have to wait|i will have to wait|have to wait|need to wait|hold off|can['’]?t do (?:it )?right now|cant do (?:it )?right now)\b/i;
+const INDEFINITE_DEFERRAL_TERMS =
+  /\b(maybe someday|someday|not right now|down the road|we['’]?ll see|we'll see|not at this time|circle back later|have to wait|need to wait|hold off)\b/i;
 const OPT_OUT_TERMS =
   /(stop|unsubscribe|opt\s*out|do not contact|dont contact|remove me)/i;
 const SCHEDULE_TERMS =
   /(schedule|scheduled|appointment|book|booking|meet|meeting|call|demo|reserve|reserved|reservation)/i;
 const DEFERRAL_TERMS =
-  /(next week|next month|tomorrow|remind me|check back|after|in\\s+\\d{1,2}\\s+days?|in\\s+\\d{1,2}\\s+weeks?|in\\s+\\d{1,2}\\s+months?|next\\s+(spring|summer|fall|autumn|winter)|until\\s+next\\s+(spring|summer|fall|autumn|winter))/i;
+  /(next week|next month|tomorrow|remind me|check back|after|in\\s+\\d{1,2}\\s+days?|in\\s+\\d{1,2}\\s+weeks?|in\\s+\\d{1,2}\\s+months?|(?:this|next)\\s+(spring|summer|fall|autumn|winter)|(?:in|until|by|around|during)\\s+(spring|summer|fall|autumn|winter))/i;
+const DEFERRAL_CONTEXT_TERMS =
+  /(follow up|follow-up|check back|circle back|reach out|later|sometime|when the time comes|down the road)/i;
 const CONVERSION_TERMS =
   /\b(purchased|paid|signed|converted|closed|done deal|we went with)\b/i;
 const LOSS_TERMS =
-  /(not interested|no thanks|lost|we went with someone else|already have|too expensive)/i;
+  /(not interested|no thanks|lost|we went with someone else|already have)/i;
 const SPAM_TERMS = /(spam|scam|bot|report|fraud|block you)/i;
+const SPAM_RANT_TERMS =
+  /\b(fbi|cia|city hall|corruption|conspiracy|government|police are|hacked my phone|they are watching me|surveillance)\b/i;
+const PRODUCT_INTENT_TERMS =
+  /\b(table|sofa|chair|desk|project|quote|delivery|finish|wood|dimensions?|measurements?|price|budget|order)\b/i;
 const LINK_REGEX = /(https?:\/\/\S+)/i;
 const SYSTEM_ASSIGNMENT_TERMS =
   /assigned to.*automation|assigned through an automation|assigned by an automation/i;
@@ -133,7 +156,7 @@ const LOST_CHOSE_EXISTING_SO_REGEX =
   /\b(i have an?.*(so|and) i(’|')?m going to keep)\b/i;
 const LOST_CHOSE_EXISTING_ALREADY_REGEX = /\b(already have)\b/i;
 const LOST_PRICE_OUT_OF_RANGE_REGEX =
-  /\b(out of (my )?price range|too expensive|can['’]?t afford|cant afford|beyond my budget|out of my budget)\b/i;
+  /\b(out of (my )?price range|can['’]?t afford|cant afford|beyond my budget|out of my budget)\b/i;
 const LOST_EXPLICIT_DECLINE_REGEX =
   /\b(no[, ]+thank(s| you)|no thanks|not interested|i['’]?m not interested|we['’]?re not interested)\b/i;
 const LOST_EXPLICIT_DECLINE_GUARD =
@@ -173,6 +196,26 @@ function isAckOnly(text: string): boolean {
     return true;
   }
   return ACK_ONLY_EMOJI.test(normalized);
+}
+
+function isHardNegativeReply(text: string): boolean {
+  const normalized = normalizeText(text)
+    .replace(/[.!?,]+/g, '')
+    .trim();
+  return /^(no|nope|nah)$/.test(normalized);
+}
+
+function addBusinessDays(base: Date, businessDays: number): Date {
+  const result = new Date(base.getTime());
+  let added = 0;
+  while (added < businessDays) {
+    result.setUTCDate(result.getUTCDate() + 1);
+    const day = result.getUTCDay();
+    if (day !== 0 && day !== 6) {
+      added += 1;
+    }
+  }
+  return result;
 }
 
 function detectExplicitLost(text: string): ExplicitLostEvidence | null {
@@ -267,11 +310,26 @@ function detectExplicitLost(text: string): ExplicitLostEvidence | null {
   return null;
 }
 
+function isSpamContent(body: string): boolean {
+  const normalized = normalizeText(body);
+  if (!normalized) return false;
+  if (normalized.length < 180) return false;
+  const rantHits = normalized.match(
+    /\b(fbi|cia|city hall|corruption|conspiracy|government|police|surveillance|hacked)\b/g,
+  );
+  const rantCount = rantHits?.length ?? 0;
+  if (rantCount < 2) return false;
+  if (PRODUCT_INTENT_TERMS.test(normalized)) return false;
+  if (normalized.includes('?')) return false;
+  return SPAM_RANT_TERMS.test(normalized);
+}
+
 export function extractFeatures(
   text: string | null,
   direction: MessageDirection = 'inbound',
 ): MessageFeatures {
   const body = text ?? '';
+  const normalized = normalizeText(body);
   const bodyWithoutLinks = body.replace(LINK_REGEX, '');
   const matchesPhone = bodyWithoutLinks.match(PHONE_REGEX) ?? [];
   const matchesEmail = body.match(EMAIL_REGEX) ?? [];
@@ -279,10 +337,29 @@ export function extractFeatures(
   const ackOnly = direction === 'inbound' ? isAckOnly(body) : false;
   const explicitLost =
     direction === 'inbound' ? detectExplicitLost(body) : null;
+  const hasWaitToProceed =
+    direction === 'inbound' && WAIT_TO_PROCEED_TERMS.test(normalized);
+  const hasTooMuchVariant =
+    direction === 'inbound' && TOO_MUCH_VARIANTS.test(normalized);
+  const hasPriceContext = PRICE_CONTEXT_TERMS.test(normalized);
+  const hasPoliteDecline = POLITE_DECLINE_TERMS.test(normalized);
+  const hasPriceRejection =
+    direction === 'inbound' &&
+    (PRICE_REJECTION_TERMS.test(normalized) ||
+      ((hasTooMuchVariant || hasWaitToProceed) &&
+        (hasPriceContext || hasPoliteDecline)));
+  const hasIndefiniteDeferral =
+    direction === 'inbound' &&
+    INDEFINITE_DEFERRAL_TERMS.test(normalized) &&
+    !deferralHint;
+  const hasSpamContent = direction === 'inbound' && isSpamContent(body);
 
   return {
     has_phone_number: matchesPhone.length > 0,
     has_email: matchesEmail.length > 0,
+    has_price_rejection_phrase: hasPriceRejection,
+    has_indefinite_deferral_phrase: hasIndefiniteDeferral,
+    has_spam_content: hasSpamContent,
     has_currency: CURRENCY_REGEX.test(body),
     contains_price_terms: PRICE_TERMS.test(body),
     contains_opt_out: OPT_OUT_TERMS.test(body),
@@ -291,13 +368,19 @@ export function extractFeatures(
     deferral_date_hint: deferralHint,
     contains_conversion_phrase: CONVERSION_TERMS.test(body),
     contains_loss_phrase: LOSS_TERMS.test(body),
-    contains_spam_phrase: SPAM_TERMS.test(body),
+    contains_spam_phrase: SPAM_TERMS.test(body) || hasSpamContent,
     contains_system_assignment: SYSTEM_ASSIGNMENT_TERMS.test(body),
     has_link: LINK_REGEX.test(body),
     message_length: body.length,
     ack_only: ackOnly || undefined,
     explicit_lost: explicitLost ?? undefined,
   };
+}
+
+function normalizeSeasonHint(
+  season: 'spring' | 'summer' | 'fall' | 'autumn' | 'winter',
+) {
+  return season === 'autumn' ? 'fall' : season;
 }
 
 function inferDeferralDate(text: string): string | null {
@@ -311,22 +394,36 @@ function inferDeferralDate(text: string): string | null {
   if (lower.includes('next month')) {
     return 'next_month';
   }
-  if (lower.includes('next spring') || lower.includes('until next spring')) {
-    return 'next_spring';
+  const nextSeasonMatch = lower.match(
+    /\b(?:until|in|by|around|during)?\s*next\s+(spring|summer|fall|autumn|winter)\b/i,
+  );
+  if (nextSeasonMatch?.[1]) {
+    return `next_${normalizeSeasonHint(
+      nextSeasonMatch[1] as 'spring' | 'summer' | 'fall' | 'autumn' | 'winter',
+    )}`;
   }
-  if (lower.includes('next summer') || lower.includes('until next summer')) {
-    return 'next_summer';
+  const thisSeasonMatch = lower.match(
+    /\b(?:until|in|by|around|during)?\s*this\s+(spring|summer|fall|autumn|winter)\b/i,
+  );
+  if (thisSeasonMatch?.[1]) {
+    return `this_${normalizeSeasonHint(
+      thisSeasonMatch[1] as 'spring' | 'summer' | 'fall' | 'autumn' | 'winter',
+    )}`;
   }
-  if (
-    lower.includes('next fall') ||
-    lower.includes('next autumn') ||
-    lower.includes('until next fall') ||
-    lower.includes('until next autumn')
-  ) {
-    return 'next_fall';
-  }
-  if (lower.includes('next winter') || lower.includes('until next winter')) {
-    return 'next_winter';
+  if (DEFERRAL_CONTEXT_TERMS.test(lower)) {
+    const seasonOnlyMatch = lower.match(
+      /\b(spring|summer|fall|autumn|winter)\b/i,
+    );
+    if (seasonOnlyMatch?.[1]) {
+      return normalizeSeasonHint(
+        seasonOnlyMatch[1] as
+          | 'spring'
+          | 'summer'
+          | 'fall'
+          | 'autumn'
+          | 'winter',
+      );
+    }
   }
   const match = lower.match(/in\s+(\d{1,2})\s+days?/i);
   if (match?.[1]) {
@@ -346,6 +443,7 @@ function inferDeferralDate(text: string): string | null {
 export function buildRuleHits(features: MessageFeatures): string[] {
   const hits: string[] = [];
   if (features.contains_spam_phrase) hits.push('SPAM_PHRASE');
+  if (features.has_spam_content) hits.push('SPAM_CONTENT');
   if (
     features.contains_conversion_phrase &&
     !features.contains_system_assignment
@@ -357,6 +455,14 @@ export function buildRuleHits(features: MessageFeatures): string[] {
   if (features.has_phone_number || features.has_email)
     hits.push('PHONE_OR_EMAIL');
   if (features.contains_deferral_phrase) hits.push('DEFERRAL_PHRASE');
+  if (features.has_price_rejection_phrase) hits.push('PRICE_REJECTION');
+  if (
+    features.has_price_rejection_phrase &&
+    features.has_indefinite_deferral_phrase
+  ) {
+    hits.push('WAIT_TO_PROCEED');
+  }
+  if (features.has_indefinite_deferral_phrase) hits.push('INDEFINITE_DEFERRAL');
   if (features.has_currency) hits.push('PRICE_MENTION');
   if (features.contains_schedule_terms) hits.push('SCHEDULE_MENTION');
   if (features.contains_opt_out) hits.push('OPT_OUT');
@@ -381,6 +487,8 @@ export type ConversationInferenceInput = {
   previousState?: ConversationState | null;
   previousEvaluatedAt?: string | null;
   finalTouchSentAt?: string | null;
+  blockedByRecipient?: boolean;
+  bouncedByProvider?: boolean;
   now?: Date;
   config: InferenceConfig;
 };
@@ -401,6 +509,7 @@ export type ConversationInference = {
   outboundCount: number;
   lastSnippet: string | null;
   resurrected: boolean;
+  needsFollowup: boolean;
   stateTriggerMessageId?: string | null;
 };
 
@@ -417,6 +526,36 @@ function deriveFollowupDueAt(
   defaultDays: number,
 ): string {
   const next = new Date(now.getTime());
+  const seasonDates: Record<
+    'spring' | 'summer' | 'fall' | 'winter',
+    [number, number]
+  > = {
+    spring: [3, 15],
+    summer: [6, 15],
+    fall: [9, 15],
+    winter: [0, 15],
+  };
+  const resolveSeason = (
+    season: 'spring' | 'summer' | 'fall' | 'winter',
+    qualifier: 'this' | 'next' | 'upcoming',
+  ) => {
+    const [month, day] = seasonDates[season];
+    let year = next.getUTCFullYear();
+    const candidate = Date.UTC(year, month, day, 12, 0, 0, 0);
+    if (qualifier === 'next') {
+      if (next.getTime() >= candidate) {
+        year += 1;
+      }
+      return new Date(Date.UTC(year, month, day, 12, 0, 0, 0)).toISOString();
+    }
+    if (qualifier === 'this') {
+      return new Date(Date.UTC(year, month, day, 12, 0, 0, 0)).toISOString();
+    }
+    if (next.getTime() > candidate) {
+      year += 1;
+    }
+    return new Date(Date.UTC(year, month, day, 12, 0, 0, 0)).toISOString();
+  };
   if (!hint) {
     next.setUTCDate(next.getUTCDate() + defaultDays);
     return next.toISOString();
@@ -433,21 +572,26 @@ function deriveFollowupDueAt(
     next.setUTCMonth(next.getUTCMonth() + 1);
     return next.toISOString();
   }
-  if (hint === 'next_spring') {
-    next.setUTCMonth(next.getUTCMonth() + 3);
-    return next.toISOString();
+  const nextSeasonMatch = hint.match(/^next_(spring|summer|fall|winter)$/);
+  if (nextSeasonMatch?.[1]) {
+    return resolveSeason(
+      nextSeasonMatch[1] as 'spring' | 'summer' | 'fall' | 'winter',
+      'next',
+    );
   }
-  if (hint === 'next_summer') {
-    next.setUTCMonth(next.getUTCMonth() + 6);
-    return next.toISOString();
+  const thisSeasonMatch = hint.match(/^this_(spring|summer|fall|winter)$/);
+  if (thisSeasonMatch?.[1]) {
+    return resolveSeason(
+      thisSeasonMatch[1] as 'spring' | 'summer' | 'fall' | 'winter',
+      'this',
+    );
   }
-  if (hint === 'next_fall') {
-    next.setUTCMonth(next.getUTCMonth() + 9);
-    return next.toISOString();
-  }
-  if (hint === 'next_winter') {
-    next.setUTCMonth(next.getUTCMonth() + 12);
-    return next.toISOString();
+  const seasonMatch = hint.match(/^(spring|summer|fall|winter)$/);
+  if (seasonMatch?.[1]) {
+    return resolveSeason(
+      seasonMatch[1] as 'spring' | 'summer' | 'fall' | 'winter',
+      'upcoming',
+    );
   }
   const match = hint.match(/in_(\d+)_days/);
   if (match?.[1]) {
@@ -472,6 +616,19 @@ export function inferConversation(
   input: ConversationInferenceInput,
 ): ConversationInference {
   const now = input.now ?? new Date();
+  const lostAfterPriceRejectionDays = Math.max(
+    1,
+    input.config.lostAfterPriceRejectionDays ?? 14,
+  );
+  const lostAfterOffPlatformNoContactDays = Math.max(
+    1,
+    input.config.lostAfterOffPlatformNoContactDays ?? 21,
+  );
+  const lostAfterIndefiniteDeferralDays = Math.max(
+    1,
+    input.config.lostAfterIndefiniteDeferralDays ?? 30,
+  );
+  const dueSoonDays = Math.max(1, input.config.dueSoonDays ?? 3);
   const messages = input.messages
     .slice()
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -482,8 +639,11 @@ export function inferConversation(
   let lastOutboundAt: string | null = null;
   let lastSnippet: string | null = null;
   let lastMessageAt: string | null = null;
+  let lastNonFinalMessageAt: string | null = null;
+  let lastNonFinalDirection: 'inbound' | 'outbound' | null = null;
   let deferralHint: string | null = null;
   let lastDeferralAt: string | null = null;
+  let lastPriceRejectionAt: string | null = null;
 
   for (const msg of messages) {
     const isFinalTouch = msg.messageType === 'FINAL_TOUCH';
@@ -495,6 +655,8 @@ export function inferConversation(
         outboundCount += 1;
         lastOutboundAt = msg.createdAt;
       }
+      lastNonFinalMessageAt = msg.createdAt;
+      lastNonFinalDirection = msg.direction;
     }
     lastSnippet = coalesceSnippet(msg.text) ?? lastSnippet;
     lastMessageAt = msg.createdAt;
@@ -502,9 +664,25 @@ export function inferConversation(
       deferralHint = msg.features.deferral_date_hint ?? deferralHint;
       lastDeferralAt = msg.createdAt;
     }
+    if (msg.direction === 'inbound' && msg.features.deferral_date_hint) {
+      deferralHint = msg.features.deferral_date_hint;
+      lastDeferralAt = msg.createdAt;
+    }
     if (
       msg.direction === 'inbound' &&
       msg.features.ai?.interpretation?.deferred?.is_deferred
+    ) {
+      lastDeferralAt = msg.createdAt;
+    }
+    if (
+      msg.direction === 'inbound' &&
+      msg.features.has_price_rejection_phrase
+    ) {
+      lastPriceRejectionAt = msg.createdAt;
+    }
+    if (
+      msg.direction === 'inbound' &&
+      msg.features.has_indefinite_deferral_phrase
     ) {
       lastDeferralAt = msg.createdAt;
     }
@@ -566,9 +744,19 @@ export function inferConversation(
       !msg.features.contains_system_assignment,
   );
   const hasOptOut = hasRule(messages, 'OPT_OUT');
-  const hasSpam = hasRule(messages, 'SPAM_PHRASE');
+  const hasBlocked = Boolean(input.blockedByRecipient);
+  const hasBounced = Boolean(input.bouncedByProvider);
+  const hasSpamPhrase = hasRule(messages, 'SPAM_PHRASE');
+  const hasSpamContent = hasRule(messages, 'SPAM_CONTENT');
+  const hasSpam = hasSpamPhrase || hasSpamContent;
   const hasConversion = inboundConversionMessages.length > 0;
   const hasLoss = hasRule(messages, 'LOSS_PHRASE');
+  const hasPriceRejection = inboundMessages.some(
+    (msg) => msg.features.has_price_rejection_phrase,
+  );
+  const hasIndefiniteDeferral = inboundMessages.some(
+    (msg) => msg.features.has_indefinite_deferral_phrase,
+  );
   const explicitLostOrder: ExplicitLostReasonCode[] = [
     'LOST_NOT_INTENTIONAL',
     'LOST_BOUGHT_ELSEWHERE',
@@ -662,6 +850,37 @@ export function inferConversation(
     }
   }
   const hasPrice = hasRule(messages, 'PRICE_MENTION');
+  const hasConcreteDeferral = Boolean(deferralHint) || Boolean(aiDeferredDueAt);
+  const nowMs = now.getTime();
+  const lastInboundMs = lastInboundAt ? Date.parse(lastInboundAt) : Number.NaN;
+  const lastMessageMs = lastMessageAt ? Date.parse(lastMessageAt) : Number.NaN;
+  const daysSinceLastInbound = Number.isNaN(lastInboundMs)
+    ? null
+    : (nowMs - lastInboundMs) / (1000 * 60 * 60 * 24);
+  const daysSinceLastActivity = Number.isNaN(lastMessageMs)
+    ? null
+    : (nowMs - lastMessageMs) / (1000 * 60 * 60 * 24);
+  const hasRejectionRevival = (() => {
+    if (!lastPriceRejectionAt) return false;
+    const rejectionMs = Date.parse(lastPriceRejectionAt);
+    if (Number.isNaN(rejectionMs)) return false;
+    const revivalWindowMs = input.config.resurrectGapDays * 24 * 60 * 60 * 1000;
+    return inboundMessages.some((msg) => {
+      const ts = Date.parse(msg.createdAt);
+      if (Number.isNaN(ts) || ts <= rejectionMs) return false;
+      if (ts - rejectionMs > revivalWindowMs) return false;
+      if (!msg.text) return false;
+      if (msg.features.ack_only) return false;
+      if (isHardNegativeReply(msg.text)) return false;
+      if (
+        msg.features.has_price_rejection_phrase ||
+        msg.features.has_indefinite_deferral_phrase
+      ) {
+        return false;
+      }
+      return true;
+    });
+  })();
 
   let reasons: Array<
     string | { code: string; confidence: Confidence; evidence?: string }
@@ -672,10 +891,22 @@ export function inferConversation(
   let followupSuggestion: string | null = null;
   let stateTriggerMessageId: string | null = null;
 
-  if (hasSpam) {
+  if (hasOptOut) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('OPT_OUT');
+  } else if (hasBlocked) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('BLOCKED_BY_RECIPIENT');
+  } else if (hasBounced) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('BOUNCED');
+  } else if (hasSpam) {
     state = 'SPAM';
     confidence = 'HIGH';
-    reasons.push('SPAM_PHRASE');
+    reasons.push(hasSpamContent ? 'SPAM_CONTENT' : 'SPAM_PHRASE');
   } else if (hasConversion) {
     state = 'CONVERTED';
     confidence = 'HIGH';
@@ -693,6 +924,13 @@ export function inferConversation(
     state = 'LOST';
     confidence = 'HIGH';
     reasons.push('LOSS_PHRASE');
+  } else if (hasIndefiniteDeferral && !hasConcreteDeferral) {
+    state = 'LOST';
+    confidence = 'MEDIUM';
+    reasons.push('INDEFINITE_DEFERRAL');
+    if (hasPriceRejection) {
+      reasons.push('WAIT_TO_PROCEED');
+    }
   } else if (hasOffPlatform) {
     state = 'OFF_PLATFORM';
     confidence = 'MEDIUM';
@@ -709,9 +947,12 @@ export function inferConversation(
         deriveFollowupDueAt(null, now, input.config.deferDefaultDays);
     } else {
       reasons.push('DEFERRAL_PHRASE');
+      if (deferralHint?.match(/^(this_|next_)?(spring|summer|fall|winter)$/)) {
+        reasons.push('DEFERRAL_SEASON_PARSED');
+      }
       followupDueAt = deriveFollowupDueAt(
         deferralHint,
-        now,
+        lastDeferralAt ? new Date(lastDeferralAt) : now,
         input.config.deferDefaultDays,
       );
     }
@@ -730,6 +971,43 @@ export function inferConversation(
     confidence = 'LOW';
   }
 
+  if (
+    state !== 'LOST' &&
+    hasPriceRejection &&
+    !hasRejectionRevival &&
+    daysSinceLastInbound !== null &&
+    daysSinceLastInbound >= lostAfterPriceRejectionDays
+  ) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('PRICE_REJECTION_STALE');
+  }
+
+  if (
+    state === 'OFF_PLATFORM' &&
+    !hasExplicitContact &&
+    daysSinceLastActivity !== null &&
+    daysSinceLastActivity >= lostAfterOffPlatformNoContactDays
+  ) {
+    state = 'LOST';
+    confidence = 'MEDIUM';
+    reasons.push('OFF_PLATFORM_NO_CONTACT_INFO');
+    reasons.push('OFF_PLATFORM_STALE');
+  }
+
+  if (
+    (state === 'DEFERRED' || state === 'PRODUCTIVE' || state === 'ENGAGED') &&
+    hasIndefiniteDeferral &&
+    !hasConcreteDeferral &&
+    daysSinceLastActivity !== null &&
+    daysSinceLastActivity >= lostAfterIndefiniteDeferralDays
+  ) {
+    state = 'LOST';
+    confidence = 'MEDIUM';
+    followupDueAt = null;
+    reasons.push('INDEFINITE_DEFERRAL');
+  }
+
   const resurrected = detectResurrection({
     previousState: input.previousState,
     previousEvaluatedAt: input.previousEvaluatedAt,
@@ -743,6 +1021,20 @@ export function inferConversation(
     reasons.push('RESURRECTED');
   }
 
+  let needsFollowup = false;
+  const hasReasonCode = (code: string) =>
+    reasons.some((reason) =>
+      typeof reason === 'string' ? reason === code : reason.code === code,
+    );
+  const isDeferredWithSpecificDate =
+    state === 'DEFERRED' &&
+    Boolean(followupDueAt) &&
+    !Number.isNaN(Date.parse(followupDueAt ?? ''));
+  const applyDefaultFollowupPolicy =
+    state !== 'SPAM' &&
+    state !== 'LOST' &&
+    state !== 'CONVERTED' &&
+    !isDeferredWithSpecificDate;
   if (state === 'DEFERRED') {
     if (followupDueAt) {
       const dueMs = Date.parse(followupDueAt);
@@ -750,32 +1042,47 @@ export function inferConversation(
         !Number.isNaN(dueMs) && dueMs > now.getTime()
           ? 'Follow up later'
           : 'Follow up now';
+      if (!Number.isNaN(dueMs)) {
+        const dueSoonWindowMs =
+          Math.max(input.config.slaHours, dueSoonDays * 24) * 60 * 60 * 1000;
+        needsFollowup =
+          dueMs <= now.getTime() || dueMs - now.getTime() <= dueSoonWindowMs;
+      }
     } else {
       followupSuggestion = 'Follow up later';
     }
   } else if (state === 'OFF_PLATFORM') {
     followupSuggestion = 'Visibility lost (off-platform)';
-  } else if (state !== 'SPAM' && state !== 'LOST' && state !== 'CONVERTED') {
-    if (inboundCount === 0) {
-      followupSuggestion = null;
-    } else if (lastInboundAt) {
-      const inboundMs = Date.parse(lastInboundAt);
-      const outboundMs = lastOutboundAt ? Date.parse(lastOutboundAt) : null;
-      if (Number.isNaN(inboundMs)) {
-        // no-op
-      } else if (outboundMs === null || outboundMs < inboundMs) {
-        followupSuggestion = 'Reply recommended';
+  } else if (applyDefaultFollowupPolicy) {
+    const lastNonFinalMs = lastNonFinalMessageAt
+      ? Date.parse(lastNonFinalMessageAt)
+      : Number.NaN;
+    if (lastNonFinalDirection === 'inbound' && !Number.isNaN(lastNonFinalMs)) {
+      followupSuggestion = 'Reply recommended';
+      if (!hasReasonCode('UNREPLIED')) {
         reasons.push('UNREPLIED');
-        const ageHours = (now.getTime() - inboundMs) / (1000 * 60 * 60);
-        if (ageHours >= input.config.slaHours) {
-          reasons.push('SLA_BREACH');
-        }
+      }
+      needsFollowup = true;
+      const ageHours = (now.getTime() - lastNonFinalMs) / (1000 * 60 * 60);
+      if (ageHours >= input.config.slaHours && !hasReasonCode('SLA_BREACH')) {
+        reasons.push('SLA_BREACH');
+      }
+    } else if (
+      lastNonFinalDirection === 'outbound' &&
+      !Number.isNaN(lastNonFinalMs)
+    ) {
+      const dueAt = addBusinessDays(new Date(lastNonFinalMs), 2).toISOString();
+      followupDueAt = followupDueAt ?? dueAt;
+      if (Date.parse(dueAt) <= now.getTime()) {
+        followupSuggestion = 'Follow up now';
+        needsFollowup = true;
+      } else {
+        followupSuggestion = 'Follow up later';
       }
     }
   }
 
   if (inboundCount === 0) {
-    followupSuggestion = null;
     reasons = reasons.filter(
       (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
     );
@@ -783,6 +1090,7 @@ export function inferConversation(
 
   if (state === 'CONVERTED' || state === 'SPAM' || state === 'LOST') {
     followupSuggestion = null;
+    needsFollowup = false;
     reasons = reasons.filter(
       (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
     );
@@ -793,14 +1101,14 @@ export function inferConversation(
     !Number.isNaN(Date.parse(followupDueAt)) &&
     Date.parse(followupDueAt) > now.getTime();
   const inactiveMs = 30 * 24 * 60 * 60 * 1000;
-  const inactiveTimeout =
-    lastInboundAt &&
-    !Number.isNaN(Date.parse(lastInboundAt)) &&
-    now.getTime() - Date.parse(lastInboundAt) >= inactiveMs;
+  const inactiveTimeoutByNoCustomerReply =
+    lastNonFinalDirection === 'outbound' &&
+    lastNonFinalMessageAt &&
+    !Number.isNaN(Date.parse(lastNonFinalMessageAt)) &&
+    now.getTime() - Date.parse(lastNonFinalMessageAt) >= inactiveMs;
   if (
     !['LOST', 'SPAM', 'CONVERTED', 'OFF_PLATFORM'].includes(state) &&
-    outboundCount > 0 &&
-    inactiveTimeout &&
+    inactiveTimeoutByNoCustomerReply &&
     !hasOptOut &&
     !explicitLost &&
     !hasLoss &&
@@ -809,12 +1117,13 @@ export function inferConversation(
     state = 'LOST';
     confidence = 'HIGH';
     followupSuggestion = null;
+    needsFollowup = false;
     followupDueAt = null;
     reasons = [
       {
         code: 'LOST_INACTIVE_TIMEOUT',
         confidence: 'HIGH',
-        evidence: lastInboundAt ?? undefined,
+        evidence: lastNonFinalMessageAt ?? undefined,
       },
     ];
   }
@@ -850,6 +1159,7 @@ export function inferConversation(
     outboundCount,
     lastSnippet,
     resurrected,
+    needsFollowup,
     stateTriggerMessageId,
   };
 }

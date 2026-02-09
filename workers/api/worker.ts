@@ -22,10 +22,18 @@ import {
   annotateMessage,
   inferConversation,
   type AnnotatedMessage,
+  type Confidence,
+  type ConversationInference,
   type ConversationState,
   type InferenceConfig,
   type MessageFeatures,
 } from './inference';
+import {
+  buildFeatureSnapshot,
+  CLASSIFIER_VERSION,
+  reasonCodesFromReasons,
+  resolveComputedClassification,
+} from './conversationAudit';
 import { buildContextDigest } from './aiInterpreter';
 import { getAiConfig, runAiAttemptForMessage } from './aiRun';
 import {
@@ -76,6 +84,10 @@ export type Env = {
   FOLLOWUP_SLA_HOURS?: string;
   INBOX_SLA_HOURS?: string;
   INBOX_LOST_AFTER_PRICE_DAYS?: string;
+  INBOX_LOST_AFTER_PRICE_REJECTION_DAYS?: string;
+  INBOX_LOST_AFTER_OFF_PLATFORM_NO_CONTACT_DAYS?: string;
+  INBOX_LOST_AFTER_INDEFINITE_DEFERRAL_DAYS?: string;
+  INBOX_DUE_SOON_DAYS?: string;
   INBOX_RESURRECT_GAP_DAYS?: string;
   INBOX_DEFER_DEFAULT_DAYS?: string;
   CLASSIFIER_AI_MODE?: string;
@@ -88,6 +100,7 @@ export type Env = {
   CLASSIFIER_AI_MAX_CALLS_PER_CONVERSATION_PER_DAY?: string;
   FEATURE_FOLLOWUP_INBOX?: string;
   FEATURE_OPS_DASHBOARD?: string;
+  FEATURE_AUDIT_CONVERSATIONS?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -178,6 +191,10 @@ type ConversationRow = {
   isSpam: number;
   lastSnippet: string | null;
   offPlatformOutcome: string | null;
+  blockedByRecipient?: number | null;
+  blockedAt?: string | null;
+  bouncedByProvider?: number | null;
+  bouncedAt?: string | null;
   finalTouchRequired?: number | null;
   finalTouchSentAt?: string | null;
   lostReasonCode?: string | null;
@@ -425,7 +442,29 @@ function getInferenceConfig(env: Env): InferenceConfig {
     1,
     parseNumberEnv(env.INBOX_DEFER_DEFAULT_DAYS, 30),
   );
-  return { slaHours, lostAfterPriceDays, resurrectGapDays, deferDefaultDays };
+  const lostAfterPriceRejectionDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_LOST_AFTER_PRICE_REJECTION_DAYS, 14),
+  );
+  const lostAfterOffPlatformNoContactDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_LOST_AFTER_OFF_PLATFORM_NO_CONTACT_DAYS, 21),
+  );
+  const lostAfterIndefiniteDeferralDays = Math.max(
+    1,
+    parseNumberEnv(env.INBOX_LOST_AFTER_INDEFINITE_DEFERRAL_DAYS, 30),
+  );
+  const dueSoonDays = Math.max(1, parseNumberEnv(env.INBOX_DUE_SOON_DAYS, 3));
+  return {
+    slaHours,
+    lostAfterPriceDays,
+    resurrectGapDays,
+    deferDefaultDays,
+    lostAfterPriceRejectionDays,
+    lostAfterOffPlatformNoContactDays,
+    lostAfterIndefiniteDeferralDays,
+    dueSoonDays,
+  };
 }
 
 function getAiDateKey(now: Date) {
@@ -493,6 +532,10 @@ function isOpsDashboardEnabled(env: Env) {
   return isFeatureEnabled(env.FEATURE_OPS_DASHBOARD);
 }
 
+function isAuditConversationsEnabled(env: Env) {
+  return isFeatureEnabled(env.FEATURE_AUDIT_CONVERSATIONS);
+}
+
 async function getUserFeatureFlags(env: Env, userId: string) {
   const row = await env.DB.prepare(
     'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
@@ -544,6 +587,20 @@ async function isOpsDashboardEnabledForUser(env: Env, userId: string) {
   return resolveFeatureFlagValue(
     defaultValue,
     (flags as Record<string, unknown>).FEATURE_OPS_DASHBOARD,
+  );
+}
+
+async function isAuditConversationsEnabledForUser(env: Env, userId: string) {
+  const defaultValue = isAuditConversationsEnabled(env);
+  const flags = await getUserFeatureFlags(env, userId);
+  if (
+    !Object.prototype.hasOwnProperty.call(flags, 'FEATURE_AUDIT_CONVERSATIONS')
+  ) {
+    return defaultValue;
+  }
+  return resolveFeatureFlagValue(
+    defaultValue,
+    (flags as Record<string, unknown>).FEATURE_AUDIT_CONVERSATIONS,
   );
 }
 
@@ -886,6 +943,10 @@ async function getConversation(
             is_spam as isSpam,
             last_snippet as lastSnippet,
             off_platform_outcome as offPlatformOutcome,
+            blocked_by_recipient as blockedByRecipient,
+            blocked_at as blockedAt,
+            bounced_by_provider as bouncedByProvider,
+            bounced_at as bouncedAt,
             final_touch_required as finalTouchRequired,
             final_touch_sent_at as finalTouchSentAt,
             lost_reason_code as lostReasonCode
@@ -1141,20 +1202,38 @@ async function recordStateEvent(
     .run();
 }
 
-async function recomputeConversationState(
+type ConversationClassificationExplain = {
+  conversation: ConversationRow;
+  inference: ConversationInference;
+  computedLabel: ConversationState;
+  computedConfidence: Confidence;
+  reasons: Array<
+    string | { code: string; confidence: Confidence; evidence?: string }
+  >;
+  reasonCodes: string[];
+  lostReasonCode: string | null;
+  classifierVersion: string;
+  computedAt: number;
+  featureSnapshot: Record<string, unknown>;
+};
+
+async function getConversationClassificationExplain(
   env: Env,
   userId: string,
   conversationId: string,
-  aiRunStats?: AiRunStats,
-) {
+  options?: {
+    forceRecomputeFeatures?: boolean;
+    aiRunStats?: AiRunStats;
+  },
+): Promise<ConversationClassificationExplain | null> {
   const conversation = await getConversation(env, userId, conversationId);
   if (!conversation) return null;
   const messages = await loadConversationMessagesForInference(
     env,
     userId,
     conversationId,
-    true,
-    aiRunStats,
+    options?.forceRecomputeFeatures ?? true,
+    options?.aiRunStats,
   );
   if (!messages.length) return null;
   const config = getInferenceConfig(env);
@@ -1163,50 +1242,70 @@ async function recomputeConversationState(
     previousState: conversation.currentState ?? null,
     previousEvaluatedAt: conversation.lastEvaluatedAt ?? null,
     finalTouchSentAt: conversation.finalTouchSentAt ?? null,
+    blockedByRecipient: Boolean(conversation.blockedByRecipient),
+    bouncedByProvider: Boolean(conversation.bouncedByProvider),
     config,
   });
-
-  let finalState = inference.state;
-  let finalConfidence = inference.confidence;
-  const reasons = inference.reasons.slice();
-  const objectReason = reasons.find((reason) => {
-    if (typeof reason !== 'object' || reason === null) return false;
-    const code = (reason as { code?: unknown }).code;
-    return typeof code === 'string' && code.startsWith('LOST_');
+  const resolved = resolveComputedClassification({
+    inference,
+    currentState: conversation.currentState,
+    offPlatformOutcome: conversation.offPlatformOutcome,
   });
-  const lostReasonCode =
-    (typeof objectReason === 'object' &&
-    objectReason !== null &&
-    'code' in objectReason
-      ? (objectReason as { code: string }).code
-      : null) ??
-    reasons.find(
-      (reason) => typeof reason === 'string' && reason.startsWith('LOST_'),
-    ) ??
-    null;
+  const reasonCodes = reasonCodesFromReasons(resolved.reasons);
+  const computedAt = Date.now();
+  const featureSnapshot = buildFeatureSnapshot({
+    conversation,
+    messages,
+    config,
+    inference,
+    computedLabel: resolved.computedLabel,
+    computedConfidence: resolved.computedConfidence,
+    reasonCodes,
+    computedAt,
+  });
+  return {
+    conversation,
+    inference,
+    computedLabel: resolved.computedLabel,
+    computedConfidence: resolved.computedConfidence,
+    reasons: resolved.reasons,
+    reasonCodes,
+    lostReasonCode: resolved.lostReasonCode,
+    classifierVersion: CLASSIFIER_VERSION,
+    computedAt,
+    featureSnapshot,
+  };
+}
 
-  if (
-    conversation.offPlatformOutcome &&
-    conversation.currentState === 'OFF_PLATFORM'
-  ) {
-    if (conversation.offPlatformOutcome === 'converted') {
-      finalState = 'CONVERTED';
-      finalConfidence = 'LOW';
-      reasons.push('USER_ANNOTATION');
-    } else if (conversation.offPlatformOutcome === 'lost') {
-      finalState = 'LOST';
-      finalConfidence = 'LOW';
-      reasons.push('USER_ANNOTATION');
-    }
-  }
-
-  const nowIso = new Date().toISOString();
+async function recomputeConversationState(
+  env: Env,
+  userId: string,
+  conversationId: string,
+  aiRunStats?: AiRunStats,
+) {
+  const explanation = await getConversationClassificationExplain(
+    env,
+    userId,
+    conversationId,
+    {
+      forceRecomputeFeatures: true,
+      aiRunStats,
+    },
+  );
+  if (!explanation) return null;
+  const conversation = explanation.conversation;
+  const inference = explanation.inference;
+  const finalState = explanation.computedLabel;
+  const finalConfidence = explanation.computedConfidence;
+  const reasons = explanation.reasons;
+  const lostReasonCode = explanation.lostReasonCode;
+  const nowIso = new Date(explanation.computedAt).toISOString();
   const needsFollowup =
     finalState !== 'LOST' &&
     finalState !== 'SPAM' &&
-    Boolean(inference.followupSuggestion);
-  const finalTouchSentAt =
-    conversation.finalTouchSentAt ?? conversation.finalTouchSentAt ?? null;
+    finalState !== 'CONVERTED' &&
+    Boolean(inference.needsFollowup);
+  const finalTouchSentAt = conversation.finalTouchSentAt ?? null;
   const finalTouchRequired =
     finalState === 'LOST' &&
     lostReasonCode === 'LOST_INACTIVE_TIMEOUT' &&
@@ -3048,8 +3147,10 @@ registerRoutes({
   getApiVersion,
   isFollowupInboxEnabled,
   isOpsDashboardEnabled,
+  isAuditConversationsEnabled,
   isFollowupInboxEnabledForUser,
   isOpsDashboardEnabledForUser,
+  isAuditConversationsEnabledForUser,
   getUserFeatureFlags,
   exchangeCodeForToken,
   exchangeForLongLivedToken,
@@ -3077,6 +3178,7 @@ registerRoutes({
   listPagesWithStats,
   getAssetNameMap,
   getConversation,
+  getConversationClassificationExplain,
   listConversationTags,
   recomputeConversationState,
   recordStateEvent,

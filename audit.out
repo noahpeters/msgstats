@@ -1,0 +1,72 @@
+
+ ⛅️ wrangler 4.61.1 (update available 4.63.0)
+─────────────────────────────────────────────
+Resource location: local 
+
+Use --remote if you want to access the remote instance.
+
+🌀 Executing on local database DB (b1918df0-760c-41f1-9778-9d5f95ab9a41) from .wrangler/state/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 1 command executed successfully.
+[
+  {
+    "results": [
+      {
+        "created_at": 1770670069490,
+        "asset_id": "776027978927898",
+        "conversation_id": "t_4463595643962413",
+        "current_label": "PRICE_GIVEN",
+        "correct_label": "LOST",
+        "is_correct": 0,
+        "notes": "this is a indefinite deferral/price rejection. the customer stated: \"Thank I will have to wait on the table in I’ll have to wait but thank\"",
+        "reason_codes": "[\"PRICE_MENTION\",\"UNREPLIED\",\"SLA_BREACH\"]",
+        "feature_snapshot": "{\"conversation_id\":\"t_4463595643962413\",\"contact_id\":\"33564447263170459\",\"computed_label\":\"PRICE_GIVEN\",\"computed_confidence\":\"MEDIUM\",\"reason_codes\":[\"PRICE_MENTION\",\"UNREPLIED\",\"SLA_BREACH\"],\"state_fields\":{\"previous_state\":\"PRICE_GIVEN\",\"off_platform_outcome\":null,\"needs_followup_before\":true,\"followup_due_at_before\":null,\"followup_suggestion_before\":\"Reply recommended\"},\"timestamps\":{\"computed_at\":1770670069490,\"last_inbound_at\":\"2026-01-31T01:35:09+0000\",\"last_outbound_at\":\"2026-01-31T01:32:59+0000\",\"last_activity_at\":\"2026-01-31T01:35:09+0000\",\"previous_last_evaluated_at\":\"2026-02-09T20:41:51.318Z\"},\"counts\":{\"all_time\":{\"message_count\":18,\"inbound_count\":6,\"outbound_count\":12},\"window_7d\":{\"inbound\":0,\"outbound\":0,\"total\":0},\"window_30d\":{\"inbound\":6,\"outbound\":12,\"total\":18},\"previous_persisted\":{\"message_count\":18,\"inbound_count\":6,\"outbound_count\":12}},\"days_since\":{\"last_inbound\":9.8,\"last_outbound\":9.802,\"last_activity\":9.8,\"previous_evaluated\":0.004},\"thresholds\":{\"sla_hours\":24,\"lost_after_price_days\":60,\"lost_after_price_rejection_days\":14,\"lost_after_off_platform_no_contact_days\":21,\"lost_after_indefinite_deferral_days\":30,\"resurrect_gap_days\":30,\"defer_default_days\":30,\"due_soon_days\":3,\"inactive_timeout_days\":30},\"message_flags\":{\"has_opt_out\":false,\"has_phone_or_email\":false,\"has_schedule_terms\":false,\"has_deferral_phrase\":false,\"has_currency\":true,\"has_price_rejection_phrase\":false,\"has_indefinite_deferral_phrase\":false,\"has_bounced\":false,\"has_blocked\":false}}",
+        "classifier_version": "inbox_inference_v1",
+        "computed_at": 1770670069490
+      },
+      {
+        "created_at": 1770670008051,
+        "asset_id": "776027978927898",
+        "conversation_id": "t_4439739992921551",
+        "current_label": "HIGHLY_PRODUCTIVE",
+        "correct_label": "SPAM",
+        "is_correct": 0,
+        "notes": "this includes some delusional ranting and we should intentionally disengage from customers like this.:\n\n\"#everyone The corruption in this city is diabolical; they put the clock forward by 10 mins. My cell phone was dead; they are doing something to it, and when I asked the time in the Women's center they would not tell me. In addition to that the police are damaging and attempting to steal my court papers, with the FBI. I am going to go to the city hall this morning, although wanted to come here first, to check mail. Then, go to the another library at 10 am, and return here later. I have some things to do.\"",
+        "reason_codes": "[\"UNREPLIED\",\"SLA_BREACH\"]",
+        "feature_snapshot": "{\"conversation_id\":\"t_4439739992921551\",\"contact_id\":\"25709300368718963\",\"computed_label\":\"HIGHLY_PRODUCTIVE\",\"computed_confidence\":\"MEDIUM\",\"reason_codes\":[\"UNREPLIED\",\"SLA_BREACH\"],\"state_fields\":{\"previous_state\":\"HIGHLY_PRODUCTIVE\",\"off_platform_outcome\":null,\"needs_followup_before\":true,\"followup_due_at_before\":null,\"followup_suggestion_before\":\"Reply recommended\"},\"timestamps\":{\"computed_at\":1770670008051,\"last_inbound_at\":\"2026-01-28T17:04:45+0000\",\"last_outbound_at\":\"2026-01-27T16:48:27+0000\",\"last_activity_at\":\"2026-01-28T17:04:45+0000\",\"previous_last_evaluated_at\":\"2026-02-09T20:41:51.314Z\"},\"counts\":{\"all_time\":{\"message_count\":12,\"inbound_count\":5,\"outbound_count\":7},\"window_7d\":{\"inbound\":0,\"outbound\":0,\"total\":0},\"window_30d\":{\"inbound\":5,\"outbound\":7,\"total\":12},\"previous_persisted\":{\"message_count\":12,\"inbound_count\":5,\"outbound_count\":7}},\"days_since\":{\"last_inbound\":12.154,\"last_outbound\":13.166,\"last_activity\":12.154,\"previous_evaluated\":0.003},\"thresholds\":{\"sla_hours\":24,\"lost_after_price_days\":60,\"lost_after_price_rejection_days\":14,\"lost_after_off_platform_no_contact_days\":21,\"lost_after_indefinite_deferral_days\":30,\"resurrect_gap_days\":30,\"defer_default_days\":30,\"due_soon_days\":3,\"inactive_timeout_days\":30},\"message_flags\":{\"has_opt_out\":false,\"has_phone_or_email\":false,\"has_schedule_terms\":false,\"has_deferral_phrase\":false,\"has_currency\":false,\"has_price_rejection_phrase\":false,\"has_indefinite_deferral_phrase\":false,\"has_bounced\":false,\"has_blocked\":false}}",
+        "classifier_version": "inbox_inference_v1",
+        "computed_at": 1770670008051
+      },
+      {
+        "created_at": 1770669931022,
+        "asset_id": "776027978927898",
+        "conversation_id": "t_1402557438317091",
+        "current_label": "PRICE_GIVEN",
+        "correct_label": "LOST",
+        "is_correct": 0,
+        "notes": "customer literally said: \"To much thank u\" which is a misspelling of \"Too much thank you\" we need to be able to handle these sorts of common typos. maybe we need to use AI a bit more for things like this",
+        "reason_codes": "[\"PRICE_MENTION\",\"UNREPLIED\",\"SLA_BREACH\"]",
+        "feature_snapshot": "{\"conversation_id\":\"t_1402557438317091\",\"contact_id\":\"25560399256946340\",\"computed_label\":\"PRICE_GIVEN\",\"computed_confidence\":\"MEDIUM\",\"reason_codes\":[\"PRICE_MENTION\",\"UNREPLIED\",\"SLA_BREACH\"],\"state_fields\":{\"previous_state\":\"PRICE_GIVEN\",\"off_platform_outcome\":null,\"needs_followup_before\":true,\"followup_due_at_before\":null,\"followup_suggestion_before\":\"Reply recommended\"},\"timestamps\":{\"computed_at\":1770669931022,\"last_inbound_at\":\"2026-01-13T20:08:43+0000\",\"last_outbound_at\":\"2026-01-13T19:57:22+0000\",\"last_activity_at\":\"2026-01-13T20:08:43+0000\",\"previous_last_evaluated_at\":\"2026-02-09T20:41:23.877Z\"},\"counts\":{\"all_time\":{\"message_count\":14,\"inbound_count\":6,\"outbound_count\":8},\"window_7d\":{\"inbound\":0,\"outbound\":0,\"total\":0},\"window_30d\":{\"inbound\":6,\"outbound\":8,\"total\":14},\"previous_persisted\":{\"message_count\":14,\"inbound_count\":6,\"outbound_count\":8}},\"days_since\":{\"last_inbound\":27.026,\"last_outbound\":27.033,\"last_activity\":27.026,\"previous_evaluated\":0.003},\"thresholds\":{\"sla_hours\":24,\"lost_after_price_days\":60,\"lost_after_price_rejection_days\":14,\"lost_after_off_platform_no_contact_days\":21,\"lost_after_indefinite_deferral_days\":30,\"resurrect_gap_days\":30,\"defer_default_days\":30,\"due_soon_days\":3,\"inactive_timeout_days\":30},\"message_flags\":{\"has_opt_out\":false,\"has_phone_or_email\":false,\"has_schedule_terms\":false,\"has_deferral_phrase\":false,\"has_currency\":true,\"has_price_rejection_phrase\":false,\"has_indefinite_deferral_phrase\":false,\"has_bounced\":false,\"has_blocked\":false}}",
+        "classifier_version": "inbox_inference_v1",
+        "computed_at": 1770669931022
+      },
+      {
+        "created_at": 1770669848519,
+        "asset_id": "776027978927898",
+        "conversation_id": "t_10241194901999951",
+        "current_label": "DEFERRED",
+        "correct_label": "LOST",
+        "is_correct": 0,
+        "notes": "an indefinite deferral should be treated as lost",
+        "reason_codes": "[\"DEFERRAL_PHRASE\",\"INDEFINITE_DEFERRAL\"]",
+        "feature_snapshot": "{\"conversation_id\":\"t_10241194901999951\",\"contact_id\":\"25089088320787114\",\"computed_label\":\"DEFERRED\",\"computed_confidence\":\"MEDIUM\",\"reason_codes\":[\"DEFERRAL_PHRASE\",\"INDEFINITE_DEFERRAL\"],\"state_fields\":{\"previous_state\":\"DEFERRED\",\"off_platform_outcome\":null,\"needs_followup_before\":true,\"followup_due_at_before\":\"2026-02-10T22:06:25.000Z\",\"followup_suggestion_before\":\"Follow up later\"},\"timestamps\":{\"computed_at\":1770669848519,\"last_inbound_at\":\"2026-01-11T23:01:29+0000\",\"last_outbound_at\":\"2026-01-11T22:37:34+0000\",\"last_activity_at\":\"2026-01-11T23:01:29+0000\",\"previous_last_evaluated_at\":\"2026-02-09T20:41:08.400Z\"},\"counts\":{\"all_time\":{\"message_count\":6,\"inbound_count\":2,\"outbound_count\":4},\"window_7d\":{\"inbound\":0,\"outbound\":0,\"total\":0},\"window_30d\":{\"inbound\":2,\"outbound\":4,\"total\":6},\"previous_persisted\":{\"message_count\":6,\"inbound_count\":2,\"outbound_count\":4}},\"days_since\":{\"last_inbound\":28.905,\"last_outbound\":28.921,\"last_activity\":28.905,\"previous_evaluated\":0.002},\"thresholds\":{\"sla_hours\":24,\"lost_after_price_days\":60,\"lost_after_price_rejection_days\":14,\"lost_after_off_platform_no_contact_days\":21,\"lost_after_indefinite_deferral_days\":30,\"resurrect_gap_days\":30,\"defer_default_days\":30,\"due_soon_days\":3,\"inactive_timeout_days\":30},\"message_flags\":{\"has_opt_out\":false,\"has_phone_or_email\":false,\"has_schedule_terms\":false,\"has_deferral_phrase\":false,\"has_currency\":false,\"has_price_rejection_phrase\":false,\"has_indefinite_deferral_phrase\":true,\"has_bounced\":false,\"has_blocked\":false}}",
+        "classifier_version": "inbox_inference_v1",
+        "computed_at": 1770669848519
+      }
+    ],
+    "success": true,
+    "meta": {
+      "duration": 1
+    }
+  }
+]

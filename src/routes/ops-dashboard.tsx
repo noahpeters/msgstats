@@ -1288,6 +1288,9 @@ export default function OpsDashboard(): React.ReactElement {
                   <th {...stylex.props(opsStyles.tableHead)}>Assets</th>
                   <th {...stylex.props(opsStyles.tableHead)}>Followup inbox</th>
                   <th {...stylex.props(opsStyles.tableHead)}>Ops dashboard</th>
+                  <th {...stylex.props(opsStyles.tableHead)}>
+                    Audit conversations
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1331,6 +1334,27 @@ export default function OpsDashboard(): React.ReactElement {
                           void updateUserFlag(
                             user.userId,
                             'FEATURE_OPS_DASHBOARD',
+                            next === 'inherit' ? null : next === 'enabled',
+                          );
+                        }}
+                        disabled={opsUsersUpdating === user.userId}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      <select
+                        value={readFlagValue(
+                          user.featureFlags,
+                          'FEATURE_AUDIT_CONVERSATIONS',
+                        )}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          void updateUserFlag(
+                            user.userId,
+                            'FEATURE_AUDIT_CONVERSATIONS',
                             next === 'inherit' ? null : next === 'enabled',
                           );
                         }}
