@@ -127,6 +127,8 @@ type SyncJob =
   | {
       kind: 'recompute_stats';
       runId: string;
+      cursor?: string | null;
+      initialized?: boolean;
       attempt?: number;
     };
 
@@ -1489,6 +1491,36 @@ async function getSyncRunRow(env: Env, id: string) {
     .first<SyncRunRow>();
 }
 
+function parseAiRunStatsJson(value: string | null | undefined): AiRunStats {
+  const empty = createAiRunStats();
+  if (!value) return empty;
+  try {
+    const parsed = JSON.parse(value) as Partial<AiRunStats>;
+    return {
+      ...empty,
+      ...parsed,
+      skipped: {
+        ...empty.skipped,
+        ...(parsed.skipped ?? {}),
+      },
+      results: {
+        ...empty.results,
+        ...(parsed.results ?? {}),
+        handoff_conf: {
+          ...empty.results.handoff_conf,
+          ...(parsed.results?.handoff_conf ?? {}),
+        },
+        deferred_conf: {
+          ...empty.results.deferred_conf,
+          ...(parsed.results?.deferred_conf ?? {}),
+        },
+      },
+    };
+  } catch {
+    return empty;
+  }
+}
+
 async function updateSyncRun(
   env: Env,
   data: {
@@ -2811,34 +2843,46 @@ async function enqueueStatsRecomputeOnce(env: Env, runId: string) {
   return true;
 }
 
-async function recomputeStatsForRun(env: Env, runId: string) {
+async function recomputeStatsForRun(
+  env: Env,
+  runId: string,
+  options?: { cursor?: string | null; initialized?: boolean },
+) {
   const run = await getSyncRunRow(env, runId);
   if (!run) {
     throw new Error('Sync run not found');
   }
 
+  const chunkSize = 20;
+  const cursor = options?.cursor ?? null;
+  const initialized = Boolean(options?.initialized);
   const aiConfig = getAiConfig(env);
-  const aiStats = createAiRunStats();
-  await updateSyncRunAiStats(env, {
-    id: runId,
-    aiStatsJson: JSON.stringify(aiStats),
-    aiConfigJson: JSON.stringify({
-      mode: aiConfig.mode,
-      model: aiConfig.model,
-      prompt_version: aiConfig.promptVersion,
-      max_output_tokens: aiConfig.maxOutputTokens,
-      max_input_chars: aiConfig.maxInputChars,
-      timeout_ms: aiConfig.timeoutMs,
-    }),
-  });
+  const aiStats =
+    initialized && run.aiStatsJson
+      ? parseAiRunStatsJson(run.aiStatsJson)
+      : createAiRunStats();
+  if (!initialized) {
+    await updateSyncRunAiStats(env, {
+      id: runId,
+      aiStatsJson: JSON.stringify(aiStats),
+      aiConfigJson: JSON.stringify({
+        mode: aiConfig.mode,
+        model: aiConfig.model,
+        prompt_version: aiConfig.promptVersion,
+        max_output_tokens: aiConfig.maxOutputTokens,
+        max_input_chars: aiConfig.maxInputChars,
+        timeout_ms: aiConfig.timeoutMs,
+      }),
+    });
 
-  await updateSyncRunStatsAndNotify(env, {
-    id: runId,
-    statsStatus: 'running',
-    statsStartedAt: new Date().toISOString(),
-    statsFinishedAt: null,
-    statsError: null,
-  });
+    await updateSyncRunStatsAndNotify(env, {
+      id: runId,
+      statsStatus: 'running',
+      statsStartedAt: new Date().toISOString(),
+      statsFinishedAt: null,
+      statsError: null,
+    });
+  }
 
   const result = await recomputeConversationStatsForRun(env, {
     userId: run.userId,
@@ -2846,17 +2890,30 @@ async function recomputeStatsForRun(env: Env, runId: string) {
     platform: run.platform,
     igBusinessId: run.igBusinessId,
     aiRunStats: aiStats,
+    cursor,
+    chunkSize,
+    refreshAggregates: !initialized,
   });
+
+  await updateSyncRunAiStats(env, {
+    id: runId,
+    aiStatsJson: JSON.stringify(aiStats),
+  });
+  if (result.hasMore) {
+    await env.SYNC_QUEUE.send({
+      kind: 'recompute_stats',
+      runId,
+      cursor: result.nextCursor,
+      initialized: true,
+    });
+    return result;
+  }
 
   await updateSyncRunStatsAndNotify(env, {
     id: runId,
     statsStatus: 'completed',
     statsFinishedAt: new Date().toISOString(),
     statsError: null,
-  });
-  await updateSyncRunAiStats(env, {
-    id: runId,
-    aiStatsJson: JSON.stringify(aiStats),
   });
 
   return result;
@@ -2870,90 +2927,115 @@ async function recomputeConversationStatsForRun(
     platform: string;
     igBusinessId: string | null;
     aiRunStats?: AiRunStats;
+    cursor?: string | null;
+    chunkSize?: number;
+    refreshAggregates?: boolean;
   },
 ) {
-  const bindings = [
-    data.userId,
-    data.pageId,
-    data.platform,
-    data.igBusinessId ?? null,
-    data.userId,
-    data.pageId,
+  let updated = 0;
+  if (data.refreshAggregates !== false) {
+    const bindings = [
+      data.userId,
+      data.pageId,
+      data.platform,
+      data.igBusinessId ?? null,
+      data.userId,
+      data.pageId,
+      data.userId,
+      data.pageId,
+      data.platform,
+      data.igBusinessId ?? null,
+    ];
+
+    const result = await env.DB.prepare(
+      `WITH scoped_conversations AS (
+         SELECT id
+         FROM conversations
+         WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
+       ),
+       stats AS (
+         SELECT m.conversation_id as conversation_id,
+                MIN(m.created_time) as started_time,
+                MAX(m.created_time) as last_message_at,
+                SUM(CASE WHEN m.sender_type = 'customer' THEN 1 ELSE 0 END) as customer_count,
+                SUM(CASE WHEN m.sender_type = 'business' THEN 1 ELSE 0 END) as business_count,
+                MAX(CASE WHEN m.sender_type = 'customer' THEN m.created_time END) as last_inbound_at,
+                MAX(CASE WHEN m.sender_type = 'business' THEN m.created_time END) as last_outbound_at,
+                MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_id END) as participant_id,
+                MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_name END) as participant_name,
+                MAX(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN 1 ELSE 0 END) as price_given,
+                MIN(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN m.created_time END) as first_price_at,
+                SUM(
+                  CASE
+                    WHEN m.sender_type = 'customer'
+                     AND m.created_time > (
+                       SELECT MIN(m2.created_time)
+                       FROM messages m2
+                       WHERE m2.user_id = m.user_id
+                         AND m2.conversation_id = m.conversation_id
+                         AND m2.sender_type = 'business'
+                         AND m2.body LIKE '%$%'
+                     )
+                    THEN 1
+                    ELSE 0
+                  END
+                ) as customer_after_price_count
+         FROM messages m
+         JOIN scoped_conversations s ON s.id = m.conversation_id
+         WHERE m.user_id = ? AND m.page_id = ?
+         GROUP BY m.conversation_id
+       )
+       UPDATE conversations
+       SET started_time = (SELECT started_time FROM stats WHERE stats.conversation_id = conversations.id),
+           last_message_at = (SELECT last_message_at FROM stats WHERE stats.conversation_id = conversations.id),
+           last_inbound_at = (SELECT last_inbound_at FROM stats WHERE stats.conversation_id = conversations.id),
+           last_outbound_at = (SELECT last_outbound_at FROM stats WHERE stats.conversation_id = conversations.id),
+           participant_id = COALESCE(participant_id, (SELECT participant_id FROM stats WHERE stats.conversation_id = conversations.id)),
+           participant_name = COALESCE(participant_name, (SELECT participant_name FROM stats WHERE stats.conversation_id = conversations.id)),
+           customer_count = COALESCE((SELECT customer_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
+           business_count = COALESCE((SELECT business_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
+           price_given = COALESCE((SELECT price_given FROM stats WHERE stats.conversation_id = conversations.id), 0),
+           low_response_after_price = CASE
+             WHEN (SELECT first_price_at FROM stats WHERE stats.conversation_id = conversations.id) IS NOT NULL
+              AND COALESCE((SELECT customer_after_price_count FROM stats WHERE stats.conversation_id = conversations.id), 0) <= 2
+             THEN 1
+             ELSE 0
+           END
+       WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
+         AND id IN (SELECT conversation_id FROM stats)`,
+    )
+      .bind(...bindings)
+      .run();
+    updated = result.meta?.changes ?? 0;
+  }
+
+  const chunkSize = Math.max(1, Math.min(100, data.chunkSize ?? 25));
+  const cursor = data.cursor ?? null;
+  let convoQuery = `SELECT id FROM conversations
+     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?`;
+  const convoBindings: unknown[] = [
     data.userId,
     data.pageId,
     data.platform,
     data.igBusinessId ?? null,
   ];
-
-  const result = await env.DB.prepare(
-    `WITH scoped_conversations AS (
-       SELECT id
-       FROM conversations
-       WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
-     ),
-     stats AS (
-       SELECT m.conversation_id as conversation_id,
-              MIN(m.created_time) as started_time,
-              MAX(m.created_time) as last_message_at,
-              SUM(CASE WHEN m.sender_type = 'customer' THEN 1 ELSE 0 END) as customer_count,
-              SUM(CASE WHEN m.sender_type = 'business' THEN 1 ELSE 0 END) as business_count,
-              MAX(CASE WHEN m.sender_type = 'customer' THEN m.created_time END) as last_inbound_at,
-              MAX(CASE WHEN m.sender_type = 'business' THEN m.created_time END) as last_outbound_at,
-              MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_id END) as participant_id,
-              MAX(CASE WHEN m.sender_type = 'customer' THEN m.sender_name END) as participant_name,
-              MAX(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN 1 ELSE 0 END) as price_given,
-              MIN(CASE WHEN m.sender_type = 'business' AND m.body LIKE '%$%' THEN m.created_time END) as first_price_at,
-              SUM(
-                CASE
-                  WHEN m.sender_type = 'customer'
-                   AND m.created_time > (
-                     SELECT MIN(m2.created_time)
-                     FROM messages m2
-                     WHERE m2.user_id = m.user_id
-                       AND m2.conversation_id = m.conversation_id
-                       AND m2.sender_type = 'business'
-                       AND m2.body LIKE '%$%'
-                   )
-                  THEN 1
-                  ELSE 0
-                END
-              ) as customer_after_price_count
-       FROM messages m
-       JOIN scoped_conversations s ON s.id = m.conversation_id
-       WHERE m.user_id = ? AND m.page_id = ?
-       GROUP BY m.conversation_id
-     )
-     UPDATE conversations
-     SET started_time = (SELECT started_time FROM stats WHERE stats.conversation_id = conversations.id),
-         last_message_at = (SELECT last_message_at FROM stats WHERE stats.conversation_id = conversations.id),
-         last_inbound_at = (SELECT last_inbound_at FROM stats WHERE stats.conversation_id = conversations.id),
-         last_outbound_at = (SELECT last_outbound_at FROM stats WHERE stats.conversation_id = conversations.id),
-         participant_id = COALESCE(participant_id, (SELECT participant_id FROM stats WHERE stats.conversation_id = conversations.id)),
-         participant_name = COALESCE(participant_name, (SELECT participant_name FROM stats WHERE stats.conversation_id = conversations.id)),
-         customer_count = COALESCE((SELECT customer_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
-         business_count = COALESCE((SELECT business_count FROM stats WHERE stats.conversation_id = conversations.id), 0),
-         price_given = COALESCE((SELECT price_given FROM stats WHERE stats.conversation_id = conversations.id), 0),
-         low_response_after_price = CASE
-           WHEN (SELECT first_price_at FROM stats WHERE stats.conversation_id = conversations.id) IS NOT NULL
-            AND COALESCE((SELECT customer_after_price_count FROM stats WHERE stats.conversation_id = conversations.id), 0) <= 2
-           THEN 1
-           ELSE 0
-         END
-     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?
-       AND id IN (SELECT conversation_id FROM stats)`,
-  )
-    .bind(...bindings)
-    .run();
-
-  const convoIds = await env.DB.prepare(
-    `SELECT id FROM conversations
-     WHERE user_id = ? AND page_id = ? AND platform = ? AND ig_business_id IS ?`,
-  )
-    .bind(data.userId, data.pageId, data.platform, data.igBusinessId ?? null)
+  if (cursor) {
+    convoQuery += ` AND id > ?`;
+    convoBindings.push(cursor);
+  }
+  convoQuery += ` ORDER BY id ASC LIMIT ?`;
+  convoBindings.push(chunkSize + 1);
+  const convoIds = await env.DB.prepare(convoQuery)
+    .bind(...convoBindings)
     .all<{ id: string }>();
+  const allIds = convoIds.results ?? [];
+  const pageIds = allIds.slice(0, chunkSize);
+  const hasMore = allIds.length > chunkSize;
+  const lastProcessedId = pageIds[pageIds.length - 1]?.id ?? null;
+  const nextCursor = hasMore ? lastProcessedId : null;
   const followupEnabled = await isFollowupInboxEnabledForUser(env, data.userId);
   if (followupEnabled) {
-    for (const row of convoIds.results ?? []) {
+    for (const row of pageIds) {
       await recomputeConversationState(
         env,
         data.userId,
@@ -2963,7 +3045,7 @@ async function recomputeConversationStatsForRun(
     }
   }
 
-  return { updated: result.meta?.changes ?? 0 };
+  return { updated, hasMore, nextCursor };
 }
 
 async function recomputeConversationStats(
@@ -3244,7 +3326,14 @@ export default {
       try {
         const kind = message.body.kind ?? 'sync';
         if (kind === 'recompute_stats') {
-          await recomputeStatsForRun(env, message.body.runId);
+          const statsJob = message.body as Extract<
+            SyncJob,
+            { kind: 'recompute_stats' }
+          >;
+          await recomputeStatsForRun(env, statsJob.runId, {
+            cursor: statsJob.cursor,
+            initialized: statsJob.initialized,
+          });
           continue;
         }
         const syncJob = message.body as Extract<SyncJob, { kind?: 'sync' }>;
