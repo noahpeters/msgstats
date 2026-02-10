@@ -930,6 +930,7 @@ export function registerRoutes(deps: any) {
     }
     const url = new URL(req.url);
     const state = url.searchParams.get('state')?.trim() || null;
+    const group = url.searchParams.get('group')?.trim().toLowerCase() || null;
     const channel = url.searchParams.get('channel')?.trim() || null;
     const search = url.searchParams.get('q')?.trim() || '';
     const assetId = url.searchParams.get('assetId')?.trim() || null;
@@ -945,6 +946,10 @@ export function registerRoutes(deps: any) {
     if (state) {
       where.push('c.current_state = ?');
       bindings.push(state);
+    } else if (group === 'active') {
+      where.push(
+        "(c.current_state IS NULL OR (c.current_state != 'LOST' AND c.current_state != 'SPAM'))",
+      );
     }
     if (assetId) {
       where.push('c.asset_id = ?');
@@ -1134,11 +1139,16 @@ export function registerRoutes(deps: any) {
     const url = new URL(req.url);
     const needsFollowup = url.searchParams.get('needs_followup');
     const state = url.searchParams.get('state');
+    const group = url.searchParams.get('group')?.trim().toLowerCase() || null;
     const where: string[] = ['user_id = ?'];
     const bindings: unknown[] = [userId];
     if (state) {
       where.push('current_state = ?');
       bindings.push(state);
+    } else if (group === 'active') {
+      where.push(
+        "(current_state IS NULL OR (current_state != 'LOST' AND current_state != 'SPAM'))",
+      );
     }
     if (needsFollowup && ['1', 'true', 'yes'].includes(needsFollowup)) {
       where.push('needs_followup = 1');

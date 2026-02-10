@@ -4,6 +4,10 @@ import { useOutletContext } from 'react-router';
 import { layout } from '../app/styles';
 import { ChartTooltip } from '../components/charts/ChartTooltip';
 import { useChartTooltip } from '../components/charts/useChartTooltip';
+import {
+  ToolbarSelect,
+  type ToolbarSelectOption,
+} from '../components/ToolbarSelect';
 import Histogram from './Histogram';
 import type { AppShellOutletContext } from './root';
 
@@ -174,34 +178,131 @@ const reportStyles = stylex.create({
   },
   toolbar: {
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    alignItems: 'stretch',
     gap: '10px',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
+    overflowX: 'auto',
+    overflowY: 'hidden',
     width: '100%',
+    minHeight: '54px',
   },
   toolbarGroup: {
-    display: 'inline-flex',
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: '8px',
+    flexWrap: 'nowrap',
+  },
+  toolbarSelectWrap: {
+    position: 'relative',
+    minWidth: '240px',
+    flexShrink: 0,
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: '#9aa9b5',
+    borderRadius: '8px',
+    backgroundColor: '#ffffff',
+    boxShadow: '0 0 0 1px #c8d2da',
+    ':focus-within': {
+      outline: '2px solid #0f766e',
+      outlineOffset: '2px',
+    },
+  },
+  toolbarSelectButton: {
+    width: '100%',
+    minHeight: '54px',
+    border: 'none',
+    borderRadius: '8px',
+    backgroundColor: '#ffffff',
+    textAlign: 'left',
+    padding: '8px 10px',
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
     alignItems: 'center',
     gap: '8px',
-    flexWrap: 'wrap',
+    cursor: 'pointer',
+    ':focus-visible': {
+      outline: 'none',
+    },
   },
-  toolbarLabel: {
-    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
-    fontSize: '12px',
-    color: '#284b63',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
+  toolbarSelectText: {
+    display: 'grid',
+    gap: '2px',
+    minWidth: 0,
+  },
+  toolbarSelectTitle: {
+    fontSize: '13px',
+    fontWeight: 700,
+    color: '#0c1b1a',
+    lineHeight: '1.2',
     whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
-  toolbarSelect: {
-    padding: '6px 10px',
-    borderRadius: '8px',
+  toolbarSelectDescription: {
+    fontSize: '11px',
+    color: '#5b7287',
+    lineHeight: '1.2',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  toolbarSelectCaret: {
+    color: '#5b7287',
+    fontSize: '14px',
+    lineHeight: '1',
+    fontWeight: 700,
+  },
+  toolbarMenu: {
+    position: 'fixed',
+    zIndex: 60,
     border: '1px solid rgba(12, 27, 26, 0.14)',
     backgroundColor: '#ffffff',
+    borderRadius: '10px',
+    boxShadow: '0 8px 24px rgba(12, 27, 26, 0.16)',
+    padding: '6px',
+    display: 'grid',
+    gap: '4px',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  toolbarMenuItem: {
+    border: 'none',
+    borderRadius: '8px',
+    backgroundColor: '#ffffff',
+    textAlign: 'left',
+    padding: '8px',
+    display: 'grid',
+    gap: '2px',
+    cursor: 'pointer',
+    ':hover': {
+      backgroundColor: '#f3f7f9',
+    },
+    ':focus-visible': {
+      outline: '2px solid #0f766e',
+      outlineOffset: '1px',
+    },
+  },
+  toolbarMenuItemSelected: {
+    backgroundColor: '#e7f7f2',
+  },
+  toolbarMenuItemTitle: {
     fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
     fontSize: '13px',
+    fontWeight: 700,
+    color: '#0c1b1a',
+    lineHeight: '1.2',
+  },
+  toolbarMenuItemDescription: {
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    fontSize: '11px',
+    color: '#5b7287',
+    lineHeight: '1.2',
+  },
+  toolbarActionButton: {
+    minHeight: '54px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
 });
 
@@ -444,6 +545,57 @@ export default function ReportsRoute(): React.ReactElement {
     })();
   }, [loadReports]);
 
+  const assetOptions = React.useMemo<ToolbarSelectOption[]>(
+    () => [
+      {
+        value: '',
+        title: 'All assets',
+        description: 'All connected pages in this workspace.',
+      },
+      ...pages.map((page) => ({
+        value: page.id,
+        title: page.name || `Page ${page.id}`,
+        description: 'Facebook Page',
+      })),
+    ],
+    [pages],
+  );
+  const platformOptions = React.useMemo<ToolbarSelectOption[]>(
+    () => [
+      {
+        value: '',
+        title: 'All platforms',
+        description: 'Messenger and Instagram conversations.',
+      },
+      {
+        value: 'messenger',
+        title: 'Messenger',
+        description: 'Facebook Messenger only.',
+      },
+      {
+        value: 'instagram',
+        title: 'Instagram',
+        description: 'Instagram DM only.',
+      },
+    ],
+    [],
+  );
+  const bucketOptions = React.useMemo<ToolbarSelectOption[]>(
+    () => [
+      {
+        value: 'started',
+        title: 'First message date',
+        description: 'Bucket by conversation start date.',
+      },
+      {
+        value: 'last',
+        title: 'Last message date',
+        description: 'Bucket by most recent message date.',
+      },
+    ],
+    [],
+  );
+
   const handleRecompute = React.useCallback(async () => {
     setActionError(null);
     setRecomputeRunning(true);
@@ -470,50 +622,34 @@ export default function ReportsRoute(): React.ReactElement {
     () => (
       <div {...stylex.props(reportStyles.toolbar)}>
         <div {...stylex.props(reportStyles.toolbarGroup)}>
-          <label {...stylex.props(reportStyles.toolbarLabel)}>
-            <span>Asset</span>
-            <select
-              {...stylex.props(reportStyles.toolbarSelect)}
-              value={pageId}
-              onChange={(event) => setPageId(event.target.value)}
-            >
-              <option value="">All pages</option>
-              {pages.map((page) => (
-                <option key={page.id} value={page.id}>
-                  {page.name || `Page ${page.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label {...stylex.props(reportStyles.toolbarLabel)}>
-            <span>Platform</span>
-            <select
-              {...stylex.props(reportStyles.toolbarSelect)}
-              value={platform}
-              onChange={(event) => setPlatform(event.target.value)}
-            >
-              <option value="">All</option>
-              <option value="messenger">Messenger</option>
-              <option value="instagram">Instagram</option>
-            </select>
-          </label>
-          <label {...stylex.props(reportStyles.toolbarLabel)}>
-            <span>Bucket by</span>
-            <select
-              {...stylex.props(reportStyles.toolbarSelect)}
-              value={bucket}
-              onChange={(event) =>
-                setBucket(event.target.value as 'started' | 'last')
-              }
-            >
-              <option value="started">First message date</option>
-              <option value="last">Last message date</option>
-            </select>
-          </label>
+          <ToolbarSelect
+            ariaLabel="Report asset filter"
+            value={pageId}
+            options={assetOptions}
+            onChange={setPageId}
+            minWidth="240px"
+          />
+          <ToolbarSelect
+            ariaLabel="Report platform filter"
+            value={platform}
+            options={platformOptions}
+            onChange={setPlatform}
+            minWidth="240px"
+          />
+          <ToolbarSelect
+            ariaLabel="Report bucket filter"
+            value={bucket}
+            options={bucketOptions}
+            onChange={(value) => setBucket(value as 'started' | 'last')}
+            minWidth="240px"
+          />
         </div>
         <div {...stylex.props(reportStyles.toolbarGroup)}>
           <button
-            {...stylex.props(layout.ghostButton)}
+            {...stylex.props(
+              layout.ghostButton,
+              reportStyles.toolbarActionButton,
+            )}
             onClick={handleRecompute}
             disabled={recomputeRunning}
           >
@@ -522,7 +658,16 @@ export default function ReportsRoute(): React.ReactElement {
         </div>
       </div>
     ),
-    [bucket, handleRecompute, pageId, pages, platform, recomputeRunning],
+    [
+      assetOptions,
+      bucket,
+      bucketOptions,
+      handleRecompute,
+      pageId,
+      platform,
+      platformOptions,
+      recomputeRunning,
+    ],
   );
 
   React.useEffect(() => {

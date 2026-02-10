@@ -17,7 +17,7 @@ export type AppShellOutletContext = {
 
 const LOGIN_NEXT_STORAGE_KEY = 'msgstats:auth:next';
 const shellLayoutVars = {
-  headerHeight: '112px',
+  headerHeight: '172px',
   footerHeight: '84px',
   dividerColor: 'rgba(12, 27, 26, 0.14)',
 };
@@ -127,7 +127,8 @@ const shellStyles = stylex.create({
   toolbarRow: {
     display: 'block',
     paddingTop: '6px',
-    paddingBottom: '2px',
+    paddingBottom: '8px',
+    minHeight: '60px',
   },
   main: {
     minHeight: 0,

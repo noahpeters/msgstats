@@ -5,6 +5,10 @@ import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
 import { inboxStyles } from './inbox.styles';
 import {
+  ToolbarSelect,
+  type ToolbarSelectOption,
+} from '../components/ToolbarSelect';
+import {
   renderTemplate,
   type TemplateRenderContext,
 } from '../templates/renderTemplate';
@@ -138,13 +142,57 @@ type ClassificationExplainResponse = {
   computed_at: number;
 };
 
-const stateTabs = [
-  { key: 'all', label: 'All' },
-  { key: 'needs_followup', label: 'Needs follow-up' },
-  { key: 'DEFERRED', label: 'Deferred' },
-  { key: 'OFF_PLATFORM', label: 'Off-platform' },
-  { key: 'LOST', label: 'Lost' },
-  { key: 'CONVERTED', label: 'Converted' },
+type FilterGroupKey =
+  | 'needs_followup'
+  | 'active'
+  | 'DEFERRED'
+  | 'OFF_PLATFORM'
+  | 'LOST'
+  | 'CONVERTED'
+  | 'SPAM';
+
+type FilterGroupOption = {
+  key: FilterGroupKey;
+  title: string;
+  description: string;
+};
+
+const baseFilterGroups: FilterGroupOption[] = [
+  {
+    key: 'needs_followup',
+    title: 'Needs follow-up',
+    description: 'Conversations that need action now.',
+  },
+  {
+    key: 'active',
+    title: 'Active',
+    description: 'Any conversation that is not Lost.',
+  },
+  {
+    key: 'DEFERRED',
+    title: 'Deferred',
+    description: 'Scheduled for a specific future follow-up.',
+  },
+  {
+    key: 'OFF_PLATFORM',
+    title: 'Off-platform',
+    description: 'Likely moved to phone/email or another channel.',
+  },
+  {
+    key: 'LOST',
+    title: 'Lost',
+    description: 'Closed without conversion.',
+  },
+  {
+    key: 'CONVERTED',
+    title: 'Converted',
+    description: 'Closed-won conversations.',
+  },
+  {
+    key: 'SPAM',
+    title: 'Spam',
+    description: 'Spam, abuse, and non-actionable conversations.',
+  },
 ];
 
 const auditLabelOptions = [
@@ -318,8 +366,7 @@ export default function Inbox(): React.ReactElement {
   const location = useLocation();
   const selectedId = searchParams.get('id');
 
-  const [tab, setTab] = React.useState('needs_followup');
-  const [showSpam, setShowSpam] = React.useState(false);
+  const [tab, setTab] = React.useState<FilterGroupKey>('needs_followup');
   const [channel, setChannel] = React.useState('all');
   const [assetId, setAssetId] = React.useState('all');
   const [query, setQuery] = React.useState('');
@@ -457,7 +504,9 @@ export default function Inbox(): React.ReactElement {
     const params = new URLSearchParams();
     if (tab === 'needs_followup') {
       params.set('needs_followup', 'true');
-    } else if (tab !== 'all') {
+    } else if (tab === 'active') {
+      params.set('group', 'active');
+    } else {
       params.set('state', tab);
     }
     if (channel !== 'all') {
@@ -519,12 +568,6 @@ export default function Inbox(): React.ReactElement {
       }
     })();
   }, []);
-
-  React.useEffect(() => {
-    if (!showSpam && tab === 'SPAM') {
-      setTab('needs_followup');
-    }
-  }, [showSpam, tab]);
 
   React.useEffect(() => {
     void loadConversations();
@@ -1477,6 +1520,55 @@ export default function Inbox(): React.ReactElement {
     </ul>
   );
 
+  const filterGroups = React.useMemo<FilterGroupOption[]>(
+    () => baseFilterGroups,
+    [],
+  );
+  const assetOptions = React.useMemo<ToolbarSelectOption[]>(() => {
+    const options: ToolbarSelectOption[] = [
+      {
+        value: 'all',
+        title: 'All assets',
+        description: 'Every connected page and Instagram asset.',
+      },
+    ];
+    for (const page of assets?.pages ?? []) {
+      options.push({
+        value: page.id,
+        title: page.name,
+        description: 'Facebook Page',
+      });
+    }
+    for (const asset of assets?.igAssets ?? []) {
+      options.push({
+        value: asset.id,
+        title: asset.name,
+        description: 'Instagram Asset',
+      });
+    }
+    return options;
+  }, [assets]);
+  const channelOptions = React.useMemo<ToolbarSelectOption[]>(
+    () => [
+      {
+        value: 'all',
+        title: 'All channels',
+        description: 'Facebook and Instagram conversations.',
+      },
+      {
+        value: 'facebook',
+        title: 'Facebook',
+        description: 'Messenger conversations only.',
+      },
+      {
+        value: 'instagram',
+        title: 'Instagram',
+        description: 'Instagram DM conversations only.',
+      },
+    ],
+    [],
+  );
+
   const conversationInspectorPanel = (
     <div
       id="inbox-inspector-conversation-panel"
@@ -2060,75 +2152,50 @@ export default function Inbox(): React.ReactElement {
         <div {...stylex.props(inboxStyles.horizontalDivider)} />
 
         <div {...stylex.props(inboxStyles.toolbarRow)}>
-          {[
-            ...stateTabs,
-            ...(showSpam ? [{ key: 'SPAM', label: 'Spam' }] : []),
-          ].map((entry) => (
-            <button
-              key={entry.key}
-              {...stylex.props(layout.ghostButton)}
-              onClick={() => setTab(entry.key)}
-              style={
-                tab === entry.key
-                  ? { backgroundColor: palette.mint }
-                  : undefined
-              }
-            >
-              {entry.label}
-            </button>
-          ))}
-          <select
-            {...stylex.props(inboxStyles.select)}
+          <ToolbarSelect
+            ariaLabel="Conversation filter group"
+            value={tab}
+            options={filterGroups.map((option) => ({
+              value: option.key,
+              title: option.title,
+              description: option.description,
+            }))}
+            onChange={(value) => setTab(value as FilterGroupKey)}
+            minWidth="280px"
+          />
+          <ToolbarSelect
+            ariaLabel="Asset filter"
             value={assetId}
-            onChange={(event) => setAssetId(event.target.value)}
-          >
-            <option value="all">All assets</option>
-            {(assets?.pages ?? []).map((page) => (
-              <option key={page.id} value={page.id}>
-                {page.name}
-              </option>
-            ))}
-            {(assets?.igAssets ?? []).map((asset) => (
-              <option key={asset.id} value={asset.id}>
-                {asset.name}
-              </option>
-            ))}
-          </select>
-          <select
-            {...stylex.props(inboxStyles.select)}
+            options={assetOptions}
+            onChange={setAssetId}
+            minWidth="210px"
+          />
+          <ToolbarSelect
+            ariaLabel="Channel filter"
             value={channel}
-            onChange={(event) => setChannel(event.target.value)}
-          >
-            <option value="all">All channels</option>
-            <option value="facebook">Facebook</option>
-            <option value="instagram">Instagram</option>
-          </select>
-          <label
-            style={{ display: 'inline-flex', gap: '6px', alignItems: 'center' }}
-          >
-            <input
-              type="checkbox"
-              checked={showSpam}
-              onChange={(event) => setShowSpam(event.target.checked)}
-            />
-            <span style={{ fontSize: '12px', color: palette.slate }}>
-              Show spam
-            </span>
-          </label>
+            options={channelOptions}
+            onChange={setChannel}
+            minWidth="210px"
+          />
           <input
-            {...stylex.props(inboxStyles.input)}
+            {...stylex.props(inboxStyles.input, inboxStyles.toolbarSearch)}
             placeholder="Search name, handle, snippet"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
           <button
-            {...stylex.props(layout.ghostButton)}
+            {...stylex.props(layout.ghostButton, inboxStyles.toolbarButton)}
             onClick={handleRecomputeAll}
             disabled={recomputing}
           >
             {recomputing ? 'Recomputing…' : 'Recompute All'}
           </button>
-          <span {...stylex.props(inboxStyles.liveIndicator)}>
+          <span
+            {...stylex.props(
+              inboxStyles.liveIndicator,
+              inboxStyles.liveIndicatorAligned,
+            )}
+          >
             Live {liveAt ? `· updated ${formatRelative(liveAt)}` : ''}
           </span>
         </div>
