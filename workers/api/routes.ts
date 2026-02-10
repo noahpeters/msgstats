@@ -249,8 +249,8 @@ export function registerRoutes(deps: any) {
         debug.expires_at && debug.expires_at > 0
           ? debug.expires_at
           : longToken.expiresIn
-          ? Math.floor(Date.now() / 1000) + longToken.expiresIn
-          : null,
+            ? Math.floor(Date.now() / 1000) + longToken.expiresIn
+            : null,
     });
     ctx.waitUntil(
       (async () => {
@@ -584,7 +584,11 @@ export function registerRoutes(deps: any) {
           pageId,
           pageAccessToken: page.accessToken,
         });
-        return json({ id: page.id, name: resolvedName, webhookSubscribed: subscribed });
+        return json({
+          id: page.id,
+          name: resolvedName,
+          webhookSubscribed: subscribed,
+        });
       } catch (error) {
         if (error instanceof MetaApiError) {
           const meta =
