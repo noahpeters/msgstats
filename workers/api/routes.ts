@@ -41,6 +41,7 @@ export function registerRoutes(deps: any) {
     subscribeAppToPage,
     fetchInstagramAssets,
     fetchPageIgDebug,
+    fetchConversationMessages,
     sendMessage,
     fetchUserProfile,
     buildSessionCookie,
@@ -2631,6 +2632,135 @@ export function registerRoutes(deps: any) {
         .bind(nextFlags, now, targetUserId)
         .run();
       return json({ userId: targetUserId, featureFlags: flags });
+    },
+  );
+
+  addRoute(
+    'POST',
+    '/api/ops/users/:id/backfill-participants',
+    async (req, env, _ctx, params) => {
+      const userId = await requireUser(req, env);
+      if (!userId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const targetUserId = params.id;
+      if (!targetUserId) {
+        return json({ error: 'Missing user id' }, { status: 400 });
+      }
+      const body = await readJson<{ limit?: number }>(req);
+      const limitRaw =
+        typeof body?.limit === 'number' && Number.isFinite(body.limit)
+          ? body.limit
+          : 200;
+      const limit = Math.max(1, Math.min(500, Math.floor(limitRaw)));
+
+      const conversations = await env.DB.prepare(
+        `SELECT id, page_id as pageId
+         FROM conversations
+         WHERE user_id = ?
+           AND platform = 'messenger'
+           AND needs_followup = 1
+           AND participant_id IS NULL
+         ORDER BY last_message_at DESC
+         LIMIT ?`,
+      )
+        .bind(targetUserId, limit)
+        .all<{ id: string; pageId: string }>();
+
+      const rows = conversations.results ?? [];
+      const pageTokenByPageId = new Map<string, string | null>();
+      let scanned = 0;
+      let updated = 0;
+      let skippedNoToken = 0;
+      let skippedNoParticipant = 0;
+      let failed = 0;
+
+      for (const row of rows) {
+        scanned += 1;
+        let pageToken = pageTokenByPageId.get(row.pageId);
+        if (pageToken === undefined) {
+          const page = await getPage(env, targetUserId, row.pageId);
+          pageToken =
+            (page as { access_token?: string } | null)?.access_token ?? null;
+          pageTokenByPageId.set(row.pageId, pageToken);
+        }
+        if (!pageToken) {
+          skippedNoToken += 1;
+          continue;
+        }
+
+        try {
+          const messages = (await fetchConversationMessages({
+            env,
+            conversationId: row.id,
+            accessToken: pageToken,
+            version: getApiVersion(env),
+            workspaceId: targetUserId,
+            assetId: row.pageId,
+          })) as Array<{
+            from?: { id?: string; name?: string };
+            created_time?: string;
+          }>;
+
+          const customerCandidate = messages
+            .filter((message) => {
+              const senderId = message.from?.id ?? null;
+              return Boolean(senderId && senderId !== row.pageId);
+            })
+            .sort((a, b) => {
+              const aMs = Date.parse(a.created_time ?? '');
+              const bMs = Date.parse(b.created_time ?? '');
+              return (
+                (Number.isNaN(bMs) ? 0 : bMs) - (Number.isNaN(aMs) ? 0 : aMs)
+              );
+            })[0];
+
+          const participantId = customerCandidate?.from?.id ?? null;
+          const participantName = customerCandidate?.from?.name ?? null;
+
+          if (!participantId) {
+            skippedNoParticipant += 1;
+            continue;
+          }
+
+          const result = await env.DB.prepare(
+            `UPDATE conversations
+             SET participant_id = ?,
+                 participant_name = COALESCE(participant_name, ?)
+             WHERE user_id = ? AND id = ? AND participant_id IS NULL`,
+          )
+            .bind(participantId, participantName ?? null, targetUserId, row.id)
+            .run();
+          updated += result.meta?.changes ?? 0;
+        } catch (error) {
+          failed += 1;
+          console.warn('Participant backfill failed for conversation', {
+            targetUserId,
+            conversationId: row.id,
+            pageId: row.pageId,
+            error: error instanceof Error ? error.message : error,
+          });
+        }
+      }
+
+      if (updated > 0) {
+        await env.SYNC_QUEUE.send({
+          kind: 'recompute_inbox',
+          userId: targetUserId,
+          forceLabelSync: true,
+        });
+      }
+
+      return json({
+        ok: true,
+        userId: targetUserId,
+        scanned,
+        updated,
+        skippedNoToken,
+        skippedNoParticipant,
+        failed,
+        queuedRecompute: updated > 0,
+      });
     },
   );
 

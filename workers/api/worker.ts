@@ -3391,6 +3391,7 @@ registerRoutes({
   subscribeAppToPage,
   fetchInstagramAssets,
   fetchPageIgDebug,
+  fetchConversationMessages,
   sendMessage,
   fetchUserProfile,
   buildSessionCookie,

@@ -67,6 +67,17 @@ type OpsUser = {
   featureFlags: Record<string, unknown>;
 };
 
+type ParticipantBackfillResult = {
+  ok: boolean;
+  userId: string;
+  scanned: number;
+  updated: number;
+  skippedNoToken: number;
+  skippedNoParticipant: number;
+  failed: number;
+  queuedRecompute: boolean;
+};
+
 type HourPoint = {
   hour: string;
   count: number;
@@ -408,6 +419,12 @@ export default function OpsDashboard(): React.ReactElement {
   const [opsUsersUpdating, setOpsUsersUpdating] = React.useState<string | null>(
     null,
   );
+  const [opsUsersBackfilling, setOpsUsersBackfilling] = React.useState<
+    string | null
+  >(null);
+  const [backfillByUser, setBackfillByUser] = React.useState<
+    Record<string, ParticipantBackfillResult>
+  >({});
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -525,6 +542,44 @@ export default function OpsDashboard(): React.ReactElement {
         );
       } finally {
         setOpsUsersUpdating(null);
+      }
+    },
+    [loadOpsUsers],
+  );
+
+  const backfillParticipants = React.useCallback(
+    async (targetUserId: string) => {
+      setOpsUsersBackfilling(targetUserId);
+      setOpsUsersError(null);
+      try {
+        const response = await fetch(
+          `/api/ops/users/${targetUserId}/backfill-participants`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 300 }),
+          },
+        );
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(payload?.error ?? 'Backfill request failed.');
+        }
+        const payload = (await response.json()) as ParticipantBackfillResult;
+        setBackfillByUser((prev) => ({
+          ...prev,
+          [targetUserId]: payload,
+        }));
+        await loadOpsUsers();
+      } catch (err) {
+        setOpsUsersError(
+          err instanceof Error
+            ? err.message
+            : 'Failed to backfill participants.',
+        );
+      } finally {
+        setOpsUsersBackfilling(null);
       }
     },
     [loadOpsUsers],
@@ -1291,6 +1346,7 @@ export default function OpsDashboard(): React.ReactElement {
                   <th {...stylex.props(opsStyles.tableHead)}>
                     Audit conversations
                   </th>
+                  <th {...stylex.props(opsStyles.tableHead)}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1364,6 +1420,34 @@ export default function OpsDashboard(): React.ReactElement {
                         <option value="enabled">Enabled</option>
                         <option value="disabled">Disabled</option>
                       </select>
+                    </td>
+                    <td {...stylex.props(opsStyles.tableCell)}>
+                      {(() => {
+                        const backfillResult = backfillByUser[user.userId];
+                        return (
+                          <>
+                            <button
+                              {...stylex.props(layout.ghostButton)}
+                              disabled={opsUsersBackfilling === user.userId}
+                              onClick={() => {
+                                void backfillParticipants(user.userId);
+                              }}
+                            >
+                              {opsUsersBackfilling === user.userId
+                                ? 'Backfilling…'
+                                : 'Backfill participant IDs'}
+                            </button>
+                            {backfillResult ? (
+                              <p {...stylex.props(opsStyles.note)}>
+                                Updated {backfillResult.updated}/
+                                {backfillResult.scanned} · skipped(no ID){' '}
+                                {backfillResult.skippedNoParticipant} · errors{' '}
+                                {backfillResult.failed}
+                              </p>
+                            ) : null}
+                          </>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))}
