@@ -130,6 +130,12 @@ type SyncJob =
       cursor?: string | null;
       initialized?: boolean;
       attempt?: number;
+    }
+  | {
+      kind: 'recompute_inbox';
+      userId: string;
+      cursor?: string | null;
+      attempt?: number;
     };
 
 type RouteHandler = (
@@ -3148,6 +3154,44 @@ async function recomputeConversationStats(
   return { updated };
 }
 
+async function recomputeInboxForUser(
+  env: Env,
+  data: {
+    userId: string;
+    cursor?: string | null;
+    chunkSize?: number;
+  },
+) {
+  const chunkSize = Math.max(1, Math.min(50, data.chunkSize ?? 10));
+  const cursor = data.cursor ?? null;
+  let query = `SELECT id
+     FROM conversations
+     WHERE user_id = ?`;
+  const bindings: unknown[] = [data.userId];
+  if (cursor) {
+    query += ` AND id > ?`;
+    bindings.push(cursor);
+  }
+  query += ` ORDER BY id ASC LIMIT ?`;
+  bindings.push(chunkSize + 1);
+
+  const rows = await env.DB.prepare(query)
+    .bind(...bindings)
+    .all<{ id: string }>();
+  const allIds = rows.results ?? [];
+  const page = allIds.slice(0, chunkSize);
+  const hasMore = allIds.length > chunkSize;
+  const nextCursor = hasMore ? page[page.length - 1]?.id ?? null : null;
+
+  let updated = 0;
+  for (const row of page) {
+    const result = await recomputeConversationState(env, data.userId, row.id);
+    if (result) updated += 1;
+  }
+
+  return { updated, hasMore, nextCursor };
+}
+
 class SyncScopeOrchestrator {
   constructor(
     private state: DurableObjectState,
@@ -3336,6 +3380,25 @@ export default {
           });
           continue;
         }
+        if (kind === 'recompute_inbox') {
+          const inboxJob = message.body as Extract<
+            SyncJob,
+            { kind: 'recompute_inbox' }
+          >;
+          const result = await recomputeInboxForUser(env, {
+            userId: inboxJob.userId,
+            cursor: inboxJob.cursor,
+            chunkSize: 10,
+          });
+          if (result.hasMore) {
+            await env.SYNC_QUEUE.send({
+              kind: 'recompute_inbox',
+              userId: inboxJob.userId,
+              cursor: result.nextCursor,
+            });
+          }
+          continue;
+        }
         const syncJob = message.body as Extract<SyncJob, { kind?: 'sync' }>;
         const { userId, pageId, platform, igId, runId, cursor } = syncJob;
         await runSync({
@@ -3350,9 +3413,13 @@ export default {
       } catch (error) {
         const kind = message.body.kind ?? 'sync';
         if (kind === 'recompute_stats') {
+          const statsJob = message.body as Extract<
+            SyncJob,
+            { kind: 'recompute_stats' }
+          >;
           const messageText = errorMessage(error);
           console.error('Stats recompute failed', {
-            runId: message.body.runId,
+            runId: statsJob.runId,
             error: messageText,
           });
           reportError(env, {
@@ -3362,11 +3429,41 @@ export default {
             message: messageText,
           });
           await updateSyncRunStatsAndNotify(env, {
-            id: message.body.runId,
+            id: statsJob.runId,
             statsStatus: 'failed',
             statsFinishedAt: new Date().toISOString(),
             statsError: truncateErrorText(messageText),
           });
+          continue;
+        }
+        if (kind === 'recompute_inbox') {
+          const inboxJob = message.body as Extract<
+            SyncJob,
+            { kind: 'recompute_inbox' }
+          >;
+          const attempt = inboxJob.attempt ?? 0;
+          const messageText = errorMessage(error);
+          console.error('Inbox recompute failed', {
+            userId: inboxJob.userId,
+            cursor: inboxJob.cursor ?? null,
+            attempt,
+            error: messageText,
+          });
+          reportError(env, {
+            errorKey: 'inbox.recompute_failed',
+            kind: 'sync',
+            route: 'queue.recompute_inbox',
+            workspaceId: inboxJob.userId,
+            message: messageText,
+          });
+          if (attempt < 3) {
+            await env.SYNC_QUEUE.send({
+              kind: 'recompute_inbox',
+              userId: inboxJob.userId,
+              cursor: inboxJob.cursor ?? null,
+              attempt: attempt + 1,
+            });
+          }
           continue;
         }
 

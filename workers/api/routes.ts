@@ -1043,19 +1043,11 @@ export function registerRoutes(deps: any) {
     if (!(await isFollowupInboxEnabledForUser(env, userId))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
-    const rows = await env.DB.prepare(
-      `SELECT id FROM conversations WHERE user_id = ?`,
-    )
-      .bind(userId)
-      .all<{ id: string }>();
-    let updated = 0;
-    for (const row of rows.results ?? []) {
-      const result = await recomputeConversationState(env, userId, row.id);
-      if (result) {
-        updated += 1;
-      }
-    }
-    return json({ ok: true, updated });
+    await env.SYNC_QUEUE.send({
+      kind: 'recompute_inbox',
+      userId,
+    });
+    return json({ ok: true, queued: true });
   });
 
   addRoute(

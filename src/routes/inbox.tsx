@@ -1261,12 +1261,19 @@ export default function Inbox(): React.ReactElement {
         const data = (await response.json()) as { error?: string };
         throw new Error(data?.error ?? 'Recompute failed');
       }
-      const data = (await response.json()) as { updated?: number };
-      setStatus(
-        `Recomputed ${data.updated ?? 0} conversation${
-          data.updated === 1 ? '' : 's'
-        }.`,
-      );
+      const data = (await response.json()) as {
+        updated?: number;
+        queued?: boolean;
+      };
+      if (data.queued) {
+        setStatus('Recompute queued. Refresh in a moment for updated states.');
+      } else {
+        setStatus(
+          `Recomputed ${data.updated ?? 0} conversation${
+            data.updated === 1 ? '' : 's'
+          }.`,
+        );
+      }
       void loadConversations();
       void loadConversationDetail();
     } catch (error) {
