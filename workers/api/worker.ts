@@ -20,6 +20,10 @@ import {
   fetchUserProfile,
 } from './meta';
 import {
+  isReplyWindowClosed,
+  syncConversationInboxLabels,
+} from './inboxLabels';
+import {
   annotateMessage,
   inferConversation,
   type AnnotatedMessage,
@@ -137,6 +141,7 @@ type SyncJob =
       userId: string;
       cursor?: string | null;
       attempt?: number;
+      forceLabelSync?: boolean;
     };
 
 type RouteHandler = (
@@ -1291,6 +1296,10 @@ async function recomputeConversationState(
   userId: string,
   conversationId: string,
   aiRunStats?: AiRunStats,
+  options?: {
+    syncInboxLabels?: boolean;
+    waitUntil?: (promise: Promise<unknown>) => void;
+  },
 ) {
   const explanation = await getConversationClassificationExplain(
     env,
@@ -1321,6 +1330,18 @@ async function recomputeConversationState(
     !finalTouchSentAt
       ? 1
       : 0;
+  const previousNeedsReply = Boolean(conversation.needsFollowup);
+  const previousWindowClosed = isReplyWindowClosed({
+    needsReply: previousNeedsReply,
+    lastInboundAt: conversation.lastInboundAt,
+  });
+  const nextNeedsReply = needsFollowup;
+  const nextWindowClosed = isReplyWindowClosed({
+    needsReply: nextNeedsReply,
+    lastInboundAt: inference.lastInboundAt,
+  });
+  const needsFollowupChanged = previousNeedsReply !== nextNeedsReply;
+  const windowClosedChanged = previousWindowClosed !== nextWindowClosed;
 
   await env.DB.prepare(
     `UPDATE conversations
@@ -1392,12 +1413,46 @@ async function recomputeConversationState(
     });
   }
 
+  const shouldSyncLabels = options?.syncInboxLabels !== false;
+  if (shouldSyncLabels && (needsFollowupChanged || windowClosedChanged)) {
+    const syncPromise = (async () => {
+      const page = await getPage(env, userId, conversation.pageId);
+      if (!page?.access_token) {
+        return;
+      }
+      await syncConversationInboxLabels(env, {
+        userId,
+        pageId: conversation.pageId,
+        accessToken: page.access_token,
+        version: getApiVersion(env),
+        conversationId,
+      });
+    })().catch((error) => {
+      console.warn('Failed to sync Business Inbox labels', {
+        userId,
+        conversationId,
+        pageId: conversation.pageId,
+        error: error instanceof Error ? error.message : error,
+      });
+    });
+
+    if (options?.waitUntil) {
+      options.waitUntil(syncPromise);
+    } else {
+      await syncPromise;
+    }
+  }
+
   return {
     state: finalState,
     confidence: finalConfidence,
     followupSuggestion: inference.followupSuggestion,
     followupDueAt: inference.followupDueAt,
     reasons,
+    needsFollowupChanged,
+    windowClosedChanged,
+    needsReply: nextNeedsReply,
+    windowClosed: nextWindowClosed,
   };
 }
 
@@ -3161,6 +3216,7 @@ async function recomputeInboxForUser(
     userId: string;
     cursor?: string | null;
     chunkSize?: number;
+    forceLabelSync?: boolean;
   },
 ) {
   const chunkSize = Math.max(1, Math.min(50, data.chunkSize ?? 10));
@@ -3186,8 +3242,53 @@ async function recomputeInboxForUser(
 
   let updated = 0;
   for (const row of page) {
-    const result = await recomputeConversationState(env, data.userId, row.id);
-    if (result) updated += 1;
+    const result = await recomputeConversationState(
+      env,
+      data.userId,
+      row.id,
+      undefined,
+      {
+        syncInboxLabels: false,
+      },
+    );
+    if (!result) {
+      if (!data.forceLabelSync) {
+        continue;
+      }
+    } else {
+      updated += 1;
+    }
+    const shouldSyncLabels = Boolean(
+      data.forceLabelSync ||
+        (result && (result.needsFollowupChanged || result.windowClosedChanged)),
+    );
+    if (!shouldSyncLabels) {
+      continue;
+    }
+    const conversation = await getConversation(env, data.userId, row.id);
+    if (!conversation || conversation.platform !== 'messenger') {
+      continue;
+    }
+    const page = await getPage(env, data.userId, conversation.pageId);
+    if (!page?.access_token) {
+      continue;
+    }
+    try {
+      await syncConversationInboxLabels(env, {
+        userId: data.userId,
+        pageId: conversation.pageId,
+        accessToken: page.access_token,
+        version: getApiVersion(env),
+        conversationId: row.id,
+      });
+    } catch (error) {
+      console.warn('Failed to sync Business Inbox labels', {
+        userId: data.userId,
+        conversationId: row.id,
+        pageId: conversation.pageId,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
   }
 
   return { updated, hasMore, nextCursor };
@@ -3391,12 +3492,14 @@ export default {
             userId: inboxJob.userId,
             cursor: inboxJob.cursor,
             chunkSize: 10,
+            forceLabelSync: inboxJob.forceLabelSync,
           });
           if (result.hasMore) {
             await env.SYNC_QUEUE.send({
               kind: 'recompute_inbox',
               userId: inboxJob.userId,
               cursor: result.nextCursor,
+              forceLabelSync: inboxJob.forceLabelSync,
             });
           }
           continue;
@@ -3464,6 +3567,7 @@ export default {
               userId: inboxJob.userId,
               cursor: inboxJob.cursor ?? null,
               attempt: attempt + 1,
+              forceLabelSync: inboxJob.forceLabelSync,
             });
           }
           continue;

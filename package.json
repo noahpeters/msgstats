@@ -10,7 +10,7 @@
     "predev": "react-router build",
     "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\" \"npm run dev:build\" \"npm run dev:ws\"",
     "dev:api": "wrangler dev --config wrangler.api.toml --port 8787 --ip 127.0.0.1 --inspector-port 9231 --inspector-ip 127.0.0.1",
-    "dev:web": "node scripts/wait-for-paths.mjs && wrangler dev --config wrangler.web.toml --port 5173 --ip 127.0.0.1 --inspector-port 9230 --inspector-ip 127.0.0.1",
+    "dev:web": "node scripts/wait-for-paths.mjs && wrangler dev --config wrangler.web.toml --port 5173 --ip 127.0.0.1 --inspector-port 9230 --inspector-ip 127.0.0.1 --log-level warn",
     "dev:build": "node --watch-path=src --watch-path=react-router.config.ts scripts/dev-build.mjs",
     "dev:ws": "node dev/ws-server.mjs",
     "build": "react-router build",

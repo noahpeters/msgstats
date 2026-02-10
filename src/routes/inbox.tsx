@@ -37,6 +37,7 @@ type ConversationSummary = {
   lastSnippet: string | null;
   currentState: string;
   currentConfidence: string;
+  needsFollowup?: boolean;
   followupSuggestion: string | null;
   followupDueAt: string | null;
   aiSummary?: {
@@ -282,6 +283,21 @@ const ruleLabels: Record<string, string> = {
   AI_DEFER_INTERPRET: 'Deferred (AI)',
 };
 
+const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SEARCH_LABEL = 'MSGSTATS_NEEDS_REPLY';
+const BUSINESS_INBOX_URL = 'https://business.facebook.com/latest/inbox';
+
+const isReplyWindowClosed = (input: {
+  needsReply: boolean;
+  lastInboundAt: string | null;
+}) => {
+  if (!input.needsReply) return false;
+  if (!input.lastInboundAt) return true;
+  const lastInboundMs = Date.parse(input.lastInboundAt);
+  if (Number.isNaN(lastInboundMs)) return true;
+  return Date.now() - lastInboundMs > REPLY_WINDOW_MS;
+};
+
 const formatReason = (
   reason:
     | string
@@ -486,6 +502,24 @@ export default function Inbox(): React.ReactElement {
     },
     [],
   );
+  const detailNeedsReply = Boolean(detail?.conversation.needsFollowup);
+  const detailWindowClosed = isReplyWindowClosed({
+    needsReply: detailNeedsReply,
+    lastInboundAt: detail?.conversation.lastInboundAt ?? null,
+  });
+
+  const handleCopyInboxLabel = React.useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+      showToast('Copy is not available in this browser.', 'error');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(SEARCH_LABEL);
+      showToast('Label copied.', 'success');
+    } catch {
+      showToast('Unable to copy label.', 'error');
+    }
+  }, [showToast]);
 
   const loadAssets = React.useCallback(async () => {
     const response = await fetch('/api/assets');
@@ -995,11 +1029,19 @@ export default function Inbox(): React.ReactElement {
       auditSubmitting,
       closeAuditPopover,
       getConversationForAudit,
+      showToast,
     ],
   );
 
   const handleSend = async () => {
     if (!selectedId || !composerText.trim()) return;
+    if (detailWindowClosed) {
+      showToast(
+        'Open Meta Business Inbox to continue this conversation.',
+        'info',
+      );
+      return;
+    }
     setSending(true);
     setToast(null);
     try {
@@ -2465,11 +2507,50 @@ export default function Inbox(): React.ReactElement {
 
           {detail ? (
             <div {...stylex.props(inboxStyles.composer)}>
+              {detailWindowClosed ? (
+                <div {...stylex.props(inboxStyles.windowClosedNotice)}>
+                  <p {...stylex.props(inboxStyles.windowClosedText)}>
+                    To message customers who haven&apos;t replied in the last 24
+                    hours, reply from Meta Business Inbox.
+                  </p>
+                  <div {...stylex.props(inboxStyles.windowClosedActions)}>
+                    <span {...stylex.props(inboxStyles.windowClosedLabel)}>
+                      Search label: {SEARCH_LABEL}
+                    </span>
+                    <button
+                      type="button"
+                      {...stylex.props(inboxStyles.windowClosedButton)}
+                      onClick={() => {
+                        void handleCopyInboxLabel();
+                      }}
+                    >
+                      Copy label
+                    </button>
+                    <a
+                      href={BUSINESS_INBOX_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      {...stylex.props(inboxStyles.windowClosedButton)}
+                    >
+                      Open Business Inbox
+                    </a>
+                  </div>
+                </div>
+              ) : detailNeedsReply ? (
+                <div {...stylex.props(inboxStyles.needsReplyChip)}>
+                  Needs reply
+                </div>
+              ) : null}
               <textarea
                 ref={composerTextAreaRef}
                 {...stylex.props(inboxStyles.textarea)}
-                placeholder="Write a reply"
+                placeholder={
+                  detailWindowClosed
+                    ? 'Reply from Meta Business Inbox'
+                    : 'Write a reply'
+                }
                 value={composerText}
+                disabled={detailWindowClosed}
                 onChange={(event) => {
                   setComposerText(event.target.value);
                   useTemplateSelectionRef.current = {
@@ -2491,7 +2572,9 @@ export default function Inbox(): React.ReactElement {
                 <button
                   {...stylex.props(layout.button)}
                   onClick={handleSend}
-                  disabled={sending || !composerText.trim()}
+                  disabled={
+                    detailWindowClosed || sending || !composerText.trim()
+                  }
                 >
                   {sending ? 'Sending…' : 'Send reply'}
                 </button>

@@ -1241,6 +1241,7 @@ export function registerRoutes(deps: any) {
     await env.SYNC_QUEUE.send({
       kind: 'recompute_inbox',
       userId,
+      forceLabelSync: true,
     });
     return json({ ok: true, queued: true });
   });

@@ -32,6 +32,7 @@ const defaultRetry: RetryOptions = {
 type MetaUsage = Record<string, string>;
 
 export type MetaEnv = {
+  DB: D1Database;
   AE_META_CALLS: AnalyticsEngineDataset;
 };
 
@@ -83,6 +84,8 @@ export const metaConfig = {
     conversationMessages: (conversationId: string) =>
       `/${conversationId}/messages`,
     igAccounts: (pageId: string) => `/${pageId}/instagram_accounts`,
+    customLabels: (pageId: string) => `/${pageId}/custom_labels`,
+    labelAssociation: (labelId: string) => `/${labelId}/label`,
     sendMessage: '/me/messages',
   },
   fields: {
@@ -112,6 +115,8 @@ const metaRouteLabels = {
   conversationDetails: '/:conversationId',
   conversationMessages: '/:conversationId/messages',
   igAccounts: '/:pageId/instagram_accounts',
+  customLabels: '/:pageId/custom_labels',
+  labelAssociation: '/:labelId/label',
   sendMessage: '/me/messages',
 };
 
@@ -991,6 +996,258 @@ export type MetaIgAsset = {
   id: string;
   name?: string;
 };
+
+type MetaCustomLabel = {
+  id: string;
+  label?: string;
+  page_label_name?: string;
+  name?: string;
+};
+
+function normalizeLabelName(value: string | null | undefined) {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function matchesCustomLabelName(label: MetaCustomLabel, expected: string) {
+  const target = normalizeLabelName(expected);
+  if (!target) return false;
+  return (
+    normalizeLabelName(label.label) === target ||
+    normalizeLabelName(label.page_label_name) === target ||
+    normalizeLabelName(label.name) === target
+  );
+}
+
+function toGraphErrorLike(
+  meta: unknown,
+): { code?: number; error_subcode?: number; message?: string } | null {
+  if (!meta || typeof meta !== 'object') return null;
+  const graph = meta as {
+    error?: { code?: number; error_subcode?: number; message?: string };
+  };
+  if (graph.error && typeof graph.error === 'object') {
+    return graph.error;
+  }
+  return null;
+}
+
+function isLabelAssociationAlreadyApplied(error: unknown) {
+  if (!(error instanceof MetaApiError)) return false;
+  const graphError = toGraphErrorLike(error.meta);
+  const message = (
+    graphError?.message ??
+    (typeof error.message === 'string' ? error.message : '')
+  ).toLowerCase();
+  return message.includes('already') || message.includes('exists');
+}
+
+function isLabelAssociationAlreadyRemoved(error: unknown) {
+  if (!(error instanceof MetaApiError)) return false;
+  const graphError = toGraphErrorLike(error.meta);
+  const message = (
+    graphError?.message ??
+    (typeof error.message === 'string' ? error.message : '')
+  ).toLowerCase();
+  return (
+    message.includes('not found') ||
+    message.includes('does not exist') ||
+    message.includes('no association')
+  );
+}
+
+function isCustomLabelAlreadyExists(error: unknown) {
+  if (!(error instanceof MetaApiError)) return false;
+  const graphError = toGraphErrorLike(error.meta);
+  const message = (
+    graphError?.message ??
+    (typeof error.message === 'string' ? error.message : '')
+  ).toLowerCase();
+  return message.includes('already') || message.includes('exists');
+}
+
+export async function getOrCreatePageCustomLabel(options: {
+  env: MetaEnv;
+  userId: string;
+  pageId: string;
+  accessToken: string;
+  version: string;
+  name: string;
+}) {
+  const nowIso = new Date().toISOString();
+  const cached = await options.env.DB.prepare(
+    `SELECT label_id as labelId
+     FROM meta_custom_labels_cache
+     WHERE user_id = ? AND page_id = ? AND label_name = ?`,
+  )
+    .bind(options.userId, options.pageId, options.name)
+    .first<{ labelId: string }>();
+  if (cached?.labelId) {
+    return cached.labelId;
+  }
+
+  const listUrl = buildUrl(
+    metaConfig.endpoints.customLabels(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      fields: 'id,label,page_label_name',
+      limit: '200',
+    },
+  );
+  const labels = await paginateList<MetaCustomLabel>(
+    listUrl,
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.custom_labels_list',
+      route: metaRouteLabels.customLabels,
+      method: 'GET',
+      workspaceId: options.userId,
+      assetId: options.pageId,
+    }),
+  );
+  let labelId =
+    labels.find((label) => matchesCustomLabelName(label, options.name))?.id ??
+    null;
+
+  if (!labelId) {
+    const createUrl = buildUrl(
+      metaConfig.endpoints.customLabels(options.pageId),
+      options.version,
+      {
+        access_token: options.accessToken,
+        page_label_name: options.name,
+      },
+    );
+    try {
+      const payload = await fetchGraph<MetaCustomLabel>(
+        createUrl,
+        { method: 'POST' },
+        buildTelemetry({
+          env: options.env,
+          op: 'meta.custom_labels_create',
+          route: metaRouteLabels.customLabels,
+          method: 'POST',
+          workspaceId: options.userId,
+          assetId: options.pageId,
+        }),
+      );
+      labelId = payload.data?.id ?? null;
+    } catch (error) {
+      if (!isCustomLabelAlreadyExists(error)) {
+        throw error;
+      }
+    }
+
+    if (!labelId) {
+      const refreshed = await paginateList<MetaCustomLabel>(
+        listUrl,
+        buildTelemetry({
+          env: options.env,
+          op: 'meta.custom_labels_list',
+          route: metaRouteLabels.customLabels,
+          method: 'GET',
+          workspaceId: options.userId,
+          assetId: options.pageId,
+        }),
+      );
+      labelId =
+        refreshed.find((label) => matchesCustomLabelName(label, options.name))
+          ?.id ?? null;
+    }
+  }
+
+  if (!labelId) {
+    throw new Error(`Failed to resolve custom label "${options.name}"`);
+  }
+
+  await options.env.DB.prepare(
+    `INSERT INTO meta_custom_labels_cache
+     (user_id, page_id, label_name, label_id, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, page_id, label_name)
+     DO UPDATE SET label_id = excluded.label_id, updated_at = excluded.updated_at`,
+  )
+    .bind(options.userId, options.pageId, options.name, labelId, nowIso)
+    .run();
+
+  return labelId;
+}
+
+export async function associateLabel(options: {
+  env: MetaEnv;
+  userId: string;
+  pageId: string;
+  labelId: string;
+  accessToken: string;
+  version: string;
+  psid: string;
+}) {
+  const url = buildUrl(
+    metaConfig.endpoints.labelAssociation(options.labelId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      user: options.psid,
+    },
+  );
+  try {
+    await fetchGraph<Record<string, unknown>>(
+      url,
+      { method: 'POST' },
+      buildTelemetry({
+        env: options.env,
+        op: 'meta.label_associate',
+        route: metaRouteLabels.labelAssociation,
+        method: 'POST',
+        workspaceId: options.userId,
+        assetId: options.pageId,
+      }),
+    );
+  } catch (error) {
+    if (isLabelAssociationAlreadyApplied(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+export async function dissociateLabel(options: {
+  env: MetaEnv;
+  userId: string;
+  pageId: string;
+  labelId: string;
+  accessToken: string;
+  version: string;
+  psid: string;
+}) {
+  const url = buildUrl(
+    metaConfig.endpoints.labelAssociation(options.labelId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      user: options.psid,
+    },
+  );
+  try {
+    await fetchGraph<Record<string, unknown>>(
+      url,
+      { method: 'DELETE' },
+      buildTelemetry({
+        env: options.env,
+        op: 'meta.label_dissociate',
+        route: metaRouteLabels.labelAssociation,
+        method: 'DELETE',
+        workspaceId: options.userId,
+        assetId: options.pageId,
+      }),
+    );
+  } catch (error) {
+    if (isLabelAssociationAlreadyRemoved(error)) {
+      return;
+    }
+    throw error;
+  }
+}
 
 type PageInstagramLinkData = {
   instagram_business_account?: {
