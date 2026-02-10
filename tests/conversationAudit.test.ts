@@ -100,6 +100,7 @@ describe('conversation audit helpers', () => {
             has_phone_number: false,
             has_email: false,
             has_price_rejection_phrase: false,
+            has_explicit_rejection_phrase: false,
             has_indefinite_deferral_phrase: false,
             has_spam_content: false,
             has_currency: false,
@@ -136,6 +137,10 @@ describe('conversation audit helpers', () => {
     expect(snapshot).toHaveProperty('message_flags.has_bounced', false);
     expect(snapshot).toHaveProperty(
       'message_flags.has_price_rejection_phrase',
+      false,
+    );
+    expect(snapshot).toHaveProperty(
+      'message_flags.has_explicit_rejection_phrase',
       false,
     );
     expect(snapshot).toHaveProperty(

@@ -239,6 +239,7 @@ const ruleDescriptions: Record<string, string> = {
   PRICE_STALE: 'Pricing was shared and follow-up stalled.',
   PRICE_REJECTION: 'Customer rejected pricing as too high.',
   PRICE_REJECTION_STALE: 'Lost after unresolved price rejection.',
+  EXPLICIT_REJECTION: 'Customer explicitly declined (e.g. no / no thanks).',
   INDEFINITE_DEFERRAL: 'Customer deferred with no concrete date.',
   INDEFINITE_DEFERRAL_STALE: 'Indefinite deferral went stale.',
   WAIT_TO_PROCEED: 'Customer indicates they must wait to proceed.',

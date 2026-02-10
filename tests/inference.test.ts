@@ -399,11 +399,7 @@ describe('inference engine', () => {
     });
     const result = inferConversation({ messages: [msg], config });
     expect(result.state).toBe('LOST');
-    const reason = result.reasons.find(
-      (entry) =>
-        typeof entry === 'object' && entry.code === 'LOST_EXPLICIT_DECLINE',
-    );
-    expect(reason).toBeTruthy();
+    expect(result.reasons).toContain('EXPLICIT_REJECTION');
     expect(msg.features.explicit_lost?.reason_code).toBe(
       'LOST_EXPLICIT_DECLINE',
     );
@@ -604,7 +600,7 @@ describe('inference engine', () => {
     expect(result.reasons).toContain('BLOCKED_BY_RECIPIENT');
   });
 
-  test('price rejection stale marks lost', () => {
+  test('price rejection marks lost immediately', () => {
     const msg = baseMessage({
       text: 'that is too expensive for us',
       createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
@@ -612,10 +608,11 @@ describe('inference engine', () => {
     const result = inferConversation({
       messages: [msg],
       config,
-      now: new Date('2026-01-20T10:00:00Z'),
+      now: new Date('2026-01-06T00:00:00Z'),
     });
     expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('PRICE_REJECTION_STALE');
+    expect(result.reasons).toContain('PRICE_REJECTION');
+    expect(result.needsFollowup).toBe(false);
   });
 
   test('price rejection can revive with later inbound', () => {
@@ -635,7 +632,7 @@ describe('inference engine', () => {
       now: new Date('2026-01-20T10:00:00Z'),
     });
     expect(result.state).not.toBe('LOST');
-    expect(result.reasons).not.toContain('PRICE_REJECTION_STALE');
+    expect(result.reasons).not.toContain('PRICE_REJECTION');
   });
 
   test('price rejection is not revived by ack-only thank you', () => {
@@ -655,7 +652,7 @@ describe('inference engine', () => {
       now: new Date('2026-01-20T10:00:00Z'),
     });
     expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('PRICE_REJECTION_STALE');
+    expect(result.reasons).toContain('PRICE_REJECTION');
   });
 
   test('price rejection is not revived by hard no reply', () => {
@@ -675,7 +672,7 @@ describe('inference engine', () => {
       now: new Date('2026-01-20T10:00:00Z'),
     });
     expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('PRICE_REJECTION_STALE');
+    expect(result.reasons).toContain('EXPLICIT_REJECTION');
   });
 
   test('off-platform AI handoff without contact info becomes lost when stale', () => {
@@ -887,6 +884,21 @@ describe('inference engine', () => {
     expect(msg.features.has_price_rejection_phrase).toBe(false);
   });
 
+  test('explicit rejection detector flags standalone no', () => {
+    const msg = baseMessage({ text: 'no' });
+    expect(msg.features.has_explicit_rejection_phrase).toBe(true);
+  });
+
+  test('explicit rejection detector flags no thanks', () => {
+    const msg = baseMessage({ text: 'No thanks' });
+    expect(msg.features.has_explicit_rejection_phrase).toBe(true);
+  });
+
+  test('explicit rejection detector does not flag no problem', () => {
+    const msg = baseMessage({ text: 'no problem' });
+    expect(msg.features.has_explicit_rejection_phrase).toBe(false);
+  });
+
   test('t_4463595643962413 fixture maps wait + thanks to lost', () => {
     const price = baseMessage({
       id: 'm1',
@@ -906,7 +918,7 @@ describe('inference engine', () => {
     });
     expect(result.state).toBe('LOST');
     expect(
-      result.reasons.includes('PRICE_REJECTION_STALE') ||
+      result.reasons.includes('PRICE_REJECTION') ||
         result.reasons.includes('INDEFINITE_DEFERRAL'),
     ).toBe(true);
     expect(result.needsFollowup).toBe(false);
@@ -971,7 +983,82 @@ describe('inference engine', () => {
     });
     expect(m2.features.has_price_rejection_phrase).toBe(true);
     expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('PRICE_REJECTION_STALE');
+    expect(result.reasons).toContain('PRICE_REJECTION');
+  });
+
+  test('t_10237711327829989 fixture marks price rejection lost immediately', () => {
+    const price = baseMessage({
+      id: 'm1',
+      direction: 'outbound',
+      text: 'Price is $2,100 installed.',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const reject = baseMessage({
+      id: 'm2',
+      direction: 'inbound',
+      text: 'too expensive, thank you',
+      createdAt: new Date('2026-01-02T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [price, reject],
+      config,
+      now: new Date('2026-01-06T00:00:00Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('PRICE_REJECTION');
+    expect(result.needsFollowup).toBe(false);
+  });
+
+  test('t_10163707089490090 fixture marks standalone no lost with no follow-up after closing msg', () => {
+    const inboundNo = baseMessage({
+      id: 'm1',
+      direction: 'inbound',
+      text: 'no',
+      createdAt: new Date('2026-01-02T10:00:00Z').toISOString(),
+    });
+    const outboundClosing = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'Understood. If anything changes, we are here to help.',
+      createdAt: new Date('2026-01-02T10:10:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inboundNo, outboundClosing],
+      config,
+      now: new Date('2026-01-06T00:00:00Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('EXPLICIT_REJECTION');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupDueAt).toBeNull();
+    expect(result.followupSuggestion).toBeNull();
+  });
+
+  test('price given remains unchanged when engagement is active and no rejection', () => {
+    const price = baseMessage({
+      id: 'm1',
+      direction: 'outbound',
+      text: 'The quote is $1,250 for the table.',
+      createdAt: new Date('2026-01-01T09:00:00Z').toISOString(),
+    });
+    const inbound = baseMessage({
+      id: 'm2',
+      direction: 'inbound',
+      text: 'Can you share the dimensions too?',
+      createdAt: new Date('2026-01-01T09:10:00Z').toISOString(),
+    });
+    const outbound2 = baseMessage({
+      id: 'm3',
+      direction: 'outbound',
+      text: 'Yes, it is 72 by 40 and finished in walnut.',
+      createdAt: new Date('2026-01-01T09:20:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [price, inbound, outbound2],
+      config,
+      now: new Date('2026-01-01T09:30:00Z'),
+    });
+    expect(result.state).toBe('PRICE_GIVEN');
   });
 
   test('t_10241194901999951 indefinite deferral stays lost with no followup date', () => {

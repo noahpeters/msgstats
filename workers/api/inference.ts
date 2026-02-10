@@ -36,6 +36,7 @@ export type MessageFeatures = {
   has_phone_number: boolean;
   has_email: boolean;
   has_price_rejection_phrase: boolean;
+  has_explicit_rejection_phrase: boolean;
   has_indefinite_deferral_phrase: boolean;
   has_spam_content: boolean;
   has_currency: boolean;
@@ -117,6 +118,8 @@ const PRICE_CONTEXT_TERMS =
 const POLITE_DECLINE_TERMS = /\b(thank(?:s| you)?|thank u|thx|ty)\b/i;
 const WAIT_TO_PROCEED_TERMS =
   /\b(i['’]?ll have to wait|i will have to wait|have to wait|need to wait|hold off|can['’]?t do (?:it )?right now|cant do (?:it )?right now)\b/i;
+const EXPLICIT_REJECTION_PHRASES =
+  /\b(no thanks|no thank you|not interested)\b/i;
 const INDEFINITE_DEFERRAL_TERMS =
   /\b(maybe someday|someday|not right now|down the road|we['’]?ll see|we'll see|not at this time|circle back later|have to wait|need to wait|hold off)\b/i;
 const OPT_OUT_TERMS =
@@ -203,6 +206,39 @@ function isHardNegativeReply(text: string): boolean {
     .replace(/[.!?,]+/g, '')
     .trim();
   return /^(no|nope|nah)$/.test(normalized);
+}
+
+function normalizeForDecisionPhrase(text: string): string {
+  return normalizeText(text)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasExplicitRejectionPhrase(text: string): boolean {
+  const normalized = normalizeForDecisionPhrase(text);
+  if (!normalized) return false;
+  if (
+    normalized.length <= 12 &&
+    (normalized === 'no' || normalized === 'nope' || normalized === 'nah')
+  ) {
+    return true;
+  }
+  if (EXPLICIT_REJECTION_PHRASES.test(normalized)) {
+    return true;
+  }
+  if (normalized === 'stop') {
+    return true;
+  }
+  if (normalized.includes('not at this time')) {
+    const hasFutureIntent =
+      DEFERRAL_TERMS.test(normalized) ||
+      /\b(later|next|tomorrow|week|month|spring|summer|fall|autumn|winter|check back|follow up)\b/.test(
+        normalized,
+      );
+    return !hasFutureIntent;
+  }
+  return false;
 }
 
 function addBusinessDays(base: Date, businessDays: number): Date {
@@ -348,6 +384,8 @@ export function extractFeatures(
     (PRICE_REJECTION_TERMS.test(normalized) ||
       ((hasTooMuchVariant || hasWaitToProceed) &&
         (hasPriceContext || hasPoliteDecline)));
+  const hasExplicitRejection =
+    direction === 'inbound' && hasExplicitRejectionPhrase(body);
   const hasIndefiniteDeferral =
     direction === 'inbound' &&
     INDEFINITE_DEFERRAL_TERMS.test(normalized) &&
@@ -358,6 +396,7 @@ export function extractFeatures(
     has_phone_number: matchesPhone.length > 0,
     has_email: matchesEmail.length > 0,
     has_price_rejection_phrase: hasPriceRejection,
+    has_explicit_rejection_phrase: hasExplicitRejection,
     has_indefinite_deferral_phrase: hasIndefiniteDeferral,
     has_spam_content: hasSpamContent,
     has_currency: CURRENCY_REGEX.test(body),
@@ -457,6 +496,7 @@ export function buildRuleHits(features: MessageFeatures): string[] {
     hits.push('PHONE_OR_EMAIL');
   if (features.contains_deferral_phrase) hits.push('DEFERRAL_PHRASE');
   if (features.has_price_rejection_phrase) hits.push('PRICE_REJECTION');
+  if (features.has_explicit_rejection_phrase) hits.push('EXPLICIT_REJECTION');
   if (
     features.has_price_rejection_phrase &&
     features.has_indefinite_deferral_phrase
@@ -645,6 +685,7 @@ export function inferConversation(
   let deferralHint: string | null = null;
   let lastDeferralAt: string | null = null;
   let lastPriceRejectionAt: string | null = null;
+  let lastExplicitRejectionAt: string | null = null;
 
   for (const msg of messages) {
     const isFinalTouch = msg.messageType === 'FINAL_TOUCH';
@@ -686,6 +727,12 @@ export function inferConversation(
       msg.features.has_indefinite_deferral_phrase
     ) {
       lastDeferralAt = msg.createdAt;
+    }
+    if (
+      msg.direction === 'inbound' &&
+      msg.features.has_explicit_rejection_phrase
+    ) {
+      lastExplicitRejectionAt = msg.createdAt;
     }
   }
 
@@ -755,6 +802,9 @@ export function inferConversation(
   const hasLoss = hasRule(messages, 'LOSS_PHRASE');
   const hasPriceRejection = inboundMessages.some(
     (msg) => msg.features.has_price_rejection_phrase,
+  );
+  const hasExplicitRejection = inboundMessages.some(
+    (msg) => msg.features.has_explicit_rejection_phrase,
   );
   const hasIndefiniteDeferral = inboundMessages.some(
     (msg) => msg.features.has_indefinite_deferral_phrase,
@@ -892,7 +942,31 @@ export function inferConversation(
       if (isHardNegativeReply(msg.text)) return false;
       if (
         msg.features.has_price_rejection_phrase ||
-        msg.features.has_indefinite_deferral_phrase
+        msg.features.has_indefinite_deferral_phrase ||
+        msg.features.has_explicit_rejection_phrase
+      ) {
+        return false;
+      }
+      return true;
+    });
+  })();
+  const hasExplicitRejectionRevival = (() => {
+    if (!lastExplicitRejectionAt) return false;
+    const rejectionMs = Date.parse(lastExplicitRejectionAt);
+    if (Number.isNaN(rejectionMs)) return false;
+    const revivalWindowMs = input.config.resurrectGapDays * 24 * 60 * 60 * 1000;
+    return inboundMessages.some((msg) => {
+      const ts = Date.parse(msg.createdAt);
+      if (Number.isNaN(ts) || ts <= rejectionMs) return false;
+      if (ts - rejectionMs > revivalWindowMs) return false;
+      if (!msg.text) return false;
+      if (msg.features.ack_only) return false;
+      if (isHardNegativeReply(msg.text)) return false;
+      if (
+        msg.features.has_explicit_rejection_phrase ||
+        msg.features.has_price_rejection_phrase ||
+        msg.features.has_indefinite_deferral_phrase ||
+        msg.features.contains_opt_out
       ) {
         return false;
       }
@@ -921,6 +995,17 @@ export function inferConversation(
     state = 'LOST';
     confidence = 'HIGH';
     reasons.push('BOUNCED');
+  } else if (hasExplicitRejection && !hasExplicitRejectionRevival) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('EXPLICIT_REJECTION');
+  } else if (hasPriceRejection && !hasRejectionRevival) {
+    state = 'LOST';
+    confidence = 'HIGH';
+    reasons.push('PRICE_REJECTION');
+    if (hasIndefiniteDeferral) {
+      reasons.push('WAIT_TO_PROCEED');
+    }
   } else if (hasSpamPhraseMatch && spamContextConfirmed) {
     state = 'SPAM';
     confidence = 'HIGH';

@@ -69,6 +69,7 @@ function summarizeMessageFlags(
   let hasDeferralPhrase = false;
   let hasCurrency = false;
   let hasPriceRejection = false;
+  let hasExplicitRejection = false;
   let hasIndefiniteDeferral = false;
   let hasSpamContent = false;
   for (const message of messages) {
@@ -84,6 +85,8 @@ function summarizeMessageFlags(
     hasCurrency = hasCurrency || message.features.has_currency;
     hasPriceRejection =
       hasPriceRejection || message.features.has_price_rejection_phrase;
+    hasExplicitRejection =
+      hasExplicitRejection || message.features.has_explicit_rejection_phrase;
     hasIndefiniteDeferral =
       hasIndefiniteDeferral || message.features.has_indefinite_deferral_phrase;
     hasSpamContent = hasSpamContent || message.features.has_spam_content;
@@ -95,6 +98,7 @@ function summarizeMessageFlags(
     has_deferral_phrase: hasDeferralPhrase,
     has_currency: hasCurrency,
     has_price_rejection_phrase: hasPriceRejection,
+    has_explicit_rejection_phrase: hasExplicitRejection,
     has_indefinite_deferral_phrase: hasIndefiniteDeferral,
     has_spam_content: hasSpamContent,
     has_bounced: Boolean(conversation.bouncedByProvider),
