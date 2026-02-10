@@ -38,6 +38,7 @@ export function registerRoutes(deps: any) {
     fetchBusinessPages,
     fetchClassicPages,
     fetchPageToken,
+    subscribeAppToPage,
     fetchInstagramAssets,
     fetchPageIgDebug,
     sendMessage,
@@ -76,6 +77,50 @@ export function registerRoutes(deps: any) {
     reportError,
   } = deps;
   const readJson = readJsonRaw as <T>(req: Request) => Promise<T | null>;
+  const webhookSubscribeFields = [
+    'messages',
+    'messaging_postbacks',
+    'messaging_optins',
+    'message_deliveries',
+    'message_reads',
+    'message_echoes',
+  ];
+
+  const subscribePageWebhookBestEffort = async (
+    env: Env,
+    input: {
+      userId: string;
+      pageId: string;
+      pageAccessToken: string;
+    },
+  ) => {
+    try {
+      const result = await subscribeAppToPage({
+        env,
+        pageId: input.pageId,
+        accessToken: input.pageAccessToken,
+        version: getApiVersion(env),
+        workspaceId: input.userId,
+        subscribedFields: webhookSubscribeFields,
+      });
+      return result.success;
+    } catch (error) {
+      console.warn('Failed to subscribe page webhook', {
+        userId: input.userId,
+        pageId: input.pageId,
+        error: error instanceof Error ? error.message : error,
+      });
+      reportError(env, {
+        errorKey: 'meta.page_subscribe_failed',
+        kind: 'meta',
+        route: 'POST /:pageId/subscribed_apps',
+        workspaceId: input.userId,
+        assetId: input.pageId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  };
 
   const normalizeTag = (tag: string) =>
     tag.trim().toLowerCase().replace(/\s+/g, '_');
@@ -162,7 +207,7 @@ export function registerRoutes(deps: any) {
     return Response.redirect(url.toString(), 302);
   });
 
-  addRoute('GET', '/api/auth/callback', async (req, env) => {
+  addRoute('GET', '/api/auth/callback', async (req, env, ctx) => {
     const url = new URL(req.url);
     const code = url.searchParams.get('code');
     if (!code) {
@@ -204,9 +249,26 @@ export function registerRoutes(deps: any) {
         debug.expires_at && debug.expires_at > 0
           ? debug.expires_at
           : longToken.expiresIn
-            ? Math.floor(Date.now() / 1000) + longToken.expiresIn
-            : null,
+          ? Math.floor(Date.now() / 1000) + longToken.expiresIn
+          : null,
     });
+    ctx.waitUntil(
+      (async () => {
+        const pages = await env.DB.prepare(
+          'SELECT id, access_token as accessToken FROM meta_pages WHERE user_id = ?',
+        )
+          .bind(debug.user_id)
+          .all<{ id: string; accessToken: string | null }>();
+        for (const page of pages.results ?? []) {
+          if (!page.accessToken) continue;
+          await subscribePageWebhookBestEffort(env, {
+            userId: debug.user_id,
+            pageId: page.id,
+            pageAccessToken: page.accessToken,
+          });
+        }
+      })(),
+    );
 
     const fallbackExpiry = longToken.expiresIn ?? 60 * 60 * 24 * 30;
     const expiresAtSeconds =
@@ -517,7 +579,12 @@ export function registerRoutes(deps: any) {
           name: resolvedName,
           accessToken: page.accessToken,
         });
-        return json({ id: page.id, name: resolvedName });
+        const subscribed = await subscribePageWebhookBestEffort(env, {
+          userId,
+          pageId,
+          pageAccessToken: page.accessToken,
+        });
+        return json({ id: page.id, name: resolvedName, webhookSubscribed: subscribed });
       } catch (error) {
         if (error instanceof MetaApiError) {
           const meta =
@@ -649,6 +716,11 @@ export function registerRoutes(deps: any) {
               name: refreshed.name,
               accessToken: refreshed.accessToken,
             });
+            await subscribePageWebhookBestEffort(env, {
+              userId,
+              pageId,
+              pageAccessToken: refreshed.accessToken,
+            });
             assets = await fetchInstagramAssets({
               env,
               pageId,
@@ -683,6 +755,46 @@ export function registerRoutes(deps: any) {
       return json({ igAssets: stored });
     },
   );
+
+  addRoute('POST', '/api/meta/pages/subscribe-connected', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const pages = await env.DB.prepare(
+      `SELECT id, access_token as accessToken
+       FROM meta_pages
+       WHERE user_id = ?`,
+    )
+      .bind(userId)
+      .all<{ id: string; accessToken: string | null }>();
+    let subscribed = 0;
+    let skipped = 0;
+    const failed: string[] = [];
+    for (const page of pages.results ?? []) {
+      if (!page.accessToken) {
+        skipped += 1;
+        continue;
+      }
+      const ok = await subscribePageWebhookBestEffort(env, {
+        userId,
+        pageId: page.id,
+        pageAccessToken: page.accessToken,
+      });
+      if (ok) {
+        subscribed += 1;
+      } else {
+        failed.push(page.id);
+      }
+    }
+    return json({
+      ok: true,
+      total: pages.results?.length ?? 0,
+      subscribed,
+      skipped,
+      failed,
+    });
+  });
 
   addRoute(
     'GET',

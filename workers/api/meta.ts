@@ -77,6 +77,7 @@ export const metaConfig = {
     businessOwnedPages: (businessId: string) => `/${businessId}/owned_pages`,
     businessClientPages: (businessId: string) => `/${businessId}/client_pages`,
     pageDetails: (pageId: string) => `/${pageId}`,
+    pageSubscribedApps: (pageId: string) => `/${pageId}/subscribed_apps`,
     conversations: (pageId: string) => `/${pageId}/conversations`,
     conversationDetails: (conversationId: string) => `/${conversationId}`,
     conversationMessages: (conversationId: string) =>
@@ -106,6 +107,7 @@ const metaRouteLabels = {
   businessOwnedPages: '/:businessId/owned_pages',
   businessClientPages: '/:businessId/client_pages',
   pageDetails: '/:pageId',
+  pageSubscribedApps: '/:pageId/subscribed_apps',
   conversations: '/:pageId/conversations',
   conversationDetails: '/:conversationId',
   conversationMessages: '/:conversationId/messages',
@@ -751,6 +753,39 @@ export async function fetchPageName(options: {
     }),
   );
   return payload.data;
+}
+
+export async function subscribeAppToPage(options: {
+  env: MetaEnv;
+  pageId: string;
+  accessToken: string;
+  version: string;
+  workspaceId?: string | null;
+  subscribedFields?: string[];
+}) {
+  const url = buildUrl(
+    metaConfig.endpoints.pageSubscribedApps(options.pageId),
+    options.version,
+    {
+      access_token: options.accessToken,
+      subscribed_fields: (options.subscribedFields ?? []).join(','),
+    },
+  );
+  const payload = await fetchForToken<{ success?: boolean }>(
+    url,
+    { method: 'POST' },
+    buildTelemetry({
+      env: options.env,
+      op: 'meta.page_subscribed_apps',
+      route: metaRouteLabels.pageSubscribedApps,
+      method: 'POST',
+      workspaceId: options.workspaceId,
+      assetId: options.pageId,
+    }),
+  );
+  return {
+    success: Boolean(payload?.success),
+  };
 }
 
 export async function fetchUserProfile(options: {
