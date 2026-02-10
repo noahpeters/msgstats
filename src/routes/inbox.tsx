@@ -3,6 +3,7 @@ import { Link, useLocation, useSearchParams } from 'react-router';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
+import { Toast, type ToastTone } from '../components/Toast';
 import { inboxStyles } from './inbox.styles';
 import {
   ToolbarSelect,
@@ -157,6 +158,8 @@ type FilterGroupOption = {
   description: string;
 };
 
+type FilterGroupCounts = Record<FilterGroupKey, number>;
+
 const baseFilterGroups: FilterGroupOption[] = [
   {
     key: 'needs_followup',
@@ -221,7 +224,8 @@ const formatRelative = (value: string | null) => {
 };
 
 const ruleDescriptions: Record<string, string> = {
-  SPAM_PHRASE: 'Spam or abuse language detected.',
+  SPAM_PHRASE_MATCH: 'Spam phrase-level signal detected.',
+  SPAM_CONTEXT_CONFIRMED: 'Spam context checks passed.',
   CONVERSION_PHRASE: 'Message indicates a conversion or completed sale.',
   LOSS_PHRASE: 'Message indicates a lost opportunity.',
   PHONE_OR_EMAIL: 'Phone or email exchanged (off-platform).',
@@ -373,13 +377,18 @@ export default function Inbox(): React.ReactElement {
   const [conversations, setConversations] = React.useState<
     ConversationSummary[]
   >([]);
+  const [filterGroupCounts, setFilterGroupCounts] =
+    React.useState<FilterGroupCounts | null>(null);
   const [detail, setDetail] = React.useState<ConversationDetail | null>(null);
   const [templates, setTemplates] = React.useState<Template[]>([]);
   const [assets, setAssets] = React.useState<AssetsResponse | null>(null);
   const [composerText, setComposerText] = React.useState('');
   const [sending, setSending] = React.useState(false);
   const [finalTouching, setFinalTouching] = React.useState(false);
-  const [status, setStatus] = React.useState<string | null>(null);
+  const [toast, setToast] = React.useState<{
+    message: string;
+    tone: ToastTone;
+  } | null>(null);
   const [liveAt, setLiveAt] = React.useState<string | null>(null);
   const [featureEnabled, setFeatureEnabled] = React.useState<boolean | null>(
     null,
@@ -470,6 +479,12 @@ export default function Inbox(): React.ReactElement {
   const showAiErrors =
     typeof window !== 'undefined' &&
     (import.meta.env.DEV || window.location.search.includes('ops=1'));
+  const showToast = React.useCallback(
+    (message: string, tone: ToastTone = 'info') => {
+      setToast({ message, tone });
+    },
+    [],
+  );
 
   const loadAssets = React.useCallback(async () => {
     const response = await fetch('/api/assets');
@@ -529,6 +544,36 @@ export default function Inbox(): React.ReactElement {
     setConversations(data.conversations ?? []);
   }, [assetId, channel, featureEnabled, query, tab]);
 
+  const loadFilterGroupCounts = React.useCallback(async () => {
+    if (featureEnabled === false) return;
+    const params = new URLSearchParams();
+    if (channel !== 'all') {
+      params.set('channel', channel);
+    }
+    if (assetId !== 'all') {
+      params.set('assetId', assetId);
+    }
+    if (query.trim()) {
+      params.set('q', query.trim());
+    }
+    const response = await fetch(
+      `/api/inbox/conversations/counts?${params.toString()}`,
+    );
+    if (!response.ok) return;
+    const data = (await response.json()) as {
+      counts?: Partial<FilterGroupCounts>;
+    };
+    setFilterGroupCounts({
+      needs_followup: Number(data.counts?.needs_followup ?? 0),
+      active: Number(data.counts?.active ?? 0),
+      DEFERRED: Number(data.counts?.DEFERRED ?? 0),
+      OFF_PLATFORM: Number(data.counts?.OFF_PLATFORM ?? 0),
+      LOST: Number(data.counts?.LOST ?? 0),
+      CONVERTED: Number(data.counts?.CONVERTED ?? 0),
+      SPAM: Number(data.counts?.SPAM ?? 0),
+    });
+  }, [assetId, channel, featureEnabled, query]);
+
   const loadConversationDetail = React.useCallback(async () => {
     if (featureEnabled === false) return;
     if (!selectedId) {
@@ -572,6 +617,10 @@ export default function Inbox(): React.ReactElement {
   React.useEffect(() => {
     void loadConversations();
   }, [loadConversations]);
+
+  React.useEffect(() => {
+    void loadFilterGroupCounts();
+  }, [loadFilterGroupCounts]);
 
   React.useEffect(() => {
     void loadConversationDetail();
@@ -618,6 +667,7 @@ export default function Inbox(): React.ReactElement {
           lastRefreshRef.current = now;
           setLiveAt(payload.updatedAt ?? new Date().toISOString());
           void loadConversations();
+          void loadFilterGroupCounts();
           if (payload.conversationId === selectedId) {
             void loadConversationDetail();
           }
@@ -640,7 +690,13 @@ export default function Inbox(): React.ReactElement {
       if (retryTimer) window.clearTimeout(retryTimer);
       socket?.close();
     };
-  }, [featureEnabled, loadConversations, loadConversationDetail, selectedId]);
+  }, [
+    featureEnabled,
+    loadConversations,
+    loadConversationDetail,
+    loadFilterGroupCounts,
+    selectedId,
+  ]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -661,6 +717,14 @@ export default function Inbox(): React.ReactElement {
     if (typeof window === 'undefined') return;
     localStorage.setItem(INSPECTOR_TAB_STORAGE_KEY, inspectorTab);
   }, [inspectorTab]);
+
+  React.useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => {
+      setToast(null);
+    }, 4200);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
   React.useEffect(() => {
     if (viewportMode === 'wide') {
@@ -911,7 +975,7 @@ export default function Inbox(): React.ReactElement {
           ...prev,
           [conversationId]: true,
         }));
-        setStatus('Audit saved.');
+        showToast('Audit saved.', 'success');
         closeAuditPopover();
       } catch (error) {
         setAuditError(
@@ -936,7 +1000,7 @@ export default function Inbox(): React.ReactElement {
   const handleSend = async () => {
     if (!selectedId || !composerText.trim()) return;
     setSending(true);
-    setStatus(null);
+    setToast(null);
     try {
       const response = await fetch(
         `/api/inbox/conversations/${selectedId}/send`,
@@ -951,11 +1015,14 @@ export default function Inbox(): React.ReactElement {
         throw new Error(data?.error ?? 'Send failed');
       }
       setComposerText('');
-      setStatus('Message sent.');
+      showToast('Message sent.', 'success');
       void loadConversationDetail();
       void loadConversations();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Send failed');
+      showToast(
+        error instanceof Error ? error.message : 'Send failed',
+        'error',
+      );
     } finally {
       setSending(false);
     }
@@ -1268,7 +1335,7 @@ export default function Inbox(): React.ReactElement {
     );
     if (!confirmed) return;
     setFinalTouching(true);
-    setStatus(null);
+    setToast(null);
     try {
       const response = await fetch(
         `/api/inbox/conversations/${selectedId}/final-touch`,
@@ -1278,11 +1345,14 @@ export default function Inbox(): React.ReactElement {
         const data = (await response.json()) as { error?: string };
         throw new Error(data?.error ?? 'Final touch failed');
       }
-      setStatus('Final courtesy message sent.');
+      showToast('Final courtesy message sent.', 'success');
       void loadConversationDetail();
       void loadConversations();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Final touch failed');
+      showToast(
+        error instanceof Error ? error.message : 'Final touch failed',
+        'error',
+      );
     } finally {
       setFinalTouching(false);
     }
@@ -1295,7 +1365,7 @@ export default function Inbox(): React.ReactElement {
     );
     if (!confirmed) return;
     setRecomputing(true);
-    setStatus(null);
+    setToast(null);
     try {
       const response = await fetch('/api/inbox/recompute-all', {
         method: 'POST',
@@ -1309,18 +1379,26 @@ export default function Inbox(): React.ReactElement {
         queued?: boolean;
       };
       if (data.queued) {
-        setStatus('Recompute queued. Refresh in a moment for updated states.');
+        showToast(
+          'Recompute queued. Refresh in a moment for updated states.',
+          'info',
+        );
       } else {
-        setStatus(
+        showToast(
           `Recomputed ${data.updated ?? 0} conversation${
             data.updated === 1 ? '' : 's'
           }.`,
+          'success',
         );
       }
       void loadConversations();
+      void loadFilterGroupCounts();
       void loadConversationDetail();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Recompute failed');
+      showToast(
+        error instanceof Error ? error.message : 'Recompute failed',
+        'error',
+      );
     } finally {
       setRecomputing(false);
     }
@@ -2037,12 +2115,12 @@ export default function Inbox(): React.ReactElement {
 
   const handleLogout = async () => {
     setLoggingOut(true);
-    setStatus(null);
+    setToast(null);
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
       window.location.href = '/login';
     } catch {
-      setStatus('Could not log out. Please try again.');
+      showToast('Could not log out. Please try again.', 'error');
     } finally {
       setLoggingOut(false);
     }
@@ -2157,7 +2235,7 @@ export default function Inbox(): React.ReactElement {
             value={tab}
             options={filterGroups.map((option) => ({
               value: option.key,
-              title: option.title,
+              title: `${option.title} (${filterGroupCounts?.[option.key] ?? 0})`,
               description: option.description,
             }))}
             onChange={(value) => setTab(value as FilterGroupKey)}
@@ -2386,11 +2464,6 @@ export default function Inbox(): React.ReactElement {
 
           {detail ? (
             <div {...stylex.props(inboxStyles.composer)}>
-              <div {...stylex.props(inboxStyles.actionsRow)}>
-                {status ? (
-                  <span {...stylex.props(layout.note)}>{status}</span>
-                ) : null}
-              </div>
               <textarea
                 ref={composerTextAreaRef}
                 {...stylex.props(inboxStyles.textarea)}
@@ -2505,6 +2578,13 @@ export default function Inbox(): React.ReactElement {
       <footer {...stylex.props(inboxStyles.footer)}>
         <AppFooter />
       </footer>
+      {toast ? (
+        <Toast
+          message={toast.message}
+          tone={toast.tone}
+          onClose={() => setToast(null)}
+        />
+      ) : null}
     </div>
   );
 }

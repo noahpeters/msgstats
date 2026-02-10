@@ -1161,6 +1161,75 @@ export function registerRoutes(deps: any) {
     return json({ count: row?.count ?? 0 });
   });
 
+  addRoute('GET', '/api/inbox/conversations/counts', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const url = new URL(req.url);
+    const channel = url.searchParams.get('channel')?.trim() || null;
+    const search = url.searchParams.get('q')?.trim() || '';
+    const assetId = url.searchParams.get('assetId')?.trim() || null;
+    const where: string[] = ['user_id = ?'];
+    const bindings: unknown[] = [userId];
+    if (assetId) {
+      where.push('asset_id = ?');
+      bindings.push(assetId);
+    }
+    if (channel) {
+      if (channel === 'facebook') {
+        where.push("platform = 'messenger'");
+      } else if (channel === 'instagram') {
+        where.push("platform = 'instagram'");
+      }
+    }
+    if (search) {
+      where.push(
+        '(participant_name LIKE ? OR participant_handle LIKE ? OR last_snippet LIKE ?)',
+      );
+      const like = `%${search}%`;
+      bindings.push(like, like, like);
+    }
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) as total_count,
+              SUM(CASE WHEN needs_followup = 1 THEN 1 ELSE 0 END) as needs_followup_count,
+              SUM(CASE WHEN current_state IS NULL OR (current_state != 'LOST' AND current_state != 'SPAM') THEN 1 ELSE 0 END) as active_count,
+              SUM(CASE WHEN current_state = 'DEFERRED' THEN 1 ELSE 0 END) as deferred_count,
+              SUM(CASE WHEN current_state = 'OFF_PLATFORM' THEN 1 ELSE 0 END) as off_platform_count,
+              SUM(CASE WHEN current_state = 'LOST' THEN 1 ELSE 0 END) as lost_count,
+              SUM(CASE WHEN current_state = 'CONVERTED' THEN 1 ELSE 0 END) as converted_count,
+              SUM(CASE WHEN current_state = 'SPAM' THEN 1 ELSE 0 END) as spam_count
+       FROM conversations
+       WHERE ${where.join(' AND ')}`,
+    )
+      .bind(...bindings)
+      .first<{
+        total_count: number | null;
+        needs_followup_count: number | null;
+        active_count: number | null;
+        deferred_count: number | null;
+        off_platform_count: number | null;
+        lost_count: number | null;
+        converted_count: number | null;
+        spam_count: number | null;
+      }>();
+    return json({
+      counts: {
+        needs_followup: Number(row?.needs_followup_count ?? 0),
+        active: Number(row?.active_count ?? 0),
+        DEFERRED: Number(row?.deferred_count ?? 0),
+        OFF_PLATFORM: Number(row?.off_platform_count ?? 0),
+        LOST: Number(row?.lost_count ?? 0),
+        CONVERTED: Number(row?.converted_count ?? 0),
+        SPAM: Number(row?.spam_count ?? 0),
+        all: Number(row?.total_count ?? 0),
+      },
+    });
+  });
+
   addRoute('POST', '/api/inbox/recompute-all', async (req, env) => {
     const userId = await requireUser(req, env);
     if (!userId) {

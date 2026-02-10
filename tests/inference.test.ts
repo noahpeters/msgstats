@@ -22,11 +22,120 @@ const baseMessage = (overrides: Partial<AnnotatedMessage>) =>
   });
 
 describe('inference engine', () => {
-  test('marks spam when spam phrase detected', () => {
-    const msg = baseMessage({ text: 'This is spam, report fraud now.' });
-    const result = inferConversation({ messages: [msg], config });
+  test('marks spam only when phrase match and context are both confirmed', () => {
+    const msg = baseMessage({
+      text: 'This is spam, report fraud now.',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [msg],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
     expect(result.state).toBe('SPAM');
-    expect(result.reasons).toContain('SPAM_PHRASE');
+    expect(result.reasons).toContain('SPAM_PHRASE_MATCH');
+    expect(result.reasons).toContain('SPAM_CONTEXT_CONFIRMED');
+  });
+
+  test('does not evaluate spam when last activity is outbound', () => {
+    const inbound = baseMessage({
+      id: 'm1',
+      text: 'spam fraud report',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const outbound = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'Thanks for the update.',
+      createdAt: new Date('2026-01-01T10:05:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inbound, outbound],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(result.state).not.toBe('SPAM');
+    expect(result.reasons).not.toContain('SPAM_CONTEXT_CONFIRMED');
+  });
+
+  test('does not evaluate spam for active back-and-forth conversations', () => {
+    const m1 = baseMessage({
+      id: 'm1',
+      direction: 'inbound',
+      text: "I'm hoping to have both",
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    m1.features = { ...m1.features, contains_spam_phrase: true };
+    m1.ruleHits = Array.from(new Set([...m1.ruleHits, 'SPAM_PHRASE_MATCH']));
+    const m2 = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'Great, I can help with both options.',
+      createdAt: new Date('2026-01-01T10:01:00Z').toISOString(),
+    });
+    const m3 = baseMessage({
+      id: 'm3',
+      direction: 'inbound',
+      text: 'Can you share dimensions too?',
+      createdAt: new Date('2026-01-01T10:02:00Z').toISOString(),
+    });
+    const m4 = baseMessage({
+      id: 'm4',
+      direction: 'outbound',
+      text: 'Absolutely, sending details now.',
+      createdAt: new Date('2026-01-01T10:03:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [m1, m2, m3, m4],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(result.state).not.toBe('SPAM');
+    expect(m1.ruleHits).toContain('SPAM_PHRASE_MATCH');
+    expect(result.reasons).not.toContain('SPAM_CONTEXT_CONFIRMED');
+  });
+
+  test('does not evaluate spam when recent activity is within resurrect window', () => {
+    const msg = baseMessage({
+      text: 'spam report bot fraud',
+      createdAt: new Date('2026-02-15T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [msg],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(result.state).not.toBe('SPAM');
+    expect(result.reasons).not.toContain('SPAM_CONTEXT_CONFIRMED');
+  });
+
+  test('does not evaluate spam when business intent signals are present', () => {
+    const msg = baseMessage({
+      text: 'spam report bot fraud. Can we schedule delivery for the table at $1200?',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [msg],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(result.state).not.toBe('SPAM');
+    expect(result.reasons).not.toContain('SPAM_CONTEXT_CONFIRMED');
+  });
+
+  test('outbound spam phrase text does not trigger spam phrase matching', () => {
+    const outbound = baseMessage({
+      direction: 'outbound',
+      text: 'This is spam, report fraud now.',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [outbound],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(outbound.ruleHits).not.toContain('SPAM_PHRASE_MATCH');
+    expect(result.state).not.toBe('SPAM');
   });
 
   test('marks converted on conversion phrases', () => {
@@ -811,11 +920,28 @@ describe('inference engine', () => {
     const result = inferConversation({
       messages: [rant],
       config,
-      now: new Date('2026-01-10T10:00:00Z'),
+      now: new Date('2026-02-20T10:00:00Z'),
     });
     expect(result.state).toBe('SPAM');
+    expect(result.reasons).toContain('SPAM_PHRASE_MATCH');
+    expect(result.reasons).toContain('SPAM_CONTEXT_CONFIRMED');
     expect(result.reasons).toContain('SPAM_CONTENT');
     expect(result.needsFollowup).toBe(false);
+  });
+
+  test('outbound-only conversation from audit fixture is never spam', () => {
+    const outbound = baseMessage({
+      direction: 'outbound',
+      text: 'No thanks, please report this as spam.',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [outbound],
+      config,
+      now: new Date('2026-02-20T10:00:00Z'),
+    });
+    expect(result.state).not.toBe('SPAM');
+    expect(result.reasons).not.toContain('SPAM_CONTEXT_CONFIRMED');
   });
 
   test('spam heuristic does not trigger on short product complaint', () => {

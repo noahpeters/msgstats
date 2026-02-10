@@ -368,7 +368,8 @@ export function extractFeatures(
     deferral_date_hint: deferralHint,
     contains_conversion_phrase: CONVERSION_TERMS.test(body),
     contains_loss_phrase: LOSS_TERMS.test(body),
-    contains_spam_phrase: SPAM_TERMS.test(body) || hasSpamContent,
+    contains_spam_phrase:
+      direction === 'inbound' && (SPAM_TERMS.test(body) || hasSpamContent),
     contains_system_assignment: SYSTEM_ASSIGNMENT_TERMS.test(body),
     has_link: LINK_REGEX.test(body),
     message_length: body.length,
@@ -442,7 +443,7 @@ function inferDeferralDate(text: string): string | null {
 
 export function buildRuleHits(features: MessageFeatures): string[] {
   const hits: string[] = [];
-  if (features.contains_spam_phrase) hits.push('SPAM_PHRASE');
+  if (features.contains_spam_phrase) hits.push('SPAM_PHRASE_MATCH');
   if (features.has_spam_content) hits.push('SPAM_CONTENT');
   if (
     features.contains_conversion_phrase &&
@@ -746,9 +747,10 @@ export function inferConversation(
   const hasOptOut = hasRule(messages, 'OPT_OUT');
   const hasBlocked = Boolean(input.blockedByRecipient);
   const hasBounced = Boolean(input.bouncedByProvider);
-  const hasSpamPhrase = hasRule(messages, 'SPAM_PHRASE');
-  const hasSpamContent = hasRule(messages, 'SPAM_CONTENT');
-  const hasSpam = hasSpamPhrase || hasSpamContent;
+  const hasSpamPhraseMatch = Boolean(
+    lastInboundMessage?.features.contains_spam_phrase,
+  );
+  const hasSpamContent = Boolean(lastInboundMessage?.features.has_spam_content);
   const hasConversion = inboundConversionMessages.length > 0;
   const hasLoss = hasRule(messages, 'LOSS_PHRASE');
   const hasPriceRejection = inboundMessages.some(
@@ -860,6 +862,22 @@ export function inferConversation(
   const daysSinceLastActivity = Number.isNaN(lastMessageMs)
     ? null
     : (nowMs - lastMessageMs) / (1000 * 60 * 60 * 24);
+  const hasCurrencyContext = messages.some((msg) => msg.features.has_currency);
+  const hasScheduleContext = messages.some(
+    (msg) => msg.features.contains_schedule_terms,
+  );
+  const hasProjectKeywords = messages.some((msg) =>
+    PRODUCT_INTENT_TERMS.test(msg.text ?? ''),
+  );
+  const spamContextDisqualified =
+    lastNonFinalDirection === 'outbound' ||
+    (inboundCount >= 2 && outboundCount >= 2) ||
+    (daysSinceLastActivity !== null &&
+      daysSinceLastActivity < input.config.resurrectGapDays) ||
+    hasCurrencyContext ||
+    hasScheduleContext ||
+    hasProjectKeywords;
+  const spamContextConfirmed = hasSpamPhraseMatch && !spamContextDisqualified;
   const hasRejectionRevival = (() => {
     if (!lastPriceRejectionAt) return false;
     const rejectionMs = Date.parse(lastPriceRejectionAt);
@@ -903,10 +921,14 @@ export function inferConversation(
     state = 'LOST';
     confidence = 'HIGH';
     reasons.push('BOUNCED');
-  } else if (hasSpam) {
+  } else if (hasSpamPhraseMatch && spamContextConfirmed) {
     state = 'SPAM';
     confidence = 'HIGH';
-    reasons.push(hasSpamContent ? 'SPAM_CONTENT' : 'SPAM_PHRASE');
+    reasons.push('SPAM_PHRASE_MATCH');
+    reasons.push('SPAM_CONTEXT_CONFIRMED');
+    if (hasSpamContent) {
+      reasons.push('SPAM_CONTENT');
+    }
   } else if (hasConversion) {
     state = 'CONVERTED';
     confidence = 'HIGH';
