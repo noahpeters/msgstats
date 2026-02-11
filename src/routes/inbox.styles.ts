@@ -546,6 +546,53 @@ export const inboxStyles = stylex.create({
     fontSize: '12px',
     color: '#284b63',
   },
+  messageImageLink: {
+    display: 'inline-block',
+    maxWidth: '260px',
+  },
+  messageImage: {
+    display: 'block',
+    width: '100%',
+    maxWidth: '260px',
+    borderRadius: '10px',
+    border: `1px solid ${inboxLayoutVars.dividerColor}`,
+  },
+  messageStickerLink: {
+    display: 'inline-block',
+    maxWidth: '160px',
+    padding: '6px',
+    borderRadius: '10px',
+    backgroundColor: '#f1f5f9',
+    border: `1px solid ${inboxLayoutVars.dividerColor}`,
+  },
+  messageSticker: {
+    display: 'block',
+    width: '100%',
+    maxWidth: '160px',
+    borderRadius: '8px',
+  },
+  messageFile: {
+    display: 'grid',
+    gap: '2px',
+    textDecoration: 'none',
+    color: '#0f766e',
+    border: `1px solid ${inboxLayoutVars.dividerColor}`,
+    borderRadius: '10px',
+    padding: '8px 10px',
+    backgroundColor: '#f8fafc',
+  },
+  messageFileMeta: {
+    fontSize: '12px',
+    color: '#475569',
+  },
+  messageLike: {
+    fontSize: '24px',
+    lineHeight: '1.2',
+  },
+  messageEmpty: {
+    fontSize: '12px',
+    color: '#64748b',
+  },
   chipRow: {
     display: 'flex',
     flexWrap: 'wrap',

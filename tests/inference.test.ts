@@ -19,6 +19,8 @@ const baseMessage = (overrides: Partial<AnnotatedMessage>) =>
     direction: overrides.direction ?? 'inbound',
     text: overrides.text ?? 'hello',
     createdAt: overrides.createdAt ?? new Date().toISOString(),
+    attachments: overrides.attachments ?? null,
+    raw: overrides.raw ?? null,
   });
 
 describe('inference engine', () => {
@@ -841,6 +843,29 @@ describe('inference engine', () => {
     expect(result.reasons).not.toContain('SLA_BREACH');
   });
 
+  test('ack-only inbound does not create reply-needed state', () => {
+    const outbound = baseMessage({
+      id: 'm1',
+      direction: 'outbound',
+      text: 'Checking in on this.',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    const thumbsUp = baseMessage({
+      id: 'm2',
+      direction: 'inbound',
+      text: '👍',
+      createdAt: new Date('2026-01-01T10:30:00Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [outbound, thumbsUp],
+      config,
+      now: new Date('2026-01-01T10:45:00Z'),
+    });
+    expect(thumbsUp.features.ack_only).toBe(true);
+    expect(result.needsFollowup).toBe(false);
+    expect(result.reasons).not.toContain('UNREPLIED');
+  });
+
   test('parses next fall relative to message timestamp', () => {
     const msg = baseMessage({
       text: 'please follow up next fall',
@@ -923,6 +948,59 @@ describe('inference engine', () => {
   test('explicit rejection detector does not flag no problem', () => {
     const msg = baseMessage({ text: 'no problem' });
     expect(msg.features.has_explicit_rejection_phrase).toBe(false);
+  });
+
+  test('thumbs-up message is ack_only', () => {
+    const msg = baseMessage({ text: '👍' });
+    expect(msg.features.ack_only).toBe(true);
+  });
+
+  test('multi-emoji thumbs-up message is ack_only', () => {
+    const msg = baseMessage({ text: '👍👍' });
+    expect(msg.features.ack_only).toBe(true);
+  });
+
+  test('sticker-only attachment is ack_only', () => {
+    const msg = baseMessage({
+      text: '',
+      attachments: {
+        data: [
+          {
+            mime_type: 'image/webp',
+            image_data: {
+              url: 'https://example.com/sticker.webp',
+              render_as_sticker: true,
+            },
+          },
+        ],
+      },
+    });
+    expect(msg.features.has_attachments).toBe(true);
+    expect(msg.features.is_sticker).toBe(true);
+    expect(msg.features.ack_only).toBe(true);
+  });
+
+  test('attachment-only image message is ack_only', () => {
+    const msg = baseMessage({
+      text: '',
+      attachments: {
+        data: [
+          {
+            mime_type: 'image/jpeg',
+            image_data: {
+              url: 'https://example.com/photo.jpg',
+            },
+          },
+        ],
+      },
+    });
+    expect(msg.features.has_attachments).toBe(true);
+    expect(msg.features.ack_only).toBe(true);
+  });
+
+  test('intent text is not ack_only', () => {
+    const msg = baseMessage({ text: 'can you send pics' });
+    expect(msg.features.ack_only).toBeFalsy();
   });
 
   test('t_4463595643962413 fixture maps wait + thanks to lost', () => {

@@ -162,7 +162,7 @@ describe('inbound stale behavior', () => {
     expect(result.needsFollowup).toBe(false);
   });
 
-  test('future default follow-up does not suppress inbound stale lost', () => {
+  test('future default follow-up suppresses inbound stale lost', () => {
     const result = computeInboxStateMachine(
       baseContext({
         previousState: 'DEFERRED',
@@ -172,11 +172,11 @@ describe('inbound stale behavior', () => {
         daysSinceLastInbound: 90,
       }),
     );
-    expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('INBOUND_STALE');
+    expect(result.state).toBe('DEFERRED');
+    expect(result.reasons).not.toContain('INBOUND_STALE');
   });
 
-  test('unknown follow-up source does not suppress inbound stale lost', () => {
+  test('unknown follow-up source with future date suppresses inbound stale lost', () => {
     const result = computeInboxStateMachine(
       baseContext({
         previousState: 'DEFERRED',
@@ -186,8 +186,8 @@ describe('inbound stale behavior', () => {
         daysSinceLastInbound: 90,
       }),
     );
-    expect(result.state).toBe('LOST');
-    expect(result.reasons).toContain('INBOUND_STALE');
+    expect(result.state).toBe('DEFERRED');
+    expect(result.reasons).not.toContain('INBOUND_STALE');
   });
 });
 

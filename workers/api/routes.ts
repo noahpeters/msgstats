@@ -125,6 +125,115 @@ export function registerRoutes(deps: any) {
 
   const normalizeTag = (tag: string) =>
     tag.trim().toLowerCase().replace(/\s+/g, '_');
+  type MessageDisplayKind =
+    | 'text'
+    | 'image'
+    | 'file'
+    | 'sticker'
+    | 'like'
+    | 'unknown';
+  type MessageDisplay = {
+    kind: MessageDisplayKind;
+    label: string;
+    previewUrl?: string | null;
+    url?: string | null;
+    filename?: string | null;
+    mimeType?: string | null;
+    size?: number | null;
+    emoji?: string | null;
+  };
+  type MessageAttachment = {
+    mime_type?: string;
+    name?: string;
+    size?: number;
+    file_url?: string;
+    image_data?: {
+      url?: string;
+      preview_url?: string;
+      render_as_sticker?: boolean;
+    };
+  };
+  const parseJsonSafeValue = (value: unknown): unknown => {
+    if (!value || typeof value !== 'string') return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  };
+  const extractAttachments = (
+    attachmentsValue: unknown,
+    rawValue: unknown,
+  ): MessageAttachment[] => {
+    const attachments = parseJsonSafeValue(attachmentsValue);
+    if (
+      attachments &&
+      typeof attachments === 'object' &&
+      Array.isArray((attachments as { data?: unknown[] }).data)
+    ) {
+      return (
+        (attachments as { data?: MessageAttachment[] }).data ?? []
+      ).filter((item) => Boolean(item && typeof item === 'object'));
+    }
+    const raw = parseJsonSafeValue(rawValue);
+    const rawAttachments =
+      raw && typeof raw === 'object'
+        ? (raw as { attachments?: { data?: MessageAttachment[] } }).attachments
+        : null;
+    if (rawAttachments?.data?.length) {
+      return rawAttachments.data;
+    }
+    return [];
+  };
+  const deriveMessageDisplay = (input: {
+    body: string | null;
+    attachments?: unknown;
+    raw?: unknown;
+  }): MessageDisplay => {
+    const body = (input.body ?? '').trim();
+    const attachments = extractAttachments(input.attachments, input.raw);
+    const sticker = attachments.find(
+      (item) => item.image_data?.render_as_sticker === true,
+    );
+    const image = attachments.find((item) =>
+      (item.mime_type ?? '').toLowerCase().startsWith('image/'),
+    );
+    const file = attachments[0];
+    if (body) {
+      if (/^(?:👍|👍🏻|👍🏼|👍🏽|👍🏾|👍🏿)+$/u.test(body)) {
+        return { kind: 'like', label: '👍', emoji: '👍' };
+      }
+      return { kind: 'text', label: body };
+    }
+    if (sticker) {
+      return {
+        kind: 'sticker',
+        label: '👍',
+        previewUrl: sticker.image_data?.preview_url ?? sticker.image_data?.url,
+        url: sticker.image_data?.url ?? sticker.file_url ?? null,
+      };
+    }
+    if (image) {
+      return {
+        kind: 'image',
+        label: '📷 Photo',
+        previewUrl: image.image_data?.preview_url ?? image.image_data?.url,
+        url: image.image_data?.url ?? image.file_url ?? null,
+        mimeType: image.mime_type ?? null,
+      };
+    }
+    if (file) {
+      return {
+        kind: 'file',
+        label: '📎 Attachment',
+        url: file.file_url ?? file.image_data?.url ?? null,
+        filename: file.name ?? null,
+        mimeType: file.mime_type ?? null,
+        size: file.size ?? null,
+      };
+    }
+    return { kind: 'unknown', label: '(no text)' };
+  };
   const classifyDeliveryFailure = (
     error: unknown,
   ): { blocked: boolean; bounced: boolean } => {
@@ -1023,6 +1132,45 @@ export function registerRoutes(deps: any) {
     const conversationIds = (rows.results ?? []).map(
       (row) => row.conversationId,
     );
+    const latestMessageDisplayByConversation = new Map<
+      string,
+      MessageDisplay
+    >();
+    if (conversationIds.length) {
+      const placeholders = conversationIds.map(() => '?').join(',');
+      const latestRows = await env.DB.prepare(
+        `SELECT m.conversation_id as conversationId, m.body, m.attachments, m.raw
+         FROM messages m
+         INNER JOIN (
+           SELECT conversation_id, MAX(created_time) as createdTime
+           FROM messages
+           WHERE user_id = ? AND conversation_id IN (${placeholders})
+           GROUP BY conversation_id
+         ) latest
+           ON latest.conversation_id = m.conversation_id
+          AND latest.createdTime = m.created_time
+         WHERE m.user_id = ?`,
+      )
+        .bind(userId, ...conversationIds, userId)
+        .all<{
+          conversationId: string;
+          body: string | null;
+          attachments: string | null;
+          raw: string | null;
+        }>();
+      for (const row of latestRows.results ?? []) {
+        if (!latestMessageDisplayByConversation.has(row.conversationId)) {
+          latestMessageDisplayByConversation.set(
+            row.conversationId,
+            deriveMessageDisplay({
+              body: row.body,
+              attachments: row.attachments,
+              raw: row.raw,
+            }),
+          );
+        }
+      }
+    }
     const aiSummaryByConversation = new Map<
       string,
       {
@@ -1101,6 +1249,11 @@ export function registerRoutes(deps: any) {
         const inboundAgeHours = row.lastInboundAt
           ? (Date.now() - Date.parse(row.lastInboundAt)) / (1000 * 60 * 60)
           : null;
+        const fallbackDisplay = latestMessageDisplayByConversation.get(
+          row.conversationId,
+        );
+        const snippet =
+          row.lastSnippet?.trim() || fallbackDisplay?.label || null;
         return {
           id: row.conversationId,
           channel: row.platform === 'instagram' ? 'instagram' : 'facebook',
@@ -1114,7 +1267,7 @@ export function registerRoutes(deps: any) {
           lastInboundAt: row.lastInboundAt,
           lastOutboundAt: row.lastOutboundAt,
           lastMessageAt: row.lastMessageAt,
-          lastSnippet: row.lastSnippet,
+          lastSnippet: snippet,
           currentState: row.currentState ?? 'NEW',
           currentConfidence: row.currentConfidence ?? 'LOW',
           followupDueAt: row.followupDueAt,
@@ -1289,6 +1442,8 @@ export function registerRoutes(deps: any) {
             attachments,
             raw,
             meta_message_id as metaMessageId,
+            message_type as messageType,
+            message_trigger as messageTrigger,
             features_json as featuresJson,
             rule_hits_json as ruleHitsJson
      FROM messages
@@ -1309,6 +1464,8 @@ export function registerRoutes(deps: any) {
           attachments: string | null;
           raw: string | null;
           metaMessageId: string | null;
+          messageType: string | null;
+          messageTrigger: string | null;
           featuresJson: string | null;
           ruleHitsJson: string | null;
         }>();
@@ -1368,27 +1525,37 @@ export function registerRoutes(deps: any) {
           lostReasonCode: conversation.lostReasonCode ?? null,
           tags: tags.get(conversationId) ?? [],
         },
-        messages: (messages.results ?? []).map((message) => ({
-          id: message.id,
-          createdAt: message.createdAt,
-          body: message.body,
-          direction:
-            message.direction ??
-            (message.senderType === 'business' ? 'outbound' : 'inbound'),
-          senderId: message.senderId,
-          senderName: message.senderName,
-          attachments: message.attachments
-            ? JSON.parse(message.attachments)
-            : null,
-          metaMessageId: message.metaMessageId,
-          raw: message.raw ? JSON.parse(message.raw) : null,
-          features: message.featuresJson
-            ? JSON.parse(message.featuresJson)
-            : null,
-          ruleHits: message.ruleHitsJson
-            ? JSON.parse(message.ruleHitsJson)
-            : [],
-        })),
+        messages: (messages.results ?? []).map((message) => {
+          const attachments = parseJsonSafeValue(message.attachments);
+          const raw = parseJsonSafeValue(message.raw);
+          const display = deriveMessageDisplay({
+            body: message.body,
+            attachments,
+            raw,
+          });
+          return {
+            id: message.id,
+            createdAt: message.createdAt,
+            body: message.body,
+            direction:
+              message.direction ??
+              (message.senderType === 'business' ? 'outbound' : 'inbound'),
+            senderId: message.senderId,
+            senderName: message.senderName,
+            attachments,
+            metaMessageId: message.metaMessageId,
+            raw,
+            display,
+            messageType: message.messageType,
+            messageTrigger: message.messageTrigger,
+            features: message.featuresJson
+              ? JSON.parse(message.featuresJson)
+              : null,
+            ruleHits: message.ruleHitsJson
+              ? JSON.parse(message.ruleHitsJson)
+              : [],
+          };
+        }),
         stateEvents: (events.results ?? []).map((event) => ({
           id: event.id,
           fromState: event.fromState,

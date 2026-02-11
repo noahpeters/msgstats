@@ -95,7 +95,17 @@ export const metaConfig = {
     pageWithToken: ['id', 'name', 'access_token'],
     me: ['id', 'name'],
     conversations: ['id', 'updated_time'],
-    messages: ['id', 'from', 'to', 'created_time', 'message', 'attachments'],
+    messages: [
+      'id',
+      'from',
+      'to',
+      'created_time',
+      'message',
+      'sticker',
+      'sticker_id',
+      'reaction',
+      'attachments{id,mime_type,name,size,file_url,image_data{url,preview_url,width,height,max_width,max_height,render_as_sticker}}',
+    ],
     igAccounts: ['id', 'name'],
   },
 };
@@ -827,12 +837,25 @@ export type MetaMessage = {
   to?: { data?: Array<{ id?: string; name?: string }> };
   created_time: string;
   message?: string;
+  sticker?: unknown;
+  sticker_id?: string | number;
+  reaction?: string;
   attachments?: {
     data?: Array<{
+      id?: string;
       mime_type?: string;
       name?: string;
+      size?: number;
       file_url?: string;
-      image_data?: { url?: string };
+      image_data?: {
+        url?: string;
+        preview_url?: string;
+        width?: number;
+        height?: number;
+        max_width?: number;
+        max_height?: number;
+        render_as_sticker?: boolean;
+      };
     }>;
   };
 };

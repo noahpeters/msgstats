@@ -115,12 +115,11 @@ function isTerminalState(state: ConversationState): boolean {
   return state === 'LOST' || state === 'SPAM' || state === 'CONVERTED';
 }
 
-function hasFutureCustomerIntentFollowup(input: {
+function hasFutureFollowup(input: {
   nowMs: number;
   followupDueAt: string | null;
-  followupDueSource: FollowupDueSource;
 }): boolean {
-  if (!input.followupDueAt || input.followupDueSource !== 'customer_intent') {
+  if (!input.followupDueAt) {
     return false;
   }
   const dueMs = Date.parse(input.followupDueAt);
@@ -257,10 +256,9 @@ export function computeInboxStateMachine(
     followupDueSource = null;
   }
 
-  const suppressInboundStale = hasFutureCustomerIntentFollowup({
+  const suppressInboundStale = hasFutureFollowup({
     nowMs,
     followupDueAt,
-    followupDueSource,
   });
 
   if (

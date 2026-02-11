@@ -54,6 +54,9 @@ export type MessageFeatures = {
   contains_spam_phrase: boolean;
   contains_system_assignment: boolean;
   has_link: boolean;
+  has_attachments?: boolean;
+  is_sticker?: boolean;
+  is_like?: boolean;
   message_length: number;
   ack_only?: boolean;
   explicit_lost?: ExplicitLostEvidence;
@@ -93,6 +96,8 @@ export type AnnotatedMessage = {
   direction: MessageDirection;
   text: string | null;
   createdAt: string;
+  attachments?: unknown;
+  raw?: unknown;
   messageType?: string | null;
   features: MessageFeatures;
   ruleHits: string[];
@@ -150,7 +155,7 @@ const SYSTEM_ASSIGNMENT_TERMS =
 
 const ACK_ONLY_TERMS =
   /^(thanks|thank you|you too|ok|okay|sounds good|thx|ty)[!.:\s-]*$/i;
-const ACK_ONLY_EMOJI = /^[\p{Emoji}\s]+$/u;
+const ACK_ONLY_EMOJI = /^[\p{Extended_Pictographic}\s]+$/u;
 const INTENT_KEYWORDS =
   /(price|pricing|cost|quote|rate|budget|schedule|appointment|book|booking|meet|meeting|call|demo|tomorrow|next|after|remind|check back|follow up)/i;
 
@@ -185,7 +190,71 @@ function normalizeText(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function isAckOnly(text: string): boolean {
+function isEmojiOnly(text: string): boolean {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  if (!ACK_ONLY_EMOJI.test(normalized)) return false;
+  return /[\p{Emoji}\p{Extended_Pictographic}]/u.test(normalized);
+}
+
+function parseRawObject(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+}
+
+type AttachmentRecord = {
+  mime_type?: string;
+  name?: string;
+  size?: number;
+  file_url?: string;
+  image_data?: {
+    url?: string;
+    preview_url?: string;
+    render_as_sticker?: boolean;
+  };
+};
+
+function extractAttachmentRecords(
+  attachments: unknown,
+  raw: unknown,
+): AttachmentRecord[] {
+  const fromAttachments =
+    attachments &&
+    typeof attachments === 'object' &&
+    Array.isArray((attachments as { data?: unknown[] }).data)
+      ? (attachments as { data: AttachmentRecord[] }).data ?? []
+      : [];
+  if (fromAttachments.length > 0) return fromAttachments;
+  const rawObject = parseRawObject(raw);
+  const rawAttachments = rawObject?.attachments;
+  if (
+    rawAttachments &&
+    typeof rawAttachments === 'object' &&
+    Array.isArray((rawAttachments as { data?: unknown[] }).data)
+  ) {
+    return (
+      (rawAttachments as { data?: AttachmentRecord[] }).data ?? []
+    ).filter((item) => Boolean(item && typeof item === 'object'));
+  }
+  return [];
+}
+
+function isLikeEmoji(text: string): boolean {
+  const normalized = normalizeText(text);
+  return /^(?:👍|👍🏻|👍🏼|👍🏽|👍🏾|👍🏿|❤️|❤|💙|💚|💛|💜|🤍|🖤)+$/u.test(normalized);
+}
+
+function isAckOnlyText(text: string): boolean {
   const normalized = normalizeText(text);
   if (!normalized) return false;
   if (normalized.includes('?')) return false;
@@ -203,7 +272,60 @@ function isAckOnly(text: string): boolean {
   ) {
     return true;
   }
-  return ACK_ONLY_EMOJI.test(normalized);
+  return isEmojiOnly(normalized);
+}
+
+function hasStickerAttachment(records: AttachmentRecord[]): boolean {
+  return records.some(
+    (record) =>
+      record.image_data?.render_as_sticker === true ||
+      (record.mime_type ?? '').toLowerCase().includes('sticker'),
+  );
+}
+
+function isAttachmentOnly(text: string, records: AttachmentRecord[]): boolean {
+  return normalizeText(text).length === 0 && records.length > 0;
+}
+
+function isLikeOnly(
+  text: string,
+  records: AttachmentRecord[],
+  raw: unknown,
+): boolean {
+  if (normalizeText(text).length > 0) {
+    return isLikeEmoji(text);
+  }
+  const rawObject = parseRawObject(raw);
+  const reaction = String(rawObject?.reaction ?? '').toLowerCase();
+  const sticker = String(rawObject?.sticker ?? '').toLowerCase();
+  const stickerId = String(rawObject?.sticker_id ?? '').toLowerCase();
+  if (reaction.includes('like') || reaction.includes('thumb')) return true;
+  if (sticker.includes('like') || sticker.includes('thumb')) return true;
+  if (stickerId.includes('like') || stickerId.includes('thumb')) return true;
+  return (
+    hasStickerAttachment(records) &&
+    records.every((record) => !record.name && !record.file_url)
+  );
+}
+
+function isAckOnly(input: {
+  text: string;
+  attachments: unknown;
+  raw: unknown;
+}): boolean {
+  const normalized = normalizeText(input.text);
+  if (!normalized) {
+    const records = extractAttachmentRecords(input.attachments, input.raw);
+    if (isLikeOnly(input.text, records, input.raw)) return true;
+    if (hasStickerAttachment(records)) return true;
+    if (isAttachmentOnly(input.text, records)) return true;
+    return false;
+  }
+  if (normalized.includes('?')) return false;
+  if (INTENT_KEYWORDS.test(normalized)) return false;
+  if (isAckOnlyText(input.text)) return true;
+  if (isEmojiOnly(input.text)) return true;
+  return isLikeEmoji(input.text);
 }
 
 function isHardNegativeReply(text: string): boolean {
@@ -355,14 +477,23 @@ function isSpamContent(body: string): boolean {
 export function extractFeatures(
   text: string | null,
   direction: MessageDirection = 'inbound',
+  attachments: unknown = null,
+  raw: unknown = null,
 ): MessageFeatures {
   const body = text ?? '';
   const normalized = normalizeText(body);
   const bodyWithoutLinks = body.replace(LINK_REGEX, '');
+  const attachmentRecords = extractAttachmentRecords(attachments, raw);
+  const hasAttachments = attachmentRecords.length > 0;
+  const isSticker = hasStickerAttachment(attachmentRecords);
+  const likeOnly = isLikeOnly(body, attachmentRecords, raw);
   const matchesPhone = bodyWithoutLinks.match(PHONE_REGEX) ?? [];
   const matchesEmail = body.match(EMAIL_REGEX) ?? [];
   const deferralHint = inferDeferralDate(body);
-  const ackOnly = direction === 'inbound' ? isAckOnly(body) : false;
+  const ackOnly =
+    direction === 'inbound'
+      ? isAckOnly({ text: body, attachments, raw })
+      : false;
   const explicitLost =
     direction === 'inbound' ? detectExplicitLost(body) : null;
   const hasWaitToProceed =
@@ -403,6 +534,9 @@ export function extractFeatures(
       direction === 'inbound' && (SPAM_TERMS.test(body) || hasSpamContent),
     contains_system_assignment: SYSTEM_ASSIGNMENT_TERMS.test(body),
     has_link: LINK_REGEX.test(body),
+    has_attachments: hasAttachments,
+    is_sticker: isSticker,
+    is_like: likeOnly,
     message_length: body.length,
     ack_only: ackOnly || undefined,
     explicit_lost: explicitLost ?? undefined,
@@ -510,7 +644,12 @@ export function buildRuleHits(features: MessageFeatures): string[] {
 export function annotateMessage(
   message: Omit<AnnotatedMessage, 'features' | 'ruleHits'>,
 ): AnnotatedMessage {
-  const features = extractFeatures(message.text, message.direction);
+  const features = extractFeatures(
+    message.text,
+    message.direction,
+    message.attachments,
+    message.raw,
+  );
   const ruleHits = buildRuleHits(features);
   return { ...message, features, ruleHits };
 }
@@ -679,6 +818,8 @@ export function inferConversation(
   let lastMessageAt: string | null = null;
   let lastNonFinalMessageAt: string | null = null;
   let lastNonFinalDirection: 'inbound' | 'outbound' | null = null;
+  let lastActionableMessageAt: string | null = null;
+  let lastActionableDirection: 'inbound' | 'outbound' | null = null;
   let deferralHint: string | null = null;
   let lastDeferralAt: string | null = null;
   let lastPriceRejectionAt: string | null = null;
@@ -696,6 +837,11 @@ export function inferConversation(
       }
       lastNonFinalMessageAt = msg.createdAt;
       lastNonFinalDirection = msg.direction;
+      const isAckInbound = msg.direction === 'inbound' && msg.features.ack_only;
+      if (!isAckInbound) {
+        lastActionableMessageAt = msg.createdAt;
+        lastActionableDirection = msg.direction;
+      }
     }
     lastSnippet = coalesceSnippet(msg.text) ?? lastSnippet;
     lastMessageAt = msg.createdAt;
@@ -1003,8 +1149,8 @@ export function inferConversation(
     lastInboundAt,
     lastOutboundAt,
     lastMessageAt,
-    lastNonFinalMessageAt,
-    lastNonFinalDirection,
+    lastNonFinalMessageAt: lastActionableMessageAt ?? lastNonFinalMessageAt,
+    lastNonFinalDirection: lastActionableDirection ?? lastNonFinalDirection,
     hasOptOut,
     hasBlocked,
     hasBounced,

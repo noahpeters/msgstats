@@ -1005,6 +1005,7 @@ async function loadConversationMessagesForInference(
   const rows = await env.DB.prepare(
     `SELECT id, created_time as createdAt, body, direction, sender_type as senderType,
             message_type as messageType,
+            attachments, raw,
             features_json as featuresJson, rule_hits_json as ruleHitsJson
      FROM messages
      WHERE user_id = ? AND conversation_id = ?
@@ -1018,6 +1019,8 @@ async function loadConversationMessagesForInference(
       direction: 'inbound' | 'outbound' | null;
       senderType: string | null;
       messageType: string | null;
+      attachments: string | null;
+      raw: string | null;
       featuresJson: string | null;
       ruleHitsJson: string | null;
     }>();
@@ -1048,11 +1051,29 @@ async function loadConversationMessagesForInference(
           : row.senderType === 'business'
             ? 'outbound'
             : 'inbound';
+    let parsedAttachments: unknown = null;
+    if (row.attachments) {
+      try {
+        parsedAttachments = JSON.parse(row.attachments);
+      } catch {
+        parsedAttachments = null;
+      }
+    }
+    let parsedRaw: unknown = null;
+    if (row.raw) {
+      try {
+        parsedRaw = JSON.parse(row.raw);
+      } catch {
+        parsedRaw = null;
+      }
+    }
     const baseAnnotated = annotateMessage({
       id: row.id,
       direction,
       text: row.body,
       createdAt: row.createdAt,
+      attachments: parsedAttachments,
+      raw: parsedRaw,
     });
     let features = baseAnnotated.features;
     let ruleHits = [...baseAnnotated.ruleHits];
@@ -2605,6 +2626,25 @@ async function runSync(options: {
         message_type, message_trigger)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const repairMessage = env.DB.prepare(
+      `UPDATE messages
+       SET raw = CASE
+             WHEN raw IS NULL OR raw = '' THEN ?
+             WHEN ? IS NOT NULL AND json_extract(raw, '$.attachments') IS NULL THEN ?
+             ELSE raw
+           END,
+           attachments = CASE
+             WHEN ? IS NOT NULL AND (attachments IS NULL OR attachments = '' OR attachments = 'null') THEN ?
+             ELSE attachments
+           END
+       WHERE user_id = ? AND id = ?
+         AND (
+           raw IS NULL OR raw = '' OR
+           (? IS NOT NULL AND (
+             attachments IS NULL OR attachments = '' OR attachments = 'null' OR json_extract(raw, '$.attachments') IS NULL
+           ))
+         )`,
+    );
     const statements: D1PreparedStatement[] = [];
 
     for (const message of filteredMessages) {
@@ -2665,6 +2705,8 @@ async function runSync(options: {
         direction,
         text: message.message ?? null,
         createdAt: created,
+        attachments: message.attachments ?? null,
+        raw: message,
       });
       const featuresJson = JSON.stringify(annotatedMessage.features);
       const ruleHitsJson = JSON.stringify(annotatedMessage.ruleHits);
@@ -2690,6 +2732,18 @@ async function runSync(options: {
           ruleHitsJson,
           null,
           null,
+        ),
+      );
+      statements.push(
+        repairMessage.bind(
+          raw,
+          attachments,
+          raw,
+          attachments,
+          attachments,
+          userId,
+          message.id,
+          attachments,
         ),
       );
     }

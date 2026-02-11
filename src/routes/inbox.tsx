@@ -65,6 +65,20 @@ type ConversationDetail = {
     body: string | null;
     direction: string | null;
     senderName: string | null;
+    attachments?: unknown;
+    raw?: unknown;
+    messageType?: string | null;
+    messageTrigger?: string | null;
+    display?: {
+      kind: 'text' | 'image' | 'file' | 'sticker' | 'like' | 'unknown';
+      label: string;
+      previewUrl?: string | null;
+      url?: string | null;
+      filename?: string | null;
+      mimeType?: string | null;
+      size?: number | null;
+      emoji?: string | null;
+    } | null;
     features: Record<string, unknown> | null;
     ruleHits: string[];
   }>;
@@ -341,6 +355,13 @@ const getAiMeta = (features: Record<string, unknown> | null): AiMeta | null => {
   if (!features || typeof features !== 'object') return null;
   const ai = (features as { ai?: AiMeta }).ai;
   return ai ?? null;
+};
+
+const formatBytes = (value: number | null | undefined) => {
+  if (!value || Number.isNaN(value)) return null;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 102.4) / 10} KB`;
+  return `${Math.round(value / (1024 * 102.4)) / 10} MB`;
 };
 
 const buildInboxWsUrl = () => {
@@ -2448,7 +2469,74 @@ export default function Inbox(): React.ReactElement {
                     {message.senderName ?? 'Unknown'} ·{' '}
                     {new Date(message.createdAt).toLocaleString()}
                   </div>
-                  <div>{message.body ?? '—'}</div>
+                  {message.body?.trim() ? (
+                    <div>{message.body}</div>
+                  ) : message.display?.kind === 'image' ? (
+                    <a
+                      href={
+                        message.display.url ?? message.display.previewUrl ?? '#'
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      {...stylex.props(inboxStyles.messageImageLink)}
+                    >
+                      <img
+                        src={
+                          message.display.previewUrl ??
+                          message.display.url ??
+                          ''
+                        }
+                        alt="Photo attachment"
+                        {...stylex.props(inboxStyles.messageImage)}
+                      />
+                    </a>
+                  ) : message.display?.kind === 'sticker' ? (
+                    <a
+                      href={
+                        message.display.url ?? message.display.previewUrl ?? '#'
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      {...stylex.props(inboxStyles.messageStickerLink)}
+                    >
+                      <img
+                        src={
+                          message.display.previewUrl ??
+                          message.display.url ??
+                          ''
+                        }
+                        alt="Sticker"
+                        {...stylex.props(inboxStyles.messageSticker)}
+                      />
+                    </a>
+                  ) : message.display?.kind === 'file' ? (
+                    <a
+                      href={message.display.url ?? '#'}
+                      target="_blank"
+                      rel="noreferrer"
+                      {...stylex.props(inboxStyles.messageFile)}
+                    >
+                      <strong>
+                        {message.display.filename ?? 'Attachment'}
+                      </strong>
+                      <span {...stylex.props(inboxStyles.messageFileMeta)}>
+                        {[
+                          message.display.mimeType,
+                          formatBytes(message.display.size),
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || 'Open file'}
+                      </span>
+                    </a>
+                  ) : message.display?.kind === 'like' ? (
+                    <div {...stylex.props(inboxStyles.messageLike)}>
+                      {message.display.emoji ?? '👍'}
+                    </div>
+                  ) : (
+                    <div {...stylex.props(inboxStyles.messageEmpty)}>
+                      (no text)
+                    </div>
+                  )}
                   {hasChips ? (
                     <div {...stylex.props(inboxStyles.chipRow)}>
                       {aiHandoff ? (
