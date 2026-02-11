@@ -99,6 +99,7 @@ export type InferenceConfig = {
   lostAfterPriceDays: number;
   resurrectGapDays: number;
   deferDefaultDays: number;
+  inactiveTimeoutDays?: number;
   lostAfterPriceRejectionDays?: number;
   lostAfterOffPlatformNoContactDays?: number;
   lostAfterIndefiniteDeferralDays?: number;
@@ -119,7 +120,7 @@ const POLITE_DECLINE_TERMS = /\b(thank(?:s| you)?|thank u|thx|ty)\b/i;
 const WAIT_TO_PROCEED_TERMS =
   /\b(i['’]?ll have to wait|i will have to wait|have to wait|need to wait|hold off|can['’]?t do (?:it )?right now|cant do (?:it )?right now)\b/i;
 const EXPLICIT_REJECTION_PHRASES =
-  /\b(no thanks|no thank you|not interested)\b/i;
+  /\b(no thanks|no thank you|not interested|no\s*ty|no\s*thx)\b/i;
 const INDEFINITE_DEFERRAL_TERMS =
   /\b(maybe someday|someday|not right now|down the road|we['’]?ll see|we'll see|not at this time|circle back later|have to wait|need to wait|hold off)\b/i;
 const OPT_OUT_TERMS =
@@ -661,6 +662,10 @@ export function inferConversation(
     1,
     input.config.lostAfterPriceRejectionDays ?? 14,
   );
+  const inactiveTimeoutDays = Math.max(
+    1,
+    input.config.inactiveTimeoutDays ?? 30,
+  );
   const lostAfterOffPlatformNoContactDays = Math.max(
     1,
     input.config.lostAfterOffPlatformNoContactDays ?? 21,
@@ -982,6 +987,8 @@ export function inferConversation(
   let followupDueAt: string | null = null;
   let followupSuggestion: string | null = null;
   let stateTriggerMessageId: string | null = null;
+  let hasFutureConcreteFollowup = false;
+  let hasExplicitFutureDeferral = false;
 
   if (hasOptOut) {
     state = 'LOST';
@@ -1049,9 +1056,16 @@ export function inferConversation(
     confidence = 'MEDIUM';
     if (useAiDeferral) {
       reasons.push('AI_DEFERRED');
-      followupDueAt =
-        aiDeferredDueAt ??
-        deriveFollowupDueAt(null, now, input.config.deferDefaultDays);
+      followupDueAt = aiDeferredDueAt
+        ? aiDeferredDueAt
+        : deriveFollowupDueAt(null, now, input.config.deferDefaultDays);
+      if (
+        aiDeferredDueAt &&
+        !Number.isNaN(Date.parse(aiDeferredDueAt)) &&
+        Date.parse(aiDeferredDueAt) > now.getTime()
+      ) {
+        hasFutureConcreteFollowup = true;
+      }
     } else {
       reasons.push('DEFERRAL_PHRASE');
       if (deferralHint?.match(/^(this_|next_)?(spring|summer|fall|winter)$/)) {
@@ -1062,6 +1076,17 @@ export function inferConversation(
         lastDeferralAt ? new Date(lastDeferralAt) : now,
         input.config.deferDefaultDays,
       );
+      if (
+        deferralHint &&
+        followupDueAt &&
+        !Number.isNaN(Date.parse(followupDueAt)) &&
+        Date.parse(followupDueAt) > now.getTime()
+      ) {
+        hasFutureConcreteFollowup = true;
+        if (hasExplicitDeferral) {
+          hasExplicitFutureDeferral = true;
+        }
+      }
     }
   } else if (hasPrice) {
     state = 'PRICE_GIVEN';
@@ -1076,6 +1101,23 @@ export function inferConversation(
   } else if (inboundCount >= 1 && outboundCount >= 1) {
     state = 'ENGAGED';
     confidence = 'LOW';
+  }
+
+  if (
+    !['LOST', 'SPAM', 'CONVERTED', 'OFF_PLATFORM'].includes(state) &&
+    daysSinceLastInbound !== null &&
+    daysSinceLastInbound >= inactiveTimeoutDays &&
+    !hasFutureConcreteFollowup &&
+    !hasExplicitFutureDeferral &&
+    !hasRejectionRevival &&
+    !hasExplicitRejectionRevival
+  ) {
+    // Customer silence is measured from last inbound, not last activity.
+    state = 'LOST';
+    confidence = 'HIGH';
+    followupSuggestion = null;
+    followupDueAt = null;
+    reasons = ['INBOUND_STALE'];
   }
 
   if (
@@ -1201,38 +1243,6 @@ export function inferConversation(
     reasons = reasons.filter(
       (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
     );
-  }
-
-  const hasFutureFollowup =
-    followupDueAt &&
-    !Number.isNaN(Date.parse(followupDueAt)) &&
-    Date.parse(followupDueAt) > now.getTime();
-  const inactiveMs = 30 * 24 * 60 * 60 * 1000;
-  const inactiveTimeoutByNoCustomerReply =
-    lastNonFinalDirection === 'outbound' &&
-    lastNonFinalMessageAt &&
-    !Number.isNaN(Date.parse(lastNonFinalMessageAt)) &&
-    now.getTime() - Date.parse(lastNonFinalMessageAt) >= inactiveMs;
-  if (
-    !['LOST', 'SPAM', 'CONVERTED', 'OFF_PLATFORM'].includes(state) &&
-    inactiveTimeoutByNoCustomerReply &&
-    !hasOptOut &&
-    !explicitLost &&
-    !hasLoss &&
-    !hasFutureFollowup
-  ) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    followupSuggestion = null;
-    needsFollowup = false;
-    followupDueAt = null;
-    reasons = [
-      {
-        code: 'LOST_INACTIVE_TIMEOUT',
-        confidence: 'HIGH',
-        evidence: lastNonFinalMessageAt ?? undefined,
-      },
-    ];
   }
 
   if (state === 'PRICE_GIVEN') {

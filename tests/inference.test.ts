@@ -176,23 +176,18 @@ describe('inference engine', () => {
     expect(result.state).toBe('OFF_PLATFORM');
   });
 
-  test('marks lost after stale outbound with no customer reply', () => {
+  test('does not mark lost from outbound-only inactivity', () => {
     const oldDate = new Date(
       Date.now() - 61 * 24 * 60 * 60 * 1000,
     ).toISOString();
     const msg = baseMessage({
-      text: 'The price is $1,200 for the package.',
+      text: 'Checking in when you have time.',
       direction: 'outbound',
       createdAt: oldDate,
     });
     const result = inferConversation({ messages: [msg], config });
-    expect(result.state).toBe('LOST');
-    expect(
-      result.reasons.find(
-        (entry) =>
-          typeof entry === 'object' && entry.code === 'LOST_INACTIVE_TIMEOUT',
-      ),
-    ).toBeTruthy();
+    expect(result.state).not.toBe('LOST');
+    expect(result.reasons).not.toContain('INBOUND_STALE');
   });
 
   test('uses AI deferred when no explicit deferral date exists', () => {
@@ -492,60 +487,53 @@ describe('inference engine', () => {
       now: new Date('2026-02-05T10:00:00Z'),
     });
     expect(result.state).toBe('LOST');
-    const reason = result.reasons.find(
-      (entry) =>
-        typeof entry === 'object' && entry.code === 'LOST_INACTIVE_TIMEOUT',
-    );
-    expect(reason).toBeTruthy();
+    expect(result.reasons).toContain('INBOUND_STALE');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupDueAt).toBeNull();
     expect(result.followupSuggestion).toBeNull();
   });
 
   test('does not mark lost after inactivity when a future follow-up exists', () => {
     const inbound = baseMessage({
       id: 'm1',
-      text: 'Can you follow up next month?',
+      text: 'Can you follow up next spring?',
       createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
     });
     const outbound = baseMessage({
       id: 'm2',
       direction: 'outbound',
       text: 'Sounds good.',
-      createdAt: new Date('2026-01-02T10:00:00Z').toISOString(),
+      createdAt: new Date('2026-02-01T10:00:00Z').toISOString(),
     });
     const result = inferConversation({
       messages: [inbound, outbound],
       config,
-      now: new Date('2026-01-10T10:00:00Z'),
+      now: new Date('2026-02-05T10:00:00Z'),
     });
     expect(result.state).not.toBe('LOST');
-    expect(
-      result.reasons.find(
-        (entry) =>
-          typeof entry === 'object' && entry.code === 'LOST_INACTIVE_TIMEOUT',
-      ),
-    ).toBeFalsy();
+    expect(result.reasons).not.toContain('INBOUND_STALE');
   });
 
-  test('marks lost after 30 days with no customer reply after outbound', () => {
-    const outbound = baseMessage({
+  test('does not mark lost when last inbound is recent despite recent outbound', () => {
+    const inbound = baseMessage({
       id: 'm1',
+      direction: 'inbound',
+      text: 'Still deciding.',
+      createdAt: new Date('2026-01-26T10:00:00Z').toISOString(),
+    });
+    const outbound = baseMessage({
+      id: 'm2',
       direction: 'outbound',
       text: 'Checking in again.',
-      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+      createdAt: new Date('2026-02-04T10:00:00Z').toISOString(),
     });
     const result = inferConversation({
-      messages: [outbound],
+      messages: [inbound, outbound],
       config,
-      now: new Date('2026-02-01T10:00:00Z'),
+      now: new Date('2026-02-05T10:00:00Z'),
     });
-    expect(result.state).toBe('LOST');
-    const reason = result.reasons.find(
-      (entry) =>
-        typeof entry === 'object' && entry.code === 'LOST_INACTIVE_TIMEOUT',
-    );
-    expect(reason).toBeTruthy();
-    expect(result.needsFollowup).toBe(false);
-    expect(result.followupSuggestion).toBeNull();
+    expect(result.state).not.toBe('LOST');
+    expect(result.reasons).not.toContain('INBOUND_STALE');
   });
 
   test('does not mark lost when latest message is customer inbound', () => {
@@ -559,7 +547,7 @@ describe('inference engine', () => {
       id: 'm2',
       direction: 'inbound',
       text: 'Can you clarify shipping?',
-      createdAt: new Date('2026-01-15T10:00:00Z').toISOString(),
+      createdAt: new Date('2026-02-15T10:00:00Z').toISOString(),
     });
     const result = inferConversation({
       messages: [outbound, inbound],
@@ -1074,6 +1062,98 @@ describe('inference engine', () => {
     expect(result.state).toBe('LOST');
     expect(result.reasons).toContain('INDEFINITE_DEFERRAL');
     expect(result.followupDueAt).toBeNull();
+    expect(result.needsFollowup).toBe(false);
+  });
+
+  test('t_3866724443458932 fixture marks lost when inbound is stale despite recent outbound', () => {
+    const inbound = baseMessage({
+      id: 'm1',
+      direction: 'inbound',
+      text: 'Thanks',
+      createdAt: new Date('2025-12-28T20:40:23Z').toISOString(),
+    });
+    const outboundPrice = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'The quote is $1200.',
+      createdAt: new Date('2026-02-06T20:50:40Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inbound, outboundPrice],
+      config,
+      now: new Date('2026-02-11T18:00:38Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('INBOUND_STALE');
+    expect(result.needsFollowup).toBe(false);
+  });
+
+  test('t_26201632842756315 fixture remains lost via explicit rejection', () => {
+    const outboundPrice = baseMessage({
+      id: 'm1',
+      direction: 'outbound',
+      text: 'The quote is $1200.',
+      createdAt: new Date('2026-02-06T20:51:20Z').toISOString(),
+    });
+    const inbound = baseMessage({
+      id: 'm2',
+      direction: 'inbound',
+      text: 'No ty',
+      createdAt: new Date('2026-02-06T20:50:26Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inbound, outboundPrice],
+      config,
+      now: new Date('2026-02-11T18:00:38Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('EXPLICIT_REJECTION');
+    expect(result.needsFollowup).toBe(false);
+  });
+
+  test('t_26479893194932597 fixture marks lost when inbound is stale despite recent outbound', () => {
+    const inbound = baseMessage({
+      id: 'm1',
+      direction: 'inbound',
+      text: 'okay',
+      createdAt: new Date('2026-01-08T04:55:21Z').toISOString(),
+    });
+    const outboundPrice = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'The quote is $900.',
+      createdAt: new Date('2026-02-06T20:50:27Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inbound, outboundPrice],
+      config,
+      now: new Date('2026-02-11T18:00:38Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('INBOUND_STALE');
+    expect(result.needsFollowup).toBe(false);
+  });
+
+  test('t_4612705208965017 fixture marks lost when inbound is stale despite recent outbound', () => {
+    const inbound = baseMessage({
+      id: 'm1',
+      direction: 'inbound',
+      text: 'thank you',
+      createdAt: new Date('2026-01-08T04:33:47Z').toISOString(),
+    });
+    const outboundPrice = baseMessage({
+      id: 'm2',
+      direction: 'outbound',
+      text: 'The quote is $1100.',
+      createdAt: new Date('2026-02-06T20:49:59Z').toISOString(),
+    });
+    const result = inferConversation({
+      messages: [inbound, outboundPrice],
+      config,
+      now: new Date('2026-02-11T18:00:38Z'),
+    });
+    expect(result.state).toBe('LOST');
+    expect(result.reasons).toContain('INBOUND_STALE');
     expect(result.needsFollowup).toBe(false);
   });
 });
