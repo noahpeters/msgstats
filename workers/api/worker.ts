@@ -108,6 +108,7 @@ export type Env = {
   FEATURE_AUDIT_CONVERSATIONS?: string;
   SESSION_SECRET: string;
   APP_ORIGIN?: string;
+  DEPLOY_ENV?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
   RESEND_API_KEY?: string;

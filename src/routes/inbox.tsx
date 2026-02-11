@@ -284,8 +284,28 @@ const ruleLabels: Record<string, string> = {
 };
 
 const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
-const SEARCH_LABEL = 'MSGSTATS_NEEDS_REPLY';
 const BUSINESS_INBOX_URL = 'https://business.facebook.com/latest/inbox';
+
+const resolveSearchLabel = () => {
+  if (typeof window === 'undefined') {
+    return 'MSGSTATS_NEEDS_REPLY';
+  }
+  const host = window.location.hostname.toLowerCase();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host.endsWith('.localhost')
+  ) {
+    return 'MSGSTATS_NEEDS_REPLY_DEV';
+  }
+  if (host.includes('staging')) {
+    return 'MSGSTATS_NEEDS_REPLY_STAGING';
+  }
+  if (host.includes('preview') || host.endsWith('.pages.dev')) {
+    return 'MSGSTATS_NEEDS_REPLY_PREVIEW';
+  }
+  return 'MSGSTATS_NEEDS_REPLY';
+};
 
 const isReplyWindowClosed = (input: {
   needsReply: boolean;
@@ -507,6 +527,7 @@ export default function Inbox(): React.ReactElement {
     needsReply: detailNeedsReply,
     lastInboundAt: detail?.conversation.lastInboundAt ?? null,
   });
+  const searchLabel = React.useMemo(() => resolveSearchLabel(), []);
 
   const handleCopyInboxLabel = React.useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.clipboard) {
@@ -514,12 +535,12 @@ export default function Inbox(): React.ReactElement {
       return;
     }
     try {
-      await navigator.clipboard.writeText(SEARCH_LABEL);
+      await navigator.clipboard.writeText(searchLabel);
       showToast('Label copied.', 'success');
     } catch {
       showToast('Unable to copy label.', 'error');
     }
-  }, [showToast]);
+  }, [searchLabel, showToast]);
 
   const loadAssets = React.useCallback(async () => {
     const response = await fetch('/api/assets');
@@ -2515,7 +2536,7 @@ export default function Inbox(): React.ReactElement {
                   </p>
                   <div {...stylex.props(inboxStyles.windowClosedActions)}>
                     <span {...stylex.props(inboxStyles.windowClosedLabel)}>
-                      Search label: {SEARCH_LABEL}
+                      Search label: {searchLabel}
                     </span>
                     <button
                       type="button"
