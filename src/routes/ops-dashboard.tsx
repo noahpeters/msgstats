@@ -425,6 +425,10 @@ export default function OpsDashboard(): React.ReactElement {
   const [backfillByUser, setBackfillByUser] = React.useState<
     Record<string, ParticipantBackfillResult>
   >({});
+  const [auditExporting, setAuditExporting] = React.useState(false);
+  const [auditExportStatus, setAuditExportStatus] = React.useState<
+    string | null
+  >(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const { tooltip, show, move, hide } = useChartTooltip();
@@ -584,6 +588,58 @@ export default function OpsDashboard(): React.ReactElement {
     },
     [loadOpsUsers],
   );
+
+  const exportAndClearAudit = React.useCallback(async () => {
+    const confirmed = window.confirm(
+      'Export all audit rows to a file and then delete them from the database?',
+    );
+    if (!confirmed) {
+      return;
+    }
+    setAuditExporting(true);
+    setAuditExportStatus(null);
+    try {
+      const response = await fetch('/api/ops/audit/export-and-clear', {
+        method: 'POST',
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(payload?.error ?? 'Failed to export audit data.');
+      }
+
+      const contentDisposition = response.headers.get('content-disposition');
+      const match = contentDisposition?.match(/filename="?([^";]+)"?/i);
+      const filename = match?.[1] ?? `msgstats-audit-export-${Date.now()}.json`;
+      const text = await response.text();
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      const parsed = JSON.parse(text) as {
+        counts?: { audit?: number; feedback?: number };
+      };
+      const auditCount = Number(parsed?.counts?.audit ?? 0);
+      const feedbackCount = Number(parsed?.counts?.feedback ?? 0);
+      setAuditExportStatus(
+        `Exported ${auditCount} audit rows and ${feedbackCount} feedback rows, then cleared both tables.`,
+      );
+    } catch (error) {
+      setAuditExportStatus(
+        error instanceof Error ? error.message : 'Export failed.',
+      );
+    } finally {
+      setAuditExporting(false);
+    }
+  }, []);
 
   React.useEffect(() => {
     void loadOverview();
@@ -1325,12 +1381,22 @@ export default function OpsDashboard(): React.ReactElement {
           <div {...stylex.props(opsStyles.sectionActions)}>
             <button
               {...stylex.props(layout.ghostButton)}
+              onClick={() => void exportAndClearAudit()}
+              disabled={auditExporting}
+            >
+              {auditExporting ? 'Exporting…' : 'Export + clear audit'}
+            </button>
+            <button
+              {...stylex.props(layout.ghostButton)}
               onClick={() => void loadOpsUsers()}
             >
               Refresh
             </button>
           </div>
         </div>
+        {auditExportStatus ? (
+          <p {...stylex.props(opsStyles.note)}>{auditExportStatus}</p>
+        ) : null}
         {opsUsersError ? (
           <p {...stylex.props(opsStyles.errorBanner)}>{opsUsersError}</p>
         ) : null}

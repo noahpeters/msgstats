@@ -2579,6 +2579,90 @@ export function registerRoutes(deps: any) {
     return json({ users });
   });
 
+  addRoute('POST', '/api/ops/audit/export-and-clear', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const audits = await env.DB.prepare(
+      `SELECT id, asset_id as assetId, conversation_id as conversationId,
+              contact_id as contactId, computed_label as computedLabel,
+              reason_codes as reasonCodes, feature_snapshot as featureSnapshot,
+              computed_at as computedAt, classifier_version as classifierVersion
+       FROM conversation_classification_audit
+       ORDER BY computed_at ASC`,
+    ).all<{
+      id: string;
+      assetId: string;
+      conversationId: string;
+      contactId: string | null;
+      computedLabel: string;
+      reasonCodes: string;
+      featureSnapshot: string;
+      computedAt: number;
+      classifierVersion: string | null;
+    }>();
+
+    const feedback = await env.DB.prepare(
+      `SELECT id, asset_id as assetId, conversation_id as conversationId,
+              contact_id as contactId, audit_id as auditId,
+              current_label as currentLabel, correct_label as correctLabel,
+              is_correct as isCorrect, notes, created_at as createdAt,
+              followup_is_correct as followupIsCorrect,
+              followup_correct_due_at as followupCorrectDueAt,
+              followup_notes as followupNotes
+       FROM conversation_classification_feedback
+       ORDER BY created_at ASC`,
+    ).all<{
+      id: string;
+      assetId: string;
+      conversationId: string;
+      contactId: string | null;
+      auditId: string | null;
+      currentLabel: string;
+      correctLabel: string;
+      isCorrect: number;
+      notes: string | null;
+      createdAt: number;
+      followupIsCorrect: number | null;
+      followupCorrectDueAt: number | null;
+      followupNotes: string | null;
+    }>();
+
+    const nowIso = new Date().toISOString();
+    const auditRows = audits.results ?? [];
+    const feedbackRows = feedback.results ?? [];
+    const payload = {
+      exportedAt: nowIso,
+      counts: {
+        audit: auditRows.length,
+        feedback: feedbackRows.length,
+      },
+      audit: auditRows,
+      feedback: feedbackRows,
+    };
+    const fileBody = JSON.stringify(payload, null, 2);
+
+    if (auditRows.length > 0 || feedbackRows.length > 0) {
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM conversation_classification_feedback'),
+        env.DB.prepare('DELETE FROM conversation_classification_audit'),
+      ]);
+    }
+
+    const safeStamp = nowIso.replace(/[:.]/g, '-');
+    const filename = `msgstats-audit-export-${safeStamp}.json`;
+    const headers = new Headers();
+    headers.set('content-type', 'application/json');
+    headers.set('cache-control', 'no-store');
+    headers.set('content-disposition', `attachment; filename="${filename}"`);
+    return new Response(fileBody, {
+      status: 200,
+      headers,
+    });
+  });
+
   addRoute(
     'POST',
     '/api/ops/users/:id/feature-flags',
