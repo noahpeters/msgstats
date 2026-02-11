@@ -225,6 +225,7 @@ export function buildFeatureSnapshot(input: {
       off_platform_outcome: input.conversation.offPlatformOutcome,
       needs_followup_before: Boolean(input.conversation.needsFollowup),
       followup_due_at_before: input.conversation.followupDueAt,
+      followup_due_source: input.inference.followupDueSource ?? null,
       followup_suggestion_before: input.conversation.followupSuggestion,
     },
     timestamps: {
@@ -269,7 +270,7 @@ export function buildFeatureSnapshot(input: {
       resurrect_gap_days: input.config.resurrectGapDays,
       defer_default_days: input.config.deferDefaultDays,
       due_soon_days: input.config.dueSoonDays ?? 3,
-      inactive_timeout_days: 30,
+      inactive_timeout_days: input.config.inactiveTimeoutDays ?? 30,
     },
     message_flags: messageFlags,
   };

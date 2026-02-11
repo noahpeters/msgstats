@@ -1,4 +1,8 @@
 import { mapDeferredBucketToDate } from './aiInterpreter';
+import {
+  computeInboxStateMachine,
+  type FollowupDueSource,
+} from './inbox_state_machine';
 
 export type MessageDirection = 'inbound' | 'outbound';
 export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW';
@@ -240,19 +244,6 @@ function hasExplicitRejectionPhrase(text: string): boolean {
     return !hasFutureIntent;
   }
   return false;
-}
-
-function addBusinessDays(base: Date, businessDays: number): Date {
-  const result = new Date(base.getTime());
-  let added = 0;
-  while (added < businessDays) {
-    result.setUTCDate(result.getUTCDate() + 1);
-    const day = result.getUTCDay();
-    if (day !== 0 && day !== 6) {
-      added += 1;
-    }
-  }
-  return result;
 }
 
 function detectExplicitLost(text: string): ExplicitLostEvidence | null {
@@ -542,6 +533,7 @@ export type ConversationInference = {
     string | { code: string; confidence: Confidence; evidence?: string }
   >;
   followupDueAt: string | null;
+  followupDueSource: FollowupDueSource | null;
   followupSuggestion: string | null;
   lastInboundAt: string | null;
   lastOutboundAt: string | null;
@@ -979,183 +971,94 @@ export function inferConversation(
     });
   })();
 
-  let reasons: Array<
-    string | { code: string; confidence: Confidence; evidence?: string }
-  > = [];
-  let state: ConversationState = 'NEW';
-  let confidence: Confidence = 'LOW';
-  let followupDueAt: string | null = null;
-  let followupSuggestion: string | null = null;
-  let stateTriggerMessageId: string | null = null;
-  let hasFutureConcreteFollowup = false;
-  let hasExplicitFutureDeferral = false;
-
-  if (hasOptOut) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('OPT_OUT');
-  } else if (hasBlocked) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('BLOCKED_BY_RECIPIENT');
-  } else if (hasBounced) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('BOUNCED');
-  } else if (hasExplicitRejection && !hasExplicitRejectionRevival) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('EXPLICIT_REJECTION');
-  } else if (hasPriceRejection && !hasRejectionRevival) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('PRICE_REJECTION');
-    if (hasIndefiniteDeferral) {
-      reasons.push('WAIT_TO_PROCEED');
-    }
-  } else if (hasSpamPhraseMatch && spamContextConfirmed) {
-    state = 'SPAM';
-    confidence = 'HIGH';
-    reasons.push('SPAM_PHRASE_MATCH');
-    reasons.push('SPAM_CONTEXT_CONFIRMED');
-    if (hasSpamContent) {
-      reasons.push('SPAM_CONTENT');
-    }
-  } else if (hasConversion) {
-    state = 'CONVERTED';
-    confidence = 'HIGH';
-    reasons.push('CONVERSION_PHRASE');
-  } else if (explicitLost) {
-    state = 'LOST';
-    confidence = explicitLost.evidence.confidence;
-    reasons.push({
-      code: explicitLost.evidence.reason_code,
-      confidence: explicitLost.evidence.confidence,
-      evidence: explicitLost.evidence.evidence,
-    });
-    stateTriggerMessageId = explicitLost.message.id;
-  } else if (hasLoss) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('LOSS_PHRASE');
-  } else if (hasIndefiniteDeferral && !hasConcreteDeferral) {
-    state = 'LOST';
-    confidence = 'MEDIUM';
-    reasons.push('INDEFINITE_DEFERRAL');
-    if (hasPriceRejection) {
-      reasons.push('WAIT_TO_PROCEED');
-    }
-  } else if (hasOffPlatform) {
-    state = 'OFF_PLATFORM';
-    confidence = 'MEDIUM';
-    if (offPlatformReason) {
-      reasons.push(offPlatformReason);
-    }
-  } else if (hasDeferral) {
-    state = 'DEFERRED';
-    confidence = 'MEDIUM';
+  let followupDueAtFromDeferral: string | null = null;
+  let followupDueSourceFromDeferral: FollowupDueSource = null;
+  if (hasDeferral) {
     if (useAiDeferral) {
-      reasons.push('AI_DEFERRED');
-      followupDueAt = aiDeferredDueAt
+      followupDueAtFromDeferral = aiDeferredDueAt
         ? aiDeferredDueAt
         : deriveFollowupDueAt(null, now, input.config.deferDefaultDays);
-      if (
-        aiDeferredDueAt &&
-        !Number.isNaN(Date.parse(aiDeferredDueAt)) &&
-        Date.parse(aiDeferredDueAt) > now.getTime()
-      ) {
-        hasFutureConcreteFollowup = true;
-      }
+      followupDueSourceFromDeferral = aiDeferredDueAt
+        ? 'customer_intent'
+        : 'default';
     } else {
-      reasons.push('DEFERRAL_PHRASE');
-      if (deferralHint?.match(/^(this_|next_)?(spring|summer|fall|winter)$/)) {
-        reasons.push('DEFERRAL_SEASON_PARSED');
-      }
-      followupDueAt = deriveFollowupDueAt(
+      followupDueAtFromDeferral = deriveFollowupDueAt(
         deferralHint,
         lastDeferralAt ? new Date(lastDeferralAt) : now,
         input.config.deferDefaultDays,
       );
-      if (
-        deferralHint &&
-        followupDueAt &&
-        !Number.isNaN(Date.parse(followupDueAt)) &&
-        Date.parse(followupDueAt) > now.getTime()
-      ) {
-        hasFutureConcreteFollowup = true;
-        if (hasExplicitDeferral) {
-          hasExplicitFutureDeferral = true;
-        }
-      }
+      followupDueSourceFromDeferral = deferralHint
+        ? 'customer_intent'
+        : 'default';
     }
-  } else if (hasPrice) {
-    state = 'PRICE_GIVEN';
-    confidence = 'MEDIUM';
-    reasons.push('PRICE_MENTION');
-  } else if (inboundCount >= 4 && outboundCount >= 4) {
-    state = 'HIGHLY_PRODUCTIVE';
-    confidence = 'MEDIUM';
-  } else if (inboundCount >= 2 && outboundCount >= 2) {
-    state = 'PRODUCTIVE';
-    confidence = 'MEDIUM';
-  } else if (inboundCount >= 1 && outboundCount >= 1) {
-    state = 'ENGAGED';
-    confidence = 'LOW';
   }
 
-  if (
-    !['LOST', 'SPAM', 'CONVERTED', 'OFF_PLATFORM'].includes(state) &&
-    daysSinceLastInbound !== null &&
-    daysSinceLastInbound >= inactiveTimeoutDays &&
-    !hasFutureConcreteFollowup &&
-    !hasExplicitFutureDeferral &&
-    !hasRejectionRevival &&
-    !hasExplicitRejectionRevival
-  ) {
-    // Customer silence is measured from last inbound, not last activity.
-    state = 'LOST';
-    confidence = 'HIGH';
-    followupSuggestion = null;
-    followupDueAt = null;
-    reasons = ['INBOUND_STALE'];
-  }
+  const machine = computeInboxStateMachine({
+    now,
+    previousState: input.previousState ?? null,
+    messageCount,
+    inboundCount,
+    outboundCount,
+    inboundCountNonFinal: inboundCount,
+    lastInboundAt,
+    lastOutboundAt,
+    lastMessageAt,
+    lastNonFinalMessageAt,
+    lastNonFinalDirection,
+    hasOptOut,
+    hasBlocked,
+    hasBounced,
+    hasExplicitRejection,
+    hasExplicitRejectionRevival,
+    hasPriceRejection,
+    hasPriceRejectionRevival: hasRejectionRevival,
+    hasIndefiniteDeferral,
+    hasConcreteDeferral,
+    hasDeferral,
+    hasConversion,
+    hasLossPhrase: hasLoss,
+    hasOffPlatform,
+    hasExplicitContact,
+    offPlatformReason,
+    hasPriceMention: hasPrice,
+    hasSpamPhraseMatch,
+    spamContextConfirmed,
+    hasSpamContent,
+    explicitLostCandidate: explicitLost
+      ? {
+          code: explicitLost.evidence.reason_code,
+          confidence: explicitLost.evidence.confidence,
+          evidence: explicitLost.evidence.evidence,
+          messageId: explicitLost.message.id,
+        }
+      : null,
+    followupDueAtFromDeferral,
+    followupDueSourceFromDeferral,
+    useAiDeferral,
+    hasDeferralSeasonHint: Boolean(
+      deferralHint?.match(/^(this_|next_)?(spring|summer|fall|winter)$/),
+    ),
+    daysSinceLastInbound,
+    daysSinceLastActivity,
+    slaHours: input.config.slaHours,
+    dueSoonDays,
+    inactiveTimeoutDays,
+    lostAfterPriceRejectionDays,
+    lostAfterOffPlatformNoContactDays,
+    lostAfterPriceDays: input.config.lostAfterPriceDays,
+    lostAfterIndefiniteDeferralDays,
+  });
 
-  if (
-    state !== 'LOST' &&
-    hasPriceRejection &&
-    !hasRejectionRevival &&
-    daysSinceLastInbound !== null &&
-    daysSinceLastInbound >= lostAfterPriceRejectionDays
-  ) {
-    state = 'LOST';
-    confidence = 'HIGH';
-    reasons.push('PRICE_REJECTION_STALE');
-  }
-
-  if (
-    state === 'OFF_PLATFORM' &&
-    !hasExplicitContact &&
-    daysSinceLastActivity !== null &&
-    daysSinceLastActivity >= lostAfterOffPlatformNoContactDays
-  ) {
-    state = 'LOST';
-    confidence = 'MEDIUM';
-    reasons.push('OFF_PLATFORM_NO_CONTACT_INFO');
-    reasons.push('OFF_PLATFORM_STALE');
-  }
-
-  if (
-    (state === 'DEFERRED' || state === 'PRODUCTIVE' || state === 'ENGAGED') &&
-    hasIndefiniteDeferral &&
-    !hasConcreteDeferral &&
-    daysSinceLastActivity !== null &&
-    daysSinceLastActivity >= lostAfterIndefiniteDeferralDays
-  ) {
-    state = 'LOST';
-    confidence = 'MEDIUM';
-    followupDueAt = null;
-    reasons.push('INDEFINITE_DEFERRAL');
-  }
+  const reasons = machine.reasons as Array<
+    string | { code: string; confidence: Confidence; evidence?: string }
+  >;
+  const state = machine.state as ConversationState;
+  const confidence = machine.confidence as Confidence;
+  const followupDueAt = machine.followupDueAt;
+  const followupDueSource = machine.followupDueSource;
+  const followupSuggestion = machine.followupSuggestion;
+  const needsFollowup = machine.needsFollowup;
+  const stateTriggerMessageId = machine.stateTriggerMessageId;
 
   const resurrected = detectResurrection({
     previousState: input.previousState,
@@ -1170,103 +1073,12 @@ export function inferConversation(
     reasons.push('RESURRECTED');
   }
 
-  let needsFollowup = false;
-  const hasReasonCode = (code: string) =>
-    reasons.some((reason) =>
-      typeof reason === 'string' ? reason === code : reason.code === code,
-    );
-  const isDeferredWithSpecificDate =
-    state === 'DEFERRED' &&
-    Boolean(followupDueAt) &&
-    !Number.isNaN(Date.parse(followupDueAt ?? ''));
-  const applyDefaultFollowupPolicy =
-    state !== 'SPAM' &&
-    state !== 'LOST' &&
-    state !== 'CONVERTED' &&
-    !isDeferredWithSpecificDate;
-  if (state === 'DEFERRED') {
-    if (followupDueAt) {
-      const dueMs = Date.parse(followupDueAt);
-      followupSuggestion =
-        !Number.isNaN(dueMs) && dueMs > now.getTime()
-          ? 'Follow up later'
-          : 'Follow up now';
-      if (!Number.isNaN(dueMs)) {
-        const dueSoonWindowMs =
-          Math.max(input.config.slaHours, dueSoonDays * 24) * 60 * 60 * 1000;
-        needsFollowup =
-          dueMs <= now.getTime() || dueMs - now.getTime() <= dueSoonWindowMs;
-      }
-    } else {
-      followupSuggestion = 'Follow up later';
-    }
-  } else if (state === 'OFF_PLATFORM') {
-    followupSuggestion = 'Visibility lost (off-platform)';
-  } else if (applyDefaultFollowupPolicy) {
-    const lastNonFinalMs = lastNonFinalMessageAt
-      ? Date.parse(lastNonFinalMessageAt)
-      : Number.NaN;
-    if (lastNonFinalDirection === 'inbound' && !Number.isNaN(lastNonFinalMs)) {
-      followupSuggestion = 'Reply recommended';
-      if (!hasReasonCode('UNREPLIED')) {
-        reasons.push('UNREPLIED');
-      }
-      needsFollowup = true;
-      const ageHours = (now.getTime() - lastNonFinalMs) / (1000 * 60 * 60);
-      if (ageHours >= input.config.slaHours && !hasReasonCode('SLA_BREACH')) {
-        reasons.push('SLA_BREACH');
-      }
-    } else if (
-      lastNonFinalDirection === 'outbound' &&
-      !Number.isNaN(lastNonFinalMs)
-    ) {
-      const dueAt = addBusinessDays(new Date(lastNonFinalMs), 2).toISOString();
-      followupDueAt = followupDueAt ?? dueAt;
-      if (Date.parse(dueAt) <= now.getTime()) {
-        followupSuggestion = 'Follow up now';
-        needsFollowup = true;
-      } else {
-        followupSuggestion = 'Follow up later';
-      }
-    }
-  }
-
-  if (inboundCount === 0) {
-    reasons = reasons.filter(
-      (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
-    );
-  }
-
-  if (state === 'CONVERTED' || state === 'SPAM' || state === 'LOST') {
-    followupSuggestion = null;
-    needsFollowup = false;
-    reasons = reasons.filter(
-      (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
-    );
-  }
-
-  if (state === 'PRICE_GIVEN') {
-    const thresholdMs = input.config.lostAfterPriceDays * 24 * 60 * 60 * 1000;
-    const lastActivity =
-      (lastOutboundAt && Date.parse(lastOutboundAt)) ||
-      (lastInboundAt && Date.parse(lastInboundAt)) ||
-      null;
-    if (lastActivity && now.getTime() - lastActivity > thresholdMs) {
-      state = 'LOST';
-      confidence = 'MEDIUM';
-      reasons.push('PRICE_STALE');
-    }
-  }
-
-  if (state === 'NEW' && messageCount > 0) {
-    confidence = 'LOW';
-  }
-
   return {
     state,
     confidence,
     reasons,
     followupDueAt,
+    followupDueSource,
     followupSuggestion,
     lastInboundAt,
     lastOutboundAt,
