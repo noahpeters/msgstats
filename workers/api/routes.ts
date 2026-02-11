@@ -76,6 +76,10 @@ export function registerRoutes(deps: any) {
     toHourBucket,
     parseJsonArray,
     reportError,
+    recomputeFollowupEventsForConversation,
+    backfillFollowupEventsForUser,
+    repairFollowupEventLossFlags,
+    getFollowupSeries,
   } = deps;
   const readJson = readJsonRaw as <T>(req: Request) => Promise<T | null>;
   const webhookSubscribeFields = [
@@ -1883,6 +1887,10 @@ export function registerRoutes(deps: any) {
             null,
           )
           .run();
+        await recomputeFollowupEventsForConversation(env, {
+          userId,
+          conversationId,
+        });
         await recomputeConversationState(env, userId, conversationId);
         await notifyInboxEvent(env, {
           userId,
@@ -2022,6 +2030,10 @@ export function registerRoutes(deps: any) {
             'LOST_INACTIVE_TIMEOUT',
           )
           .run();
+        await recomputeFollowupEventsForConversation(env, {
+          userId,
+          conversationId,
+        });
         await env.DB.prepare(
           `UPDATE conversations
            SET final_touch_required = 0,
@@ -2553,6 +2565,10 @@ export function registerRoutes(deps: any) {
               null,
             )
             .run();
+          await recomputeFollowupEventsForConversation(env, {
+            userId,
+            conversationId: convo.id,
+          });
           await recomputeConversationState(env, userId, convo.id);
           await notifyInboxEvent(env, {
             userId,
@@ -3267,6 +3283,63 @@ export function registerRoutes(deps: any) {
     });
 
     return json({ hours, points });
+  });
+
+  addRoute('GET', '/api/ops/followup/series', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isOpsDashboardEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const url = new URL(req.url);
+    const range = url.searchParams.get('range');
+    const bucket = url.searchParams.get('bucket');
+    const targetUserId = url.searchParams.get('userId')?.trim() || null;
+
+    const series = await getFollowupSeries(env, {
+      userId: targetUserId,
+      range,
+      bucket,
+    });
+    return json(series);
+  });
+
+  addRoute('POST', '/api/ops/followup/backfill', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isOpsDashboardEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const body = await readJson<{ userId?: string; limit?: number }>(req);
+    const targetUserId = body?.userId?.trim();
+    if (!targetUserId) {
+      return json({ error: 'Missing userId' }, { status: 400 });
+    }
+    const result = await backfillFollowupEventsForUser(env, {
+      userId: targetUserId,
+      limit: body?.limit,
+    });
+    return json({ ok: true, ...result, userId: targetUserId });
+  });
+
+  addRoute('POST', '/api/ops/followup/repair-loss', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isOpsDashboardEnabledForUser(env, userId))) {
+      return json({ error: 'Not found' }, { status: 404 });
+    }
+    const body = await readJson<{ userId?: string; limit?: number }>(req);
+    const result = await repairFollowupEventLossFlags(env, {
+      userId: body?.userId?.trim() || null,
+      limit: body?.limit,
+    });
+    return json({ ok: true, ...result });
   });
 
   addRoute('GET', '/api/ops/metrics/meta', async (req, env, ctx) => {

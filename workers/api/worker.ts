@@ -57,6 +57,12 @@ import {
 import { registerRoutes } from './routes';
 import { buildReportFromDb } from './report';
 import {
+  backfillFollowupEventsForUser,
+  getFollowupSeries,
+  recomputeFollowupEventsForConversation,
+  repairFollowupEventLossFlags,
+} from './followupEvents';
+import {
   buildSessionCookie,
   clearSessionCookie,
   createSessionToken,
@@ -2849,6 +2855,11 @@ async function runSync(options: {
       )
       .run();
 
+    await recomputeFollowupEventsForConversation(env, {
+      userId,
+      conversationId: convo.id,
+    });
+
     if (followupEnabled) {
       const followupState = await recomputeConversationState(
         env,
@@ -3481,6 +3492,10 @@ registerRoutes({
   toHourBucket,
   parseJsonArray,
   reportError,
+  recomputeFollowupEventsForConversation,
+  backfillFollowupEventsForUser,
+  repairFollowupEventLossFlags,
+  getFollowupSeries,
 });
 
 export default {

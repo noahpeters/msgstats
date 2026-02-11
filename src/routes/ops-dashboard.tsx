@@ -78,6 +78,13 @@ type ParticipantBackfillResult = {
   queuedRecompute: boolean;
 };
 
+type FollowupBackfillResult = {
+  ok: boolean;
+  userId: string;
+  scannedConversations: number;
+  upsertedEvents: number;
+};
+
 type HourPoint = {
   hour: string;
   count: number;
@@ -117,6 +124,19 @@ type AppErrorMetrics = {
     severity: string;
     count: number;
   }>;
+};
+
+type FollowupSeriesPoint = {
+  t: string;
+  events: number;
+  revived: number;
+  immediate_loss: number;
+};
+
+type FollowupSeriesResponse = {
+  bucket: 'hour' | 'day' | 'week' | 'month';
+  range: '24h' | '7d' | '30d' | '90d';
+  series: FollowupSeriesPoint[];
 };
 
 const opsStyles = stylex.create({
@@ -270,6 +290,31 @@ const opsStyles = stylex.create({
     width: '100%',
     minHeight: '170px',
   },
+  chartGrid: {
+    display: 'grid',
+    gap: '10px',
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    '@media (min-width: 1100px)': {
+      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    },
+  },
+  chartControl: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  select: {
+    border: '1px solid rgba(12, 27, 26, 0.2)',
+    borderRadius: '8px',
+    backgroundColor: '#fff',
+    color: '#0c1b1a',
+    fontSize: '12px',
+    padding: '4px 8px',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
   panelGrid: {
     display: 'grid',
     gap: '10px',
@@ -399,6 +444,134 @@ const formatRelativeTime = (value: string | null) => {
   return 'Just now';
 };
 
+const defaultBucketForRange = (range: FollowupSeriesResponse['range']) => {
+  if (range === '24h') return 'hour';
+  if (range === '90d') return 'week';
+  return 'day';
+};
+
+function FollowupBarChart({
+  title,
+  points,
+  keyName,
+  bucket,
+  onHover,
+  onMove,
+  onLeave,
+}: {
+  title: string;
+  points: FollowupSeriesPoint[];
+  keyName: 'events' | 'revived' | 'immediate_loss';
+  bucket: FollowupSeriesResponse['bucket'];
+  onHover: (
+    event: React.MouseEvent<SVGRectElement, MouseEvent>,
+    point: FollowupSeriesPoint,
+    value: number,
+  ) => void;
+  onMove: (event: React.MouseEvent<SVGRectElement, MouseEvent>) => void;
+  onLeave: () => void;
+}) {
+  const chart = useContainerWidth(520);
+  const width = chart.width;
+  const height = 190;
+  const margin = { top: 10, right: 10, bottom: 28, left: 36 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const parsed = React.useMemo(
+    () =>
+      points.map((point) => ({
+        ...point,
+        d: new Date(point.t),
+        v: Number(point[keyName] ?? 0),
+      })),
+    [points, keyName],
+  );
+  const firstDate = parsed[0]?.d ?? new Date();
+  const lastDate = parsed[parsed.length - 1]?.d ?? firstDate;
+  const maxValue = Math.max(1, ...parsed.map((point) => point.v));
+  const x = d3
+    .scaleTime()
+    .domain([firstDate, lastDate])
+    .range([0, Math.max(1, innerWidth)]);
+  const y = d3
+    .scaleLinear()
+    .domain([0, maxValue])
+    .nice()
+    .range([innerHeight, 0]);
+  const barWidth = parsed.length ? Math.max(1, innerWidth / parsed.length) : 1;
+  const xTicks: Date[] =
+    parsed.length > 1
+      ? (
+          x as unknown as {
+            ticks: (count: number) => Date[];
+          }
+        ).ticks(6)
+      : [];
+  const tickFormat =
+    bucket === 'hour'
+      ? d3.timeFormat('%H:%M')
+      : bucket === 'month'
+        ? d3.timeFormat('%b %Y')
+        : d3.timeFormat('%b %d');
+
+  return (
+    <div {...stylex.props(opsStyles.chartSurface)}>
+      <strong {...stylex.props(opsStyles.panelTitle)}>{title}</strong>
+      <div ref={chart.ref} {...stylex.props(opsStyles.chartHost)}>
+        <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <g transform={`translate(${margin.left}, ${margin.top})`}>
+            {parsed.map((point) => {
+              const xPos = x(point.d) - barWidth / 2;
+              const yPos = y(point.v);
+              const h = Math.max(0, innerHeight - yPos);
+              return (
+                <rect
+                  key={`${keyName}-${point.t}`}
+                  x={xPos}
+                  y={yPos}
+                  width={Math.max(1, barWidth - 1)}
+                  height={h}
+                  fill="#0f766e"
+                  opacity={0.85}
+                  onMouseEnter={(event) => onHover(event, point, point.v)}
+                  onMouseMove={onMove}
+                  onMouseLeave={onLeave}
+                />
+              );
+            })}
+            {parsed.length > 1
+              ? xTicks.map((tick: Date) => (
+                  <text
+                    key={`tick-${keyName}-${tick.toISOString()}`}
+                    x={x(tick)}
+                    y={innerHeight + 18}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="#284b63"
+                  >
+                    {tickFormat(tick)}
+                  </text>
+                ))
+              : null}
+            {[0, maxValue].map((tick) => (
+              <text
+                key={`y-${keyName}-${tick}`}
+                x={-8}
+                y={y(tick) + 4}
+                textAnchor="end"
+                fontSize="11"
+                fill="#284b63"
+              >
+                {tick}
+              </text>
+            ))}
+          </g>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 export default function OpsDashboard(): React.ReactElement {
   const [summary, setSummary] = React.useState<OpsSummary | null>(null);
   const [points, setPoints] = React.useState<HourPoint[]>([]);
@@ -407,6 +580,13 @@ export default function OpsDashboard(): React.ReactElement {
   );
   const [errorMetrics, setErrorMetrics] =
     React.useState<AppErrorMetrics | null>(null);
+  const [followupRange, setFollowupRange] =
+    React.useState<FollowupSeriesResponse['range']>('30d');
+  const [followupBucket, setFollowupBucket] =
+    React.useState<FollowupSeriesResponse['bucket']>('day');
+  const [followupSeries, setFollowupSeries] = React.useState<
+    FollowupSeriesPoint[]
+  >([]);
   const [syncRuns, setSyncRuns] = React.useState<SyncRun[]>([]);
   const [runsError, setRunsError] = React.useState<string | null>(null);
   const [aiRuns, setAiRuns] = React.useState<AiRunSummary[]>([]);
@@ -425,6 +605,11 @@ export default function OpsDashboard(): React.ReactElement {
   const [backfillByUser, setBackfillByUser] = React.useState<
     Record<string, ParticipantBackfillResult>
   >({});
+  const [opsUsersFollowupBackfilling, setOpsUsersFollowupBackfilling] =
+    React.useState<string | null>(null);
+  const [followupBackfillByUser, setFollowupBackfillByUser] = React.useState<
+    Record<string, FollowupBackfillResult>
+  >({});
   const [auditExporting, setAuditExporting] = React.useState(false);
   const [auditExportStatus, setAuditExportStatus] = React.useState<
     string | null
@@ -437,6 +622,12 @@ export default function OpsDashboard(): React.ReactElement {
     show: showErrorTooltip,
     move: moveErrorTooltip,
     hide: hideErrorTooltip,
+  } = useChartTooltip();
+  const {
+    tooltip: followupTooltip,
+    show: showFollowupTooltip,
+    move: moveFollowupTooltip,
+    hide: hideFollowupTooltip,
   } = useChartTooltip();
   const xAxisRef = React.useRef<SVGGElement | null>(null);
   const yAxisRef = React.useRef<SVGGElement | null>(null);
@@ -486,6 +677,25 @@ export default function OpsDashboard(): React.ReactElement {
     }
   }, []);
 
+  const loadFollowupSeries = React.useCallback(async () => {
+    const params = new URLSearchParams({
+      range: followupRange,
+      bucket: followupBucket,
+    });
+    const response = await fetch(
+      `/api/ops/followup/series?${params.toString()}`,
+      {
+        cache: 'no-store',
+      },
+    );
+    if (!response.ok) {
+      throw new Error('Failed to load follow-up analytics.');
+    }
+    const data = (await response.json()) as FollowupSeriesResponse;
+    setFollowupSeries(data.series ?? []);
+    setFollowupBucket(data.bucket);
+  }, [followupBucket, followupRange]);
+
   const loadOverview = React.useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -516,13 +726,18 @@ export default function OpsDashboard(): React.ReactElement {
       setPoints(pointsData.points ?? []);
       setMetaMetrics(metaData);
       setErrorMetrics(errorsData);
-      await Promise.all([loadSyncRuns(), loadAiRuns(), loadOpsUsers()]);
+      await Promise.all([
+        loadSyncRuns(),
+        loadAiRuns(),
+        loadOpsUsers(),
+        loadFollowupSeries(),
+      ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load ops.');
     } finally {
       setLoading(false);
     }
-  }, [loadAiRuns, loadOpsUsers, loadSyncRuns]);
+  }, [loadAiRuns, loadFollowupSeries, loadOpsUsers, loadSyncRuns]);
 
   const updateUserFlag = React.useCallback(
     async (userId: string, flag: string, value: boolean | null) => {
@@ -589,6 +804,38 @@ export default function OpsDashboard(): React.ReactElement {
     [loadOpsUsers],
   );
 
+  const backfillFollowupEvents = React.useCallback(
+    async (targetUserId: string) => {
+      setOpsUsersFollowupBackfilling(targetUserId);
+      setOpsUsersError(null);
+      try {
+        const response = await fetch('/api/ops/followup/backfill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: targetUserId, limit: 1000 }),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(payload?.error ?? 'Follow-up backfill failed.');
+        }
+        const payload = (await response.json()) as FollowupBackfillResult;
+        setFollowupBackfillByUser((prev) => ({
+          ...prev,
+          [targetUserId]: payload,
+        }));
+      } catch (err) {
+        setOpsUsersError(
+          err instanceof Error ? err.message : 'Failed to backfill follow-ups.',
+        );
+      } finally {
+        setOpsUsersFollowupBackfilling(null);
+      }
+    },
+    [],
+  );
+
   const exportAndClearAudit = React.useCallback(async () => {
     const confirmed = window.confirm(
       'Export all audit rows to a file and then delete them from the database?',
@@ -644,6 +891,10 @@ export default function OpsDashboard(): React.ReactElement {
   React.useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
+
+  React.useEffect(() => {
+    void loadFollowupSeries().catch(() => undefined);
+  }, [loadFollowupSeries]);
 
   React.useEffect(() => {
     const interval = window.setInterval(() => {
@@ -824,6 +1075,11 @@ export default function OpsDashboard(): React.ReactElement {
   const minuteFormatter = new Intl.DateTimeFormat('en', {
     hour: 'numeric',
     minute: 'numeric',
+  });
+  const followupBucketFormatter = new Intl.DateTimeFormat('en', {
+    month: 'short',
+    day: 'numeric',
+    hour: followupBucket === 'hour' ? 'numeric' : undefined,
   });
   const percentFormatter = new Intl.NumberFormat('en', {
     style: 'percent',
@@ -1152,6 +1408,94 @@ export default function OpsDashboard(): React.ReactElement {
           </div>
           <ChartTooltip tooltip={tooltip} />
         </div>
+      </section>
+
+      <section {...stylex.props(opsStyles.section)}>
+        <div {...stylex.props(opsStyles.sectionHeader)}>
+          <h2 {...stylex.props(opsStyles.sectionTitle)}>Follow-up Analytics</h2>
+          <div {...stylex.props(opsStyles.sectionActions)}>
+            <label {...stylex.props(opsStyles.chartControl)}>
+              Range
+              <select
+                {...stylex.props(opsStyles.select)}
+                value={followupRange}
+                onChange={(event) => {
+                  const nextRange = event.target
+                    .value as FollowupSeriesResponse['range'];
+                  setFollowupRange(nextRange);
+                  setFollowupBucket(defaultBucketForRange(nextRange));
+                }}
+              >
+                <option value="24h">24h</option>
+                <option value="7d">7d</option>
+                <option value="30d">30d</option>
+                <option value="90d">90d</option>
+              </select>
+            </label>
+            <label {...stylex.props(opsStyles.chartControl)}>
+              Bucket
+              <select
+                {...stylex.props(opsStyles.select)}
+                value={followupBucket}
+                onChange={(event) =>
+                  setFollowupBucket(
+                    event.target.value as FollowupSeriesResponse['bucket'],
+                  )
+                }
+              >
+                <option value="hour">Hour</option>
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month">Month</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div {...stylex.props(opsStyles.chartGrid)}>
+          <FollowupBarChart
+            title="Follow-up events"
+            points={followupSeries}
+            keyName="events"
+            bucket={followupBucket}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Events: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
+          />
+          <FollowupBarChart
+            title="Revived"
+            points={followupSeries}
+            keyName="revived"
+            bucket={followupBucket}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Revived: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
+          />
+          <FollowupBarChart
+            title="Immediate loss"
+            points={followupSeries}
+            keyName="immediate_loss"
+            bucket={followupBucket}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Immediate loss: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
+          />
+        </div>
+        <ChartTooltip tooltip={followupTooltip} />
       </section>
 
       <section {...stylex.props(opsStyles.section)}>
@@ -1490,6 +1834,8 @@ export default function OpsDashboard(): React.ReactElement {
                     <td {...stylex.props(opsStyles.tableCell)}>
                       {(() => {
                         const backfillResult = backfillByUser[user.userId];
+                        const followupBackfillResult =
+                          followupBackfillByUser[user.userId];
                         return (
                           <>
                             <button
@@ -1509,6 +1855,27 @@ export default function OpsDashboard(): React.ReactElement {
                                 {backfillResult.scanned} · skipped(no ID){' '}
                                 {backfillResult.skippedNoParticipant} · errors{' '}
                                 {backfillResult.failed}
+                              </p>
+                            ) : null}
+                            <button
+                              {...stylex.props(layout.ghostButton)}
+                              disabled={
+                                opsUsersFollowupBackfilling === user.userId
+                              }
+                              onClick={() => {
+                                void backfillFollowupEvents(user.userId);
+                              }}
+                            >
+                              {opsUsersFollowupBackfilling === user.userId
+                                ? 'Backfilling…'
+                                : 'Backfill follow-up events'}
+                            </button>
+                            {followupBackfillResult ? (
+                              <p {...stylex.props(opsStyles.note)}>
+                                Follow-up events{' '}
+                                {followupBackfillResult.upsertedEvents} across{' '}
+                                {followupBackfillResult.scannedConversations}{' '}
+                                conversations
                               </p>
                             ) : null}
                           </>
