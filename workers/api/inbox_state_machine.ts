@@ -159,6 +159,9 @@ export function computeInboxStateMachine(
   let followupDueAt = context.followupDueAtFromDeferral;
   let followupDueSource = context.followupDueSourceFromDeferral;
   let stateTriggerMessageId: string | null = null;
+  if (followupDueAt && !followupDueSource) {
+    followupDueSource = 'unknown';
+  }
 
   if (context.hasOptOut) {
     state = 'LOST';
@@ -326,14 +329,20 @@ export function computeInboxStateMachine(
 
   let needsFollowup = false;
   let followupSuggestion: string | null = null;
+  const dueMs = followupDueAt ? Date.parse(followupDueAt) : Number.NaN;
+  const hasValidDueAt = !Number.isNaN(dueMs);
+  const hasFutureDueAt = hasValidDueAt && dueMs > nowMs;
+  const hasCustomerIntentDueAt = followupDueSource === 'customer_intent';
 
-  if (state === 'DEFERRED' && followupDueAt) {
-    const dueMs = Date.parse(followupDueAt);
-    if (!Number.isNaN(dueMs)) {
-      followupSuggestion = dueMs > nowMs ? 'Follow up later' : 'Follow up now';
+  if (state === 'DEFERRED' && hasFutureDueAt) {
+    if (hasCustomerIntentDueAt) {
+      followupSuggestion = 'Follow up later';
       const dueSoonWindowMs =
         Math.max(context.slaHours, context.dueSoonDays * 24) * 60 * 60 * 1000;
-      needsFollowup = dueMs <= nowMs || dueMs - nowMs <= dueSoonWindowMs;
+      needsFollowup = dueMs - nowMs <= dueSoonWindowMs;
+    } else {
+      followupSuggestion = null;
+      needsFollowup = false;
     }
   } else if (state === 'DEFERRED') {
     followupSuggestion = 'Follow up later';
@@ -364,13 +373,21 @@ export function computeInboxStateMachine(
       const dueAt = addBusinessDays(new Date(lastNonFinalMs), 2).toISOString();
       if (!followupDueAt) {
         followupDueAt = dueAt;
-        followupDueSource = followupDueSource ?? 'default';
       }
-      if (Date.parse(dueAt) <= nowMs) {
-        followupSuggestion = 'Follow up now';
-        needsFollowup = true;
+      if (!followupDueSource) {
+        followupDueSource = 'default';
+      }
+      if (followupDueSource === 'customer_intent') {
+        const dueAtMs = Date.parse(dueAt);
+        const dueSoonWindowMs =
+          Math.max(context.slaHours, context.dueSoonDays * 24) * 60 * 60 * 1000;
+        followupSuggestion =
+          dueAtMs > nowMs ? 'Follow up later' : 'Follow up now';
+        needsFollowup =
+          !Number.isNaN(dueAtMs) && dueAtMs - nowMs <= dueSoonWindowMs;
       } else {
         followupSuggestion = 'Follow up later';
+        needsFollowup = false;
       }
     }
   }
@@ -389,6 +406,10 @@ export function computeInboxStateMachine(
     reasons = reasons.filter(
       (reason) => reason !== 'UNREPLIED' && reason !== 'SLA_BREACH',
     );
+  }
+
+  if (followupDueAt && !followupDueSource) {
+    followupDueSource = 'unknown';
   }
 
   return {

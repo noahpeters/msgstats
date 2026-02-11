@@ -742,7 +742,44 @@ describe('inference engine', () => {
     expect(result.needsFollowup).toBe(true);
   });
 
-  test('non-terminal outbound last requires follow-up after 2 business days', () => {
+  test('default deferred follow-up is not treated as due work item', () => {
+    const msg = baseMessage({
+      text: 'we should revisit this sometime',
+      createdAt: new Date('2026-01-01T10:00:00Z').toISOString(),
+    });
+    msg.features = {
+      ...msg.features,
+      ai: {
+        interpretation: {
+          handoff: {
+            is_handoff: false,
+            type: null,
+            confidence: 'LOW',
+            evidence: '',
+          },
+          deferred: {
+            is_deferred: true,
+            bucket: null,
+            due_date_iso: null,
+            confidence: 'LOW',
+            evidence: 'sometime later',
+          },
+        },
+      },
+    };
+    msg.ruleHits = msg.ruleHits.filter((hit) => hit !== 'DEFERRAL_PHRASE');
+    const result = inferConversation({
+      messages: [msg],
+      config,
+      now: new Date('2026-01-02T10:00:00Z'),
+    });
+    expect(result.state).toBe('DEFERRED');
+    expect(result.followupDueSource).toBe('default');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).not.toBe('Follow up now');
+  });
+
+  test('non-terminal outbound last does not auto-mark needs follow-up from default due date', () => {
     const outbound = baseMessage({
       id: 'm1',
       direction: 'outbound',
@@ -755,9 +792,10 @@ describe('inference engine', () => {
       now: new Date('2026-01-06T10:01:00Z'),
     });
     expect(result.state).toBe('NEW');
-    expect(result.needsFollowup).toBe(true);
-    expect(result.followupSuggestion).toBe('Follow up now');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).toBe('Follow up later');
     expect(result.followupDueAt?.slice(0, 10)).toBe('2026-01-06');
+    expect(result.followupDueSource).toBe('default');
   });
 
   test('non-terminal outbound last is not due before 2 business days', () => {

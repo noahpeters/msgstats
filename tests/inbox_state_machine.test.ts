@@ -192,6 +192,30 @@ describe('inbound stale behavior', () => {
 });
 
 describe('deferred follow-up gating', () => {
+  test('missing follow-up source is normalized to unknown when due_at exists', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        hasDeferral: true,
+        followupDueAtFromDeferral: '2026-03-12T18:00:00.000Z',
+        followupDueSourceFromDeferral: null,
+      }),
+    );
+    expect(result.followupDueSource).toBe('unknown');
+  });
+
+  test('default follow-up does not trigger needs_followup or follow up now', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        hasDeferral: true,
+        followupDueAtFromDeferral: '2026-02-12T18:00:00.000Z',
+        followupDueSourceFromDeferral: 'default',
+      }),
+    );
+    expect(result.state).toBe('DEFERRED');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).not.toBe('Follow up now');
+  });
+
   test('deferred with far future due date is not follow-up due', () => {
     const result = computeInboxStateMachine(
       baseContext({
@@ -213,6 +237,23 @@ describe('deferred follow-up gating', () => {
       }),
     );
     expect(result.state).toBe('DEFERRED');
+    expect(result.needsFollowup).toBe(true);
+  });
+});
+
+describe('sla regression', () => {
+  test('recent unreplied inbound still triggers follow-up by sla logic', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        hasDeferral: false,
+        followupDueAtFromDeferral: null,
+        followupDueSourceFromDeferral: null,
+        lastNonFinalDirection: 'inbound',
+        lastNonFinalMessageAt: '2026-02-09T18:00:00.000Z',
+        daysSinceLastInbound: 2,
+      }),
+    );
+    expect(result.state).not.toBe('LOST');
     expect(result.needsFollowup).toBe(true);
   });
 });
