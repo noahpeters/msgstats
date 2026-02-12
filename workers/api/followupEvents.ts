@@ -88,6 +88,20 @@ function parseFlexibleTimestamp(value: string | null): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+function inferDirection(message: {
+  direction: string | null;
+  senderType?: string | null;
+}): 'inbound' | 'outbound' | null {
+  const direction = (message.direction ?? '').trim().toLowerCase();
+  if (direction === 'inbound' || direction === 'outbound') {
+    return direction;
+  }
+  const senderType = (message.senderType ?? '').trim().toLowerCase();
+  if (senderType === 'business') return 'outbound';
+  if (senderType === 'customer') return 'inbound';
+  return null;
+}
+
 export function isSystemAdministrativeMessage(message: {
   senderType: string | null;
   messageType: string | null;
@@ -115,19 +129,21 @@ export function isSystemAdministrativeMessage(message: {
 
 export function isAckOnlyInboundMessage(message: {
   direction: string | null;
+  senderType?: string | null;
   featuresJson: string | null;
 }): boolean {
-  if (message.direction !== 'inbound') return false;
+  if (inferDirection(message) !== 'inbound') return false;
   const features = parseFeatures(message.featuresJson);
   return features.ack_only === true;
 }
 
 export function isLossInboundMessage(message: {
   direction: string | null;
+  senderType?: string | null;
   featuresJson: string | null;
   ruleHitsJson: string | null;
 }): boolean {
-  if (message.direction !== 'inbound') return false;
+  if (inferDirection(message) !== 'inbound') return false;
   const features = parseFeatures(message.featuresJson);
   const ruleHits = parseRuleHits(message.ruleHitsJson);
   if (ruleHits.includes('LOSS_PHRASE')) return true;
@@ -153,8 +169,7 @@ function isConversationActivityMessage(
 }
 
 function isEligibleFollowupOutbound(message: FollowupTimelineMessage): boolean {
-  if (message.direction !== 'outbound') return false;
-  if (message.senderType !== 'business') return false;
+  if (inferDirection(message) !== 'outbound') return false;
   if (isSystemAdministrativeMessage(message)) return false;
   return true;
 }
@@ -163,15 +178,20 @@ export function deriveFollowupEventsForMessages(
   messages: FollowupTimelineMessage[],
   existingByFollowupId: Map<string, ExistingEvent>,
 ): DerivedEvent[] {
-  const sorted = messages
-    .slice()
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const sorted = messages.slice().sort((a, b) => {
+    const aMs = parseFlexibleTimestamp(a.createdAt);
+    const bMs = parseFlexibleTimestamp(b.createdAt);
+    if (aMs !== null && bMs !== null) {
+      return aMs - bMs;
+    }
+    return a.createdAt.localeCompare(b.createdAt);
+  });
 
   let lastActivityAt: string | null = null;
   const events: DerivedEvent[] = [];
 
   for (const message of sorted) {
-    const createdMs = messageEpoch(message.createdAt);
+    const createdMs = parseFlexibleTimestamp(message.createdAt);
     if (createdMs === null) continue;
 
     if (isEligibleFollowupOutbound(message)) {
@@ -213,10 +233,10 @@ export function deriveFollowupEventsForMessages(
   }
 
   for (const message of sorted) {
-    if (message.direction !== 'inbound') continue;
+    if (inferDirection(message) !== 'inbound') continue;
     if (isSystemAdministrativeMessage(message)) continue;
     if (isAckOnlyInboundMessage(message)) continue;
-    const inboundMs = messageEpoch(message.createdAt);
+    const inboundMs = parseFlexibleTimestamp(message.createdAt);
     if (inboundMs === null) continue;
 
     let latestCandidate: DerivedEvent | null = null;
