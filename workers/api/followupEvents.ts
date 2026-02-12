@@ -401,32 +401,60 @@ export async function backfillFollowupEventsForUser(
   input: { userId: string; batchSize?: number; offset?: number },
 ) {
   const batchSize = Math.max(50, Math.min(1000, input.batchSize ?? 250));
-  const offset = Math.max(0, Number(input.offset ?? 0));
-  let upserted = 0;
-  const conversations = await env.DB.prepare(
-    `SELECT id
-     FROM conversations
-     WHERE user_id = ?
-     ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC
-     LIMIT ? OFFSET ?`,
-  )
-    .bind(input.userId, batchSize, offset)
-    .all<{ id: string }>();
+  const startOffset = Math.max(0, Number(input.offset ?? 0));
 
-  const batch = conversations.results ?? [];
-  for (const row of batch) {
-    const result = await recomputeFollowupEventsForConversation(env, {
-      userId: input.userId,
-      conversationId: row.id,
-    });
-    upserted += result.upserted;
+  const runBatch = async (offset: number) => {
+    let upserted = 0;
+    const conversations = await env.DB.prepare(
+      `SELECT id
+       FROM conversations
+       WHERE user_id = ?
+       ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC
+       LIMIT ? OFFSET ?`,
+    )
+      .bind(input.userId, batchSize, offset)
+      .all<{ id: string }>();
+
+    const batch = conversations.results ?? [];
+    for (const row of batch) {
+      const result = await recomputeFollowupEventsForConversation(env, {
+        userId: input.userId,
+        conversationId: row.id,
+      });
+      upserted += result.upserted;
+    }
+
+    return {
+      scannedConversations: batch.length,
+      upsertedEvents: upserted,
+      hasMore: batch.length === batchSize,
+      nextOffset: offset + batch.length,
+    };
+  };
+
+  if (input.offset !== undefined) {
+    return runBatch(startOffset);
+  }
+
+  let totalScanned = 0;
+  let totalUpserted = 0;
+  let offset = startOffset;
+
+  while (true) {
+    const batchResult = await runBatch(offset);
+    totalScanned += batchResult.scannedConversations;
+    totalUpserted += batchResult.upsertedEvents;
+    offset = batchResult.nextOffset;
+    if (!batchResult.hasMore || batchResult.scannedConversations === 0) {
+      break;
+    }
   }
 
   return {
-    scannedConversations: batch.length,
-    upsertedEvents: upserted,
-    hasMore: batch.length === batchSize,
-    nextOffset: offset + batch.length,
+    scannedConversations: totalScanned,
+    upsertedEvents: totalUpserted,
+    hasMore: false,
+    nextOffset: offset,
   };
 }
 
