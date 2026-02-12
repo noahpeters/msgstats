@@ -398,44 +398,35 @@ export async function recomputeFollowupEventsForConversation(
 
 export async function backfillFollowupEventsForUser(
   env: FollowupEnv,
-  input: { userId: string; batchSize?: number },
+  input: { userId: string; batchSize?: number; offset?: number },
 ) {
   const batchSize = Math.max(50, Math.min(1000, input.batchSize ?? 250));
-  let offset = 0;
-  let scannedConversations = 0;
+  const offset = Math.max(0, Number(input.offset ?? 0));
   let upserted = 0;
-  let hasMore = true;
-  while (hasMore) {
-    const conversations = await env.DB.prepare(
-      `SELECT id
-       FROM conversations
-       WHERE user_id = ?
-       ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC
-       LIMIT ? OFFSET ?`,
-    )
-      .bind(input.userId, batchSize, offset)
-      .all<{ id: string }>();
+  const conversations = await env.DB.prepare(
+    `SELECT id
+     FROM conversations
+     WHERE user_id = ?
+     ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(input.userId, batchSize, offset)
+    .all<{ id: string }>();
 
-    const batch = conversations.results ?? [];
-    if (!batch.length) {
-      hasMore = false;
-      continue;
-    }
-
-    for (const row of batch) {
-      const result = await recomputeFollowupEventsForConversation(env, {
-        userId: input.userId,
-        conversationId: row.id,
-      });
-      upserted += result.upserted;
-    }
-    scannedConversations += batch.length;
-    offset += batch.length;
+  const batch = conversations.results ?? [];
+  for (const row of batch) {
+    const result = await recomputeFollowupEventsForConversation(env, {
+      userId: input.userId,
+      conversationId: row.id,
+    });
+    upserted += result.upserted;
   }
 
   return {
-    scannedConversations,
+    scannedConversations: batch.length,
     upsertedEvents: upserted,
+    hasMore: batch.length === batchSize,
+    nextOffset: offset + batch.length,
   };
 }
 

@@ -3314,7 +3314,11 @@ export function registerRoutes(deps: any) {
     if (!(await isOpsDashboardEnabledForUser(env, userId))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
-    const body = await readJson<{ userId?: string; batchSize?: number }>(req);
+    const body = await readJson<{
+      userId?: string;
+      batchSize?: number;
+      offset?: number;
+    }>(req);
     const targetUserId = body?.userId?.trim();
     if (!targetUserId) {
       return json({ error: 'Missing userId' }, { status: 400 });
@@ -3322,6 +3326,7 @@ export function registerRoutes(deps: any) {
     const result = await backfillFollowupEventsForUser(env, {
       userId: targetUserId,
       batchSize: body?.batchSize,
+      offset: body?.offset,
     });
     return json({ ok: true, ...result, userId: targetUserId });
   });

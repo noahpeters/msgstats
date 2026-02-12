@@ -83,6 +83,8 @@ type FollowupBackfillResult = {
   userId: string;
   scannedConversations: number;
   upsertedEvents: number;
+  hasMore?: boolean;
+  nextOffset?: number;
 };
 
 type HourPoint = {
@@ -631,18 +633,46 @@ export default function OpsDashboard(): React.ReactElement {
       setOpsUsersFollowupBackfilling(targetUserId);
       setOpsUsersError(null);
       try {
-        const response = await fetch('/api/ops/followup/backfill', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: targetUserId, batchSize: 250 }),
-        });
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
-          throw new Error(payload?.error ?? 'Follow-up backfill failed.');
+        let offset = 0;
+        let totalScanned = 0;
+        let totalUpserted = 0;
+        let hasMore = true;
+        let safety = 0;
+        while (hasMore) {
+          safety += 1;
+          if (safety > 2000) {
+            throw new Error('Follow-up backfill stopped: too many pages.');
+          }
+          const response = await fetch('/api/ops/followup/backfill', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: targetUserId,
+              batchSize: 250,
+              offset,
+            }),
+          });
+          if (!response.ok) {
+            const payload = (await response.json().catch(() => null)) as {
+              error?: string;
+            } | null;
+            throw new Error(payload?.error ?? 'Follow-up backfill failed.');
+          }
+          const payload = (await response.json()) as FollowupBackfillResult;
+          totalScanned += Number(payload.scannedConversations ?? 0);
+          totalUpserted += Number(payload.upsertedEvents ?? 0);
+          hasMore = payload.hasMore === true;
+          offset = Number(payload.nextOffset ?? offset);
+          if (hasMore && Number(payload.scannedConversations ?? 0) <= 0) {
+            break;
+          }
         }
-        const payload = (await response.json()) as FollowupBackfillResult;
+        const payload: FollowupBackfillResult = {
+          ok: true,
+          userId: targetUserId,
+          scannedConversations: totalScanned,
+          upsertedEvents: totalUpserted,
+        };
         setFollowupBackfillByUser((prev) => ({
           ...prev,
           [targetUserId]: payload,
