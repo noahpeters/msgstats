@@ -398,58 +398,30 @@ export async function recomputeFollowupEventsForConversation(
 
 export async function backfillFollowupEventsForUser(
   env: FollowupEnv,
-  input: { userId: string; batchSize?: number; offset?: number },
+  input: { userId: string },
 ) {
-  const batchSize = Math.max(50, Math.min(1000, input.batchSize ?? 250));
-  const startOffset = Math.max(0, Number(input.offset ?? 0));
+  const conversations = await env.DB.prepare(
+    `SELECT id
+     FROM conversations
+     WHERE user_id = ?
+     ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC`,
+  )
+    .bind(input.userId)
+    .all<{ id: string }>();
 
-  const runBatch = async (offset: number) => {
-    let upserted = 0;
-    const conversations = await env.DB.prepare(
-      `SELECT id
-       FROM conversations
-       WHERE user_id = ?
-       ORDER BY COALESCE(started_time, last_message_at, updated_time, id) ASC, id ASC
-       LIMIT ? OFFSET ?`,
-    )
-      .bind(input.userId, batchSize, offset)
-      .all<{ id: string }>();
-
-    const batch = conversations.results ?? [];
-    for (const row of batch) {
-      const result = await recomputeFollowupEventsForConversation(env, {
-        userId: input.userId,
-        conversationId: row.id,
-      });
-      upserted += result.upserted;
-    }
-
-    return {
-      scannedConversations: batch.length,
-      upsertedEvents: upserted,
-      hasMore: batch.length === batchSize,
-      nextOffset: offset + batch.length,
-    };
-  };
-
-  let totalScanned = 0;
-  let totalUpserted = 0;
-  let offset = startOffset;
-
-  let hasMore = true;
-  while (hasMore) {
-    const batchResult = await runBatch(offset);
-    totalScanned += batchResult.scannedConversations;
-    totalUpserted += batchResult.upsertedEvents;
-    offset = batchResult.nextOffset;
-    hasMore = batchResult.hasMore && batchResult.scannedConversations > 0;
+  const rows = conversations.results ?? [];
+  let upsertedEvents = 0;
+  for (const row of rows) {
+    const result = await recomputeFollowupEventsForConversation(env, {
+      userId: input.userId,
+      conversationId: row.id,
+    });
+    upsertedEvents += result.upserted;
   }
 
   return {
-    scannedConversations: totalScanned,
-    upsertedEvents: totalUpserted,
-    hasMore: false,
-    nextOffset: offset,
+    scannedConversations: rows.length,
+    upsertedEvents,
   };
 }
 
