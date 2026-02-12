@@ -161,6 +161,8 @@ function FollowupBarChart({
   keyName,
   bucket,
   yMax,
+  ratioByBucket,
+  ratioLineColor,
   onHover,
   onMove,
   onLeave,
@@ -170,6 +172,8 @@ function FollowupBarChart({
   keyName: 'events' | 'revived' | 'immediate_loss';
   bucket: FollowupSeriesResponse['bucket'];
   yMax: number;
+  ratioByBucket?: Map<string, number | null>;
+  ratioLineColor?: string;
   onHover: (
     event: React.MouseEvent<SVGRectElement, MouseEvent>,
     point: FollowupSeriesPoint,
@@ -183,7 +187,8 @@ function FollowupBarChart({
   const yAxisRef = React.useRef<SVGGElement | null>(null);
   const width = chart.width;
   const height = 190;
-  const margin = { top: 10, right: 10, bottom: 28, left: 36 };
+  const hasRatio = Boolean(ratioByBucket);
+  const margin = { top: 10, right: hasRatio ? 42 : 10, bottom: 28, left: 36 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
   const parsed = React.useMemo(
@@ -207,7 +212,38 @@ function FollowupBarChart({
     .domain([0, safeMax])
     .nice()
     .range([innerHeight, 0]);
+  const ratioY = d3.scaleLinear().domain([0, 100]).range([innerHeight, 0]);
   const barWidth = parsed.length ? Math.max(1, innerWidth / parsed.length) : 1;
+  const ratioPoints = React.useMemo(
+    () =>
+      parsed
+        .map((point) => ({
+          d: point.d,
+          value: ratioByBucket?.get(point.t) ?? null,
+        }))
+        .filter((point) => point.value !== null),
+    [parsed, ratioByBucket],
+  );
+  const bucketHoverAreas = React.useMemo(
+    () =>
+      parsed.map((point) => ({
+        point,
+        x: x(point.d) - barWidth / 2,
+        width: Math.max(1, barWidth - 1),
+      })),
+    [barWidth, parsed, x],
+  );
+  const ratioPathD = React.useMemo(() => {
+    if (!hasRatio || ratioPoints.length < 2) {
+      return null;
+    }
+    return ratioPoints
+      .map((point, index) => {
+        const cmd = index === 0 ? 'M' : 'L';
+        return `${cmd} ${x(point.d)} ${ratioY(Number(point.value))}`;
+      })
+      .join(' ');
+  }, [hasRatio, ratioPoints, x, ratioY]);
 
   React.useEffect(() => {
     if (!parsed.length) {
@@ -252,18 +288,82 @@ function FollowupBarChart({
                   height={h}
                   fill="#0f766e"
                   opacity={0.85}
-                  onMouseEnter={(event) => onHover(event, point, point.v)}
-                  onMouseMove={onMove}
-                  onMouseLeave={onLeave}
                 />
               );
             })}
+            {hasRatio && ratioPathD ? (
+              <path
+                fill="none"
+                stroke={ratioLineColor ?? 'rgb(154, 230, 180)'}
+                strokeWidth={1.75}
+                d={ratioPathD}
+              />
+            ) : null}
+            {hasRatio
+              ? ratioPoints.map((point) => (
+                  <circle
+                    key={`ratio-${keyName}-${point.d.toISOString()}`}
+                    cx={x(point.d)}
+                    cy={ratioY(Number(point.value))}
+                    r={2}
+                    fill={ratioLineColor ?? 'rgb(154, 230, 180)'}
+                  />
+                ))
+              : null}
+            {bucketHoverAreas.map(({ point, x: xPos, width: hitWidth }) => (
+              <rect
+                key={`hover-${keyName}-${point.t}`}
+                x={xPos}
+                y={0}
+                width={hitWidth}
+                height={innerHeight}
+                fill="transparent"
+                pointerEvents="all"
+                onMouseEnter={(event) => onHover(event, point, point.v)}
+                onMouseMove={(event) => {
+                  onMove(event);
+                  onHover(event, point, point.v);
+                }}
+                onMouseLeave={onLeave}
+              />
+            ))}
             <g
               ref={xAxisRef}
               transform={`translate(0, ${innerHeight})`}
               style={{ color: '#284b63', fontSize: '11px' }}
             />
             <g ref={yAxisRef} style={{ color: '#284b63', fontSize: '11px' }} />
+            {hasRatio ? (
+              <>
+                <line
+                  x1={innerWidth}
+                  x2={innerWidth}
+                  y1={0}
+                  y2={innerHeight}
+                  stroke={ratioLineColor ?? 'rgb(154, 230, 180)'}
+                  strokeOpacity={0.5}
+                />
+                {[0, 25, 50, 75, 100].map((tick) => (
+                  <g key={`ratio-tick-${tick}`}>
+                    <line
+                      x1={innerWidth}
+                      x2={innerWidth + 4}
+                      y1={ratioY(tick)}
+                      y2={ratioY(tick)}
+                      stroke={ratioLineColor ?? 'rgb(154, 230, 180)'}
+                    />
+                    <text
+                      x={innerWidth + 6}
+                      y={ratioY(tick) + 4}
+                      fontSize="10"
+                      fill={ratioLineColor ?? 'rgb(154, 230, 180)'}
+                    >
+                      {tick}%
+                    </text>
+                  </g>
+                ))}
+              </>
+            ) : null}
           </g>
         </svg>
       </div>
@@ -996,6 +1096,30 @@ export default function Dashboard(): React.ReactElement {
       ),
     [followupSeries],
   );
+  const followupRevivalRatioByBucket = React.useMemo(
+    () =>
+      new Map(
+        followupSeries.map((point) => [
+          point.t,
+          point.events > 0
+            ? Math.round((point.revived / point.events) * 1000) / 10
+            : null,
+        ]),
+      ),
+    [followupSeries],
+  );
+  const followupImmediateLossRatioByBucket = React.useMemo(
+    () =>
+      new Map(
+        followupSeries.map((point) => [
+          point.t,
+          point.events > 0
+            ? Math.round((point.immediate_loss / point.events) * 1000) / 10
+            : null,
+        ]),
+      ),
+    [followupSeries],
+  );
   const followupBucketFormatter = new Intl.DateTimeFormat('en', {
     month: 'short',
     day: 'numeric',
@@ -1275,10 +1399,18 @@ export default function Dashboard(): React.ReactElement {
             keyName="revived"
             bucket={followupBucket}
             yMax={followupSharedMax}
+            ratioByBucket={followupRevivalRatioByBucket}
+            ratioLineColor="rgb(154, 230, 180)"
             onHover={(event, point, value) =>
               showFollowupTooltip(event, {
                 title: followupBucketFormatter.format(new Date(point.t)),
-                lines: [`Revived: ${value}`, point.t],
+                lines: [
+                  `Revived: ${value}`,
+                  `Revival rate: ${
+                    followupRevivalRatioByBucket.get(point.t) ?? 0
+                  }%`,
+                  point.t,
+                ],
               })
             }
             onMove={moveFollowupTooltip}
@@ -1290,10 +1422,18 @@ export default function Dashboard(): React.ReactElement {
             keyName="immediate_loss"
             bucket={followupBucket}
             yMax={followupSharedMax}
+            ratioByBucket={followupImmediateLossRatioByBucket}
+            ratioLineColor="rgb(154, 230, 180)"
             onHover={(event, point, value) =>
               showFollowupTooltip(event, {
                 title: followupBucketFormatter.format(new Date(point.t)),
-                lines: [`Immediate loss: ${value}`, point.t],
+                lines: [
+                  `Immediate loss: ${value}`,
+                  `Immediate loss rate: ${
+                    followupImmediateLossRatioByBucket.get(point.t) ?? 0
+                  }%`,
+                  point.t,
+                ],
               })
             }
             onMove={moveFollowupTooltip}
