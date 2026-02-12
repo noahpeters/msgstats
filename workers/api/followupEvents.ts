@@ -79,6 +79,15 @@ function messageEpoch(iso: string): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+function parseFlexibleTimestamp(value: string | null): number | null {
+  if (!value) return null;
+  let ms = Date.parse(value);
+  if (!Number.isNaN(ms)) return ms;
+  const normalized = value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 export function isSystemAdministrativeMessage(message: {
   senderType: string | null;
   messageType: string | null;
@@ -555,19 +564,6 @@ function addBucket(value: Date, bucket: BucketKey): Date {
   return d;
 }
 
-function bucketSqlExpr(bucket: BucketKey): string {
-  if (bucket === 'hour') {
-    return "strftime('%Y-%m-%dT%H:00:00Z', followup_sent_at)";
-  }
-  if (bucket === 'day') {
-    return "strftime('%Y-%m-%dT00:00:00Z', followup_sent_at)";
-  }
-  if (bucket === 'week') {
-    return "strftime('%Y-%m-%dT00:00:00Z', date(followup_sent_at, '-' || ((cast(strftime('%w', followup_sent_at) as integer) + 6) % 7) || ' days'))";
-  }
-  return "strftime('%Y-%m-01T00:00:00Z', followup_sent_at)";
-}
-
 export async function getFollowupSeries(
   env: FollowupEnv,
   input: {
@@ -580,38 +576,54 @@ export async function getFollowupSeries(
   const parsedRange = parseRange(input.range);
   const parsedBucket = parseBucket(input.bucket, parsedRange.key);
   const now = input.now ?? new Date();
+  const nowMs = now.getTime();
   const end = floorBucket(now, parsedBucket);
   const start = floorBucket(
     new Date(end.getTime() - parsedRange.ms + 60 * 1000),
     parsedBucket,
   );
+  const startMs = start.getTime();
 
-  const where: string[] = ['followup_sent_at >= ?', 'followup_sent_at <= ?'];
-  const bindings: unknown[] = [start.toISOString(), now.toISOString()];
+  const where: string[] = [];
+  const bindings: unknown[] = [];
   if (input.userId) {
     where.push('user_id = ?');
     bindings.push(input.userId);
   }
 
-  const rows = await env.DB.prepare(
-    `SELECT ${bucketSqlExpr(parsedBucket)} as t,
-            COUNT(*) as events,
-            SUM(CASE WHEN revived = 1 THEN 1 ELSE 0 END) as revived,
-            SUM(CASE WHEN immediate_loss = 1 THEN 1 ELSE 0 END) as immediateLoss
-     FROM followup_events
-     WHERE ${where.join(' AND ')}
-     GROUP BY t
-     ORDER BY t ASC`,
-  )
+  const sql = `SELECT followup_sent_at as followupSentAt,
+                      revived,
+                      immediate_loss as immediateLoss
+               FROM followup_events${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`;
+
+  const rows = await env.DB.prepare(sql)
     .bind(...bindings)
     .all<{
-      t: string;
-      events: number;
+      followupSentAt: string | null;
       revived: number;
       immediateLoss: number;
     }>();
 
-  const byBucket = new Map((rows.results ?? []).map((row) => [row.t, row]));
+  const byBucket = new Map<
+    string,
+    { events: number; revived: number; immediateLoss: number }
+  >();
+  for (const row of rows.results ?? []) {
+    const followupMs = parseFlexibleTimestamp(row.followupSentAt);
+    if (followupMs === null || followupMs < startMs || followupMs > nowMs) {
+      continue;
+    }
+    const key = floorBucket(new Date(followupMs), parsedBucket).toISOString();
+    const current = byBucket.get(key) ?? {
+      events: 0,
+      revived: 0,
+      immediateLoss: 0,
+    };
+    current.events += 1;
+    current.revived += Number(row.revived ?? 0) > 0 ? 1 : 0;
+    current.immediateLoss += Number(row.immediateLoss ?? 0) > 0 ? 1 : 0;
+    byBucket.set(key, current);
+  }
 
   const series: Array<{
     t: string;

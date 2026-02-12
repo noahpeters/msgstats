@@ -1,6 +1,9 @@
 import * as React from 'react';
+import * as d3 from 'd3';
 import * as stylex from '@stylexjs/stylex';
 import { layout, colors } from '../app/styles';
+import { ChartTooltip } from '../components/charts/ChartTooltip';
+import { useChartTooltip } from '../components/charts/useChartTooltip';
 import {
   buildSyncRunsWsUrl,
   buildSyncRunKey,
@@ -130,53 +133,148 @@ const defaultBucketForRange = (range: FollowupSeriesResponse['range']) => {
   return 'day';
 };
 
-function FollowupBarPlot({
+function useContainerWidth(defaultWidth = 520) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = React.useState(defaultWidth);
+
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = Math.floor(
+        entries[0]?.contentRect.width ?? defaultWidth,
+      );
+      if (nextWidth > 0) {
+        setWidth(nextWidth);
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [defaultWidth]);
+
+  return { ref, width: Math.max(320, width) };
+}
+
+function FollowupBarChart({
   title,
   points,
   keyName,
+  bucket,
+  yMax,
+  onHover,
+  onMove,
+  onLeave,
 }: {
   title: string;
   points: FollowupSeriesPoint[];
   keyName: 'events' | 'revived' | 'immediate_loss';
+  bucket: FollowupSeriesResponse['bucket'];
+  yMax: number;
+  onHover: (
+    event: React.MouseEvent<SVGRectElement, MouseEvent>,
+    point: FollowupSeriesPoint,
+    value: number,
+  ) => void;
+  onMove: (event: React.MouseEvent<SVGRectElement, MouseEvent>) => void;
+  onLeave: () => void;
 }) {
-  const max = Math.max(
-    1,
-    ...points.map((point) => Number(point[keyName] ?? 0)),
+  const chart = useContainerWidth(520);
+  const width = chart.width;
+  const height = 190;
+  const margin = { top: 10, right: 10, bottom: 28, left: 36 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const parsed = React.useMemo(
+    () =>
+      points.map((point) => ({
+        ...point,
+        d: new Date(point.t),
+        v: Number(point[keyName] ?? 0),
+      })),
+    [points, keyName],
   );
+  const firstDate = parsed[0]?.d ?? new Date();
+  const lastDate = parsed[parsed.length - 1]?.d ?? firstDate;
+  const safeMax = Math.max(1, yMax);
+  const x = d3
+    .scaleTime()
+    .domain([firstDate, lastDate])
+    .range([0, Math.max(1, innerWidth)]);
+  const y = d3
+    .scaleLinear()
+    .domain([0, safeMax])
+    .nice()
+    .range([innerHeight, 0]);
+  const barWidth = parsed.length ? Math.max(1, innerWidth / parsed.length) : 1;
+  const xTicks: Date[] =
+    parsed.length > 1
+      ? (
+          x as unknown as {
+            ticks: (count: number) => Date[];
+          }
+        ).ticks(6)
+      : [];
+  const tickFormat =
+    bucket === 'hour'
+      ? d3.timeFormat('%H:%M')
+      : bucket === 'month'
+        ? d3.timeFormat('%b %Y')
+        : d3.timeFormat('%b %d');
+
   return (
     <div style={assetTileStyle}>
       <h3 style={{ margin: 0, fontSize: '14px' }}>{title}</h3>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'flex-end',
-          gap: '2px',
-          minHeight: '120px',
-          marginTop: '8px',
-        }}
-      >
-        {points.map((point) => {
-          const value = Number(point[keyName] ?? 0);
-          const height = `${Math.max(0, (value / max) * 100)}%`;
-          return (
-            <div
-              key={`${keyName}-${point.t}`}
-              title={`${new Date(point.t).toLocaleString()} · ${value}`}
-              style={{
-                flex: 1,
-                minWidth: '2px',
-                height,
-                backgroundColor: '#0f766e',
-                borderRadius: '2px 2px 0 0',
-                opacity: 0.85,
-              }}
-            />
-          );
-        })}
+      <div ref={chart.ref} style={{ width: '100%', minHeight: '170px' }}>
+        <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <g transform={`translate(${margin.left}, ${margin.top})`}>
+            {parsed.map((point) => {
+              const xPos = x(point.d) - barWidth / 2;
+              const yPos = y(point.v);
+              const h = Math.max(0, innerHeight - yPos);
+              return (
+                <rect
+                  key={`${keyName}-${point.t}`}
+                  x={xPos}
+                  y={yPos}
+                  width={Math.max(1, barWidth - 1)}
+                  height={h}
+                  fill="#0f766e"
+                  opacity={0.85}
+                  onMouseEnter={(event) => onHover(event, point, point.v)}
+                  onMouseMove={onMove}
+                  onMouseLeave={onLeave}
+                />
+              );
+            })}
+            {parsed.length > 1
+              ? xTicks.map((tick: Date) => (
+                  <text
+                    key={`tick-${keyName}-${tick.toISOString()}`}
+                    x={x(tick)}
+                    y={innerHeight + 18}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="#284b63"
+                  >
+                    {tickFormat(tick)}
+                  </text>
+                ))
+              : null}
+            {[0, safeMax].map((tick) => (
+              <text
+                key={`y-${keyName}-${tick}`}
+                x={-8}
+                y={y(tick) + 4}
+                textAnchor="end"
+                fontSize="11"
+                fill="#284b63"
+              >
+                {tick}
+              </text>
+            ))}
+          </g>
+        </svg>
       </div>
-      <p {...stylex.props(layout.note)} style={{ margin: 0 }}>
-        Max {max}
-      </p>
     </div>
   );
 }
@@ -429,6 +527,12 @@ export default function Dashboard(): React.ReactElement {
   } | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const {
+    tooltip: followupTooltip,
+    show: showFollowupTooltip,
+    move: moveFollowupTooltip,
+    hide: hideFollowupTooltip,
+  } = useChartTooltip();
 
   const refreshAuth = React.useCallback(
     async (force = false) => {
@@ -890,6 +994,21 @@ export default function Dashboard(): React.ReactElement {
 
   const showDegradedBanner =
     hasPermissionIssue || failedRuns > 0 || delayedSync;
+  const followupSharedMax = React.useMemo(
+    () =>
+      Math.max(
+        1,
+        ...followupSeries.map((point) =>
+          Math.max(point.events, point.revived, point.immediate_loss),
+        ),
+      ),
+    [followupSeries],
+  );
+  const followupBucketFormatter = new Intl.DateTimeFormat('en', {
+    month: 'short',
+    day: 'numeric',
+    hour: followupBucket === 'hour' ? 'numeric' : undefined,
+  });
 
   return (
     <div style={{ display: 'grid', gap: '18px' }}>
@@ -1143,22 +1262,53 @@ export default function Dashboard(): React.ReactElement {
           </div>
         </div>
         <div style={assetGridStyle}>
-          <FollowupBarPlot
+          <FollowupBarChart
             title="Follow-up events"
             points={followupSeries}
             keyName="events"
+            bucket={followupBucket}
+            yMax={followupSharedMax}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Events: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
           />
-          <FollowupBarPlot
+          <FollowupBarChart
             title="Revived"
             points={followupSeries}
             keyName="revived"
+            bucket={followupBucket}
+            yMax={followupSharedMax}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Revived: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
           />
-          <FollowupBarPlot
+          <FollowupBarChart
             title="Immediate loss"
             points={followupSeries}
             keyName="immediate_loss"
+            bucket={followupBucket}
+            yMax={followupSharedMax}
+            onHover={(event, point, value) =>
+              showFollowupTooltip(event, {
+                title: followupBucketFormatter.format(new Date(point.t)),
+                lines: [`Immediate loss: ${value}`, point.t],
+              })
+            }
+            onMove={moveFollowupTooltip}
+            onLeave={hideFollowupTooltip}
           />
         </div>
+        <ChartTooltip tooltip={followupTooltip} />
       </section>
 
       {showBusinessesCard ? (

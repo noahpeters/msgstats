@@ -3293,17 +3293,13 @@ export function registerRoutes(deps: any) {
     const url = new URL(req.url);
     const range = url.searchParams.get('range');
     const bucket = url.searchParams.get('bucket');
-    const requestedUserId = url.searchParams.get('userId')?.trim() || null;
-    const targetUserId = requestedUserId || userId;
-    if (targetUserId !== userId) {
-      const opsEnabled = await isOpsDashboardEnabledForUser(env, userId);
-      if (!opsEnabled) {
-        return json({ error: 'Not found' }, { status: 404 });
-      }
+    const requestedUserId = url.searchParams.get('userId')?.trim();
+    if (requestedUserId && requestedUserId !== userId) {
+      return json({ error: 'Not found' }, { status: 404 });
     }
 
     const series = await getFollowupSeries(env, {
-      userId: targetUserId,
+      userId,
       range,
       bucket,
     });
