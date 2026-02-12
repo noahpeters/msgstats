@@ -634,7 +634,7 @@ export default function OpsDashboard(): React.ReactElement {
         const response = await fetch('/api/ops/followup/backfill', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: targetUserId, limit: 1000 }),
+          body: JSON.stringify({ userId: targetUserId, batchSize: 250 }),
         });
         if (!response.ok) {
           const payload = (await response.json().catch(() => null)) as {

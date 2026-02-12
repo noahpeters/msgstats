@@ -179,6 +179,8 @@ function FollowupBarChart({
   onLeave: () => void;
 }) {
   const chart = useContainerWidth(520);
+  const xAxisRef = React.useRef<SVGGElement | null>(null);
+  const yAxisRef = React.useRef<SVGGElement | null>(null);
   const width = chart.width;
   const height = 190;
   const margin = { top: 10, right: 10, bottom: 28, left: 36 };
@@ -206,20 +208,29 @@ function FollowupBarChart({
     .nice()
     .range([innerHeight, 0]);
   const barWidth = parsed.length ? Math.max(1, innerWidth / parsed.length) : 1;
-  const xTicks: Date[] =
-    parsed.length > 1
-      ? (
-          x as unknown as {
-            ticks: (count: number) => Date[];
-          }
-        ).ticks(6)
-      : [];
-  const tickFormat =
-    bucket === 'hour'
-      ? d3.timeFormat('%H:%M')
-      : bucket === 'month'
-        ? d3.timeFormat('%b %Y')
-        : d3.timeFormat('%b %d');
+
+  React.useEffect(() => {
+    if (!parsed.length) {
+      return;
+    }
+    const xTickFormat =
+      bucket === 'hour'
+        ? d3.timeFormat('%H:%M')
+        : bucket === 'month'
+          ? d3.timeFormat('%b %Y')
+          : d3.timeFormat('%b %d');
+    const xAxis = d3
+      .axisBottom(x)
+      .ticks(Math.max(3, Math.min(6, parsed.length)))
+      .tickFormat(xTickFormat as (d: Date) => string);
+    const yAxis = d3.axisLeft(y).ticks(4).tickFormat(d3.format('~s'));
+    if (xAxisRef.current) {
+      d3.select(xAxisRef.current).call(xAxis);
+    }
+    if (yAxisRef.current) {
+      d3.select(yAxisRef.current).call(yAxis);
+    }
+  }, [bucket, parsed, x, y]);
 
   return (
     <div style={assetTileStyle}>
@@ -230,7 +241,8 @@ function FollowupBarChart({
             {parsed.map((point) => {
               const xPos = x(point.d) - barWidth / 2;
               const yPos = y(point.v);
-              const h = Math.max(0, innerHeight - yPos);
+              const h =
+                point.v <= 0 ? 0 : Math.max(1, Math.round(innerHeight - yPos));
               return (
                 <rect
                   key={`${keyName}-${point.t}`}
@@ -246,32 +258,12 @@ function FollowupBarChart({
                 />
               );
             })}
-            {parsed.length > 1
-              ? xTicks.map((tick: Date) => (
-                  <text
-                    key={`tick-${keyName}-${tick.toISOString()}`}
-                    x={x(tick)}
-                    y={innerHeight + 18}
-                    textAnchor="middle"
-                    fontSize="11"
-                    fill="#284b63"
-                  >
-                    {tickFormat(tick)}
-                  </text>
-                ))
-              : null}
-            {[0, safeMax].map((tick) => (
-              <text
-                key={`y-${keyName}-${tick}`}
-                x={-8}
-                y={y(tick) + 4}
-                textAnchor="end"
-                fontSize="11"
-                fill="#284b63"
-              >
-                {tick}
-              </text>
-            ))}
+            <g
+              ref={xAxisRef}
+              transform={`translate(0, ${innerHeight})`}
+              style={{ color: '#284b63', fontSize: '11px' }}
+            />
+            <g ref={yAxisRef} style={{ color: '#284b63', fontSize: '11px' }} />
           </g>
         </svg>
       </div>
