@@ -440,14 +440,13 @@ export async function backfillFollowupEventsForUser(
   let totalUpserted = 0;
   let offset = startOffset;
 
-  while (true) {
+  let hasMore = true;
+  while (hasMore) {
     const batchResult = await runBatch(offset);
     totalScanned += batchResult.scannedConversations;
     totalUpserted += batchResult.upsertedEvents;
     offset = batchResult.nextOffset;
-    if (!batchResult.hasMore || batchResult.scannedConversations === 0) {
-      break;
-    }
+    hasMore = batchResult.hasMore && batchResult.scannedConversations > 0;
   }
 
   return {
