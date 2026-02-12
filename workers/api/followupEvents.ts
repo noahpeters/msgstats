@@ -432,10 +432,6 @@ export async function backfillFollowupEventsForUser(
     };
   };
 
-  if (input.offset !== undefined) {
-    return runBatch(startOffset);
-  }
-
   let totalScanned = 0;
   let totalUpserted = 0;
   let offset = startOffset;
