@@ -3316,8 +3316,6 @@ export function registerRoutes(deps: any) {
     }
     const body = await readJson<{
       userId?: string;
-      batchSize?: number;
-      offset?: number;
     }>(req);
     const targetUserId = body?.userId?.trim();
     if (!targetUserId) {
@@ -3325,8 +3323,6 @@ export function registerRoutes(deps: any) {
     }
     const result = await backfillFollowupEventsForUser(env, {
       userId: targetUserId,
-      batchSize: body?.batchSize,
-      offset: body?.offset,
     });
     return json({ ok: true, ...result, userId: targetUserId });
   });
