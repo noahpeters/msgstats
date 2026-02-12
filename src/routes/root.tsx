@@ -3,6 +3,7 @@ import { Link, Navigate, Outlet, useLocation } from 'react-router';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
+import { FromTreesIcon } from '../components/FromTreesIcon';
 
 type AuthResponse = {
   authenticated: boolean;
@@ -17,7 +18,6 @@ export type AppShellOutletContext = {
 
 const LOGIN_NEXT_STORAGE_KEY = 'msgstats:auth:next';
 const shellLayoutVars = {
-  headerHeight: '172px',
   footerHeight: '84px',
   dividerColor: 'rgba(12, 27, 26, 0.14)',
 };
@@ -37,10 +37,12 @@ const bannerStyles = stylex.create({
 });
 
 const headerStyles = stylex.create({
-  brand: {
+  brandLink: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: '8px',
+    justifyContent: 'center',
+    textDecoration: 'none',
+    color: 'inherit',
   },
   accountName: {
     fontSize: '13px',
@@ -57,14 +59,13 @@ const headerStyles = stylex.create({
 const shellStyles = stylex.create({
   root: {
     display: 'grid',
-    gridTemplateRows: `${shellLayoutVars.headerHeight} minmax(0, 1fr) ${shellLayoutVars.footerHeight}`,
+    gridTemplateRows: `auto minmax(0, 1fr) ${shellLayoutVars.footerHeight}`,
     minHeight: '100vh',
     backgroundColor: '#ffffff',
     color: '#0c1b1a',
     fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
   },
   header: {
-    minHeight: shellLayoutVars.headerHeight,
     borderBottom: `1px solid ${shellLayoutVars.dividerColor}`,
     padding: '12px 16px',
     display: 'grid',
@@ -132,7 +133,6 @@ const shellStyles = stylex.create({
   },
   main: {
     minHeight: 0,
-    height: `calc(100vh - ${shellLayoutVars.headerHeight} - ${shellLayoutVars.footerHeight})`,
     overflow: 'auto',
     borderTopWidth: '1px',
     borderTopStyle: 'solid',
@@ -189,6 +189,8 @@ const sanitizeNext = (value: string | null): string => {
 export default function RootRoute(): React.ReactElement {
   const location = useLocation();
   const isEdgeToEdgeInbox = location.pathname === '/inbox';
+  const showToolbar =
+    location.pathname !== '/' && location.pathname !== '/ops-dashboard';
   const [flags, setFlags] = React.useState<{
     followupInbox?: boolean;
     opsDashboard?: boolean;
@@ -347,10 +349,9 @@ export default function RootRoute(): React.ReactElement {
         ) : null}
 
         <div {...stylex.props(shellStyles.headerTopRow)}>
-          <div {...stylex.props(headerStyles.brand)}>
-            <div {...stylex.props(layout.badge)}>Messaging insights</div>
-            <span style={{ fontSize: '13px', color: '#284b63' }}>msgstats</span>
-          </div>
+          <Link to="/" {...stylex.props(headerStyles.brandLink)}>
+            <FromTreesIcon size={32} />
+          </Link>
           <nav {...stylex.props(shellStyles.pageTabs)} aria-label="Primary">
             <Link
               to="/"
@@ -410,14 +411,18 @@ export default function RootRoute(): React.ReactElement {
             </button>
           </div>
         </div>
-        <div {...stylex.props(shellStyles.horizontalDivider)} />
-        <div {...stylex.props(shellStyles.toolbarRow)}>
-          {toolbarContent ?? (
-            <span {...stylex.props(headerStyles.toolbarHint)}>
-              Track conversation quality across Messenger and Instagram.
-            </span>
-          )}
-        </div>
+        {showToolbar ? (
+          <>
+            <div {...stylex.props(shellStyles.horizontalDivider)} />
+            <div {...stylex.props(shellStyles.toolbarRow)}>
+              {toolbarContent ?? (
+                <span {...stylex.props(headerStyles.toolbarHint)}>
+                  Track conversation quality across Messenger and Instagram.
+                </span>
+              )}
+            </div>
+          </>
+        ) : null}
       </header>
 
       <main {...stylex.props(shellStyles.main)}>

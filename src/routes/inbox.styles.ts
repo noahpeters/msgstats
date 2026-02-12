@@ -45,6 +45,14 @@ export const inboxStyles = stylex.create({
     gap: '12px',
     paddingBottom: '6px',
   },
+  brandLink: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textDecoration: 'none',
+    color: 'inherit',
+    flexShrink: 0,
+  },
   horizontalDivider: {
     height: '1px',
     width: '100%',

@@ -3,6 +3,7 @@ import { Link, useLocation, useSearchParams } from 'react-router';
 import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
+import { FromTreesIcon } from '../components/FromTreesIcon';
 import { Toast, type ToastTone } from '../components/Toast';
 import { inboxStyles } from './inbox.styles';
 import {
@@ -2244,6 +2245,9 @@ export default function Inbox(): React.ReactElement {
     <div {...stylex.props(inboxStyles.root)}>
       <header {...stylex.props(inboxStyles.header)}>
         <div {...stylex.props(inboxStyles.headerTopRow)}>
+          <Link to="/" {...stylex.props(inboxStyles.brandLink)}>
+            <FromTreesIcon size={32} />
+          </Link>
           <nav {...stylex.props(inboxStyles.pageTabs)} aria-label="Primary">
             <Link
               to="/"
