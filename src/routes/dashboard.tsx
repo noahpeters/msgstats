@@ -73,6 +73,19 @@ type SyncRun = {
   messages: number;
 };
 
+type FollowupSeriesPoint = {
+  t: string;
+  events: number;
+  revived: number;
+  immediate_loss: number;
+};
+
+type FollowupSeriesResponse = {
+  bucket: 'hour' | 'day' | 'week' | 'month';
+  range: '24h' | '7d' | '30d' | '90d';
+  series: FollowupSeriesPoint[];
+};
+
 const dashboardTokens = {
   dividerColor: 'rgba(12, 27, 26, 0.14)',
 } as const;
@@ -110,6 +123,63 @@ const formatSyncStatus = (status: string) => {
   if (status === 'failed') return 'Last sync failed';
   return 'Last sync';
 };
+
+const defaultBucketForRange = (range: FollowupSeriesResponse['range']) => {
+  if (range === '24h') return 'hour';
+  if (range === '90d') return 'week';
+  return 'day';
+};
+
+function FollowupBarPlot({
+  title,
+  points,
+  keyName,
+}: {
+  title: string;
+  points: FollowupSeriesPoint[];
+  keyName: 'events' | 'revived' | 'immediate_loss';
+}) {
+  const max = Math.max(
+    1,
+    ...points.map((point) => Number(point[keyName] ?? 0)),
+  );
+  return (
+    <div style={assetTileStyle}>
+      <h3 style={{ margin: 0, fontSize: '14px' }}>{title}</h3>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: '2px',
+          minHeight: '120px',
+          marginTop: '8px',
+        }}
+      >
+        {points.map((point) => {
+          const value = Number(point[keyName] ?? 0);
+          const height = `${Math.max(0, (value / max) * 100)}%`;
+          return (
+            <div
+              key={`${keyName}-${point.t}`}
+              title={`${new Date(point.t).toLocaleString()} · ${value}`}
+              style={{
+                flex: 1,
+                minWidth: '2px',
+                height,
+                backgroundColor: '#0f766e',
+                borderRadius: '2px 2px 0 0',
+                opacity: 0.85,
+              }}
+            />
+          );
+        })}
+      </div>
+      <p {...stylex.props(layout.note)} style={{ margin: 0 }}>
+        Max {max}
+      </p>
+    </div>
+  );
+}
 
 const assetGridStyle: React.CSSProperties = {
   display: 'grid',
@@ -192,6 +262,29 @@ const dashboardStyles = stylex.create({
     color: '#7c2d12',
     fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
     fontSize: '14px',
+  },
+  chartControls: {
+    display: 'inline-flex',
+    gap: '8px',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  chartControl: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '12px',
+    color: '#284b63',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+  },
+  select: {
+    border: '1px solid rgba(12, 27, 26, 0.2)',
+    borderRadius: '8px',
+    backgroundColor: '#fff',
+    color: '#0c1b1a',
+    fontSize: '12px',
+    padding: '4px 8px',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
   },
 });
 
@@ -323,6 +416,13 @@ export default function Dashboard(): React.ReactElement {
   const loadedIgAssets = React.useRef(new Set<string>());
   const [followupCount, setFollowupCount] =
     React.useState<FollowupCount | null>(null);
+  const [followupRange, setFollowupRange] =
+    React.useState<FollowupSeriesResponse['range']>('30d');
+  const [followupBucket, setFollowupBucket] =
+    React.useState<FollowupSeriesResponse['bucket']>('day');
+  const [followupSeries, setFollowupSeries] = React.useState<
+    FollowupSeriesPoint[]
+  >([]);
   const [flags, setFlags] = React.useState<{
     followupInbox?: boolean;
     opsDashboard?: boolean;
@@ -407,6 +507,28 @@ export default function Dashboard(): React.ReactElement {
     setFlags(data ?? null);
   }, [fetchJson]);
 
+  const refreshFollowupSeries = React.useCallback(
+    async (force = false) => {
+      const params = new URLSearchParams({
+        range: followupRange,
+        bucket: followupBucket,
+      });
+      const { ok, data } = await fetchJson<FollowupSeriesResponse>(
+        `/api/ops/followup/series?${params.toString()}`,
+        undefined,
+        {
+          force,
+          key: `GET:/api/ops/followup/series?${params.toString()}`,
+        },
+      );
+      if (!ok) {
+        return;
+      }
+      setFollowupSeries(data?.series ?? []);
+    },
+    [fetchJson, followupBucket, followupRange],
+  );
+
   React.useEffect(() => {
     void refreshAuth();
     void refreshPermissions();
@@ -418,7 +540,12 @@ export default function Dashboard(): React.ReactElement {
     if (flags?.followupInbox) {
       void refreshFollowupCount(true);
     }
-  }, [flags?.followupInbox, refreshFollowupCount]);
+    void refreshFollowupSeries(true);
+  }, [flags?.followupInbox, refreshFollowupCount, refreshFollowupSeries]);
+
+  React.useEffect(() => {
+    void refreshFollowupSeries();
+  }, [refreshFollowupSeries]);
 
   const mergeRunUpdate = React.useCallback((run: SyncRun) => {
     setSyncRuns((prev) => {
@@ -792,6 +919,7 @@ export default function Dashboard(): React.ReactElement {
                     refreshPermissions(true),
                     refreshAssets(true),
                     refreshFollowupCount(true),
+                    refreshFollowupSeries(true),
                   ]);
                 }}
               >
@@ -957,6 +1085,79 @@ export default function Dashboard(): React.ReactElement {
               </a>
             </div>
           ) : null}
+        </div>
+      </section>
+
+      <section {...stylex.props(dashboardStyles.card)}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '10px',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0 }}>Follow-up Analytics</h2>
+            <p {...stylex.props(layout.note)} style={{ margin: '6px 0 0 0' }}>
+              Follow-up events, revived outcomes, and immediate loss.
+            </p>
+          </div>
+          <div {...stylex.props(dashboardStyles.chartControls)}>
+            <label {...stylex.props(dashboardStyles.chartControl)}>
+              Range
+              <select
+                {...stylex.props(dashboardStyles.select)}
+                value={followupRange}
+                onChange={(event) => {
+                  const nextRange = event.target
+                    .value as FollowupSeriesResponse['range'];
+                  setFollowupRange(nextRange);
+                  setFollowupBucket(defaultBucketForRange(nextRange));
+                }}
+              >
+                <option value="24h">24h</option>
+                <option value="7d">7d</option>
+                <option value="30d">30d</option>
+                <option value="90d">90d</option>
+              </select>
+            </label>
+            <label {...stylex.props(dashboardStyles.chartControl)}>
+              Bucket
+              <select
+                {...stylex.props(dashboardStyles.select)}
+                value={followupBucket}
+                onChange={(event) =>
+                  setFollowupBucket(
+                    event.target.value as FollowupSeriesResponse['bucket'],
+                  )
+                }
+              >
+                <option value="hour">Hour</option>
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month">Month</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div style={assetGridStyle}>
+          <FollowupBarPlot
+            title="Follow-up events"
+            points={followupSeries}
+            keyName="events"
+          />
+          <FollowupBarPlot
+            title="Revived"
+            points={followupSeries}
+            keyName="revived"
+          />
+          <FollowupBarPlot
+            title="Immediate loss"
+            points={followupSeries}
+            keyName="immediate_loss"
+          />
         </div>
       </section>
 

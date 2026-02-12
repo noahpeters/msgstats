@@ -3290,13 +3290,17 @@ export function registerRoutes(deps: any) {
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isOpsDashboardEnabledForUser(env, userId))) {
-      return json({ error: 'Not found' }, { status: 404 });
-    }
     const url = new URL(req.url);
     const range = url.searchParams.get('range');
     const bucket = url.searchParams.get('bucket');
-    const targetUserId = url.searchParams.get('userId')?.trim() || null;
+    const requestedUserId = url.searchParams.get('userId')?.trim() || null;
+    const targetUserId = requestedUserId || userId;
+    if (targetUserId !== userId) {
+      const opsEnabled = await isOpsDashboardEnabledForUser(env, userId);
+      if (!opsEnabled) {
+        return json({ error: 'Not found' }, { status: 404 });
+      }
+    }
 
     const series = await getFollowupSeries(env, {
       userId: targetUserId,
