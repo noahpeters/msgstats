@@ -610,11 +610,11 @@ export default function Dashboard(): React.ReactElement {
         bucket: followupBucket,
       });
       const { ok, data } = await fetchJson<FollowupSeriesResponse>(
-        `/api/ops/followup/series?${params.toString()}`,
+        `/api/followup/series?${params.toString()}`,
         undefined,
         {
           force,
-          key: `GET:/api/ops/followup/series?${params.toString()}`,
+          key: `GET:/api/followup/series?${params.toString()}`,
         },
       );
       if (!ok) {

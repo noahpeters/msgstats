@@ -3285,7 +3285,7 @@ export function registerRoutes(deps: any) {
     return json({ hours, points });
   });
 
-  addRoute('GET', '/api/ops/followup/series', async (req, env) => {
+  addRoute('GET', '/api/followup/series', async (req, env) => {
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
@@ -3327,7 +3327,7 @@ export function registerRoutes(deps: any) {
     return json({ ok: true, ...result, userId: targetUserId });
   });
 
-  addRoute('POST', '/api/ops/followup/repair-loss', async (req, env) => {
+  addRoute('POST', '/api/followup/repair-loss', async (req, env) => {
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
