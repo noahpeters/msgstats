@@ -3,7 +3,11 @@ type ApiEnv = {
 };
 
 function shouldProxy(pathname: string) {
-  return pathname.startsWith('/api/') || pathname === '/auth/facebook/deletion';
+  return (
+    pathname.startsWith('/api/') ||
+    pathname.startsWith('/auth/') ||
+    pathname === '/auth/facebook/deletion'
+  );
 }
 
 function buildProxyRequest(request: Request, pathname: string) {

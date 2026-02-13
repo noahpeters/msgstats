@@ -2,12 +2,17 @@ export const buildSyncRunsWsUrl = (
   hostname: string,
   protocol: string,
   host: string,
+  accessToken?: string | null,
 ) => {
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
     return 'ws://localhost:8789';
   }
   const wsProtocol = protocol === 'https:' ? 'wss' : 'ws';
-  return `${wsProtocol}://${host}/sync/runs/subscribe`;
+  const base = `${wsProtocol}://${host}/sync/runs/subscribe`;
+  if (!accessToken) {
+    return base;
+  }
+  return `${base}?access_token=${encodeURIComponent(accessToken)}`;
 };
 
 export const sendSyncRunsSubscribe = (

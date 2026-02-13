@@ -14,6 +14,7 @@ import {
   renderTemplate,
   type TemplateRenderContext,
 } from '../templates/renderTemplate';
+import { getAccessToken } from '../lib/authClient';
 
 const palette = {
   ink: '#0c1b1a',
@@ -368,7 +369,12 @@ const formatBytes = (value: number | null | undefined) => {
 const buildInboxWsUrl = () => {
   const { protocol, host } = window.location;
   const wsProtocol = protocol === 'https:' ? 'wss' : 'ws';
-  return `${wsProtocol}://${host}/inbox/subscribe`;
+  const accessToken = getAccessToken();
+  const base = `${wsProtocol}://${host}/inbox/subscribe`;
+  if (!accessToken) {
+    return base;
+  }
+  return `${base}?access_token=${encodeURIComponent(accessToken)}`;
 };
 
 type ViewportMode = 'small' | 'medium' | 'wide';

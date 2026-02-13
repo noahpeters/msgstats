@@ -30,9 +30,8 @@ export function registerRoutes(deps: any) {
     isFollowupInboxEnabledForUser,
     isOpsDashboardEnabledForUser,
     isAuditConversationsEnabledForUser,
-    exchangeCodeForToken,
-    exchangeForLongLivedToken,
-    debugToken,
+    getUserFeatureFlags,
+    getOrgFeatureFlags,
     fetchPermissions,
     fetchBusinesses,
     fetchBusinessPages,
@@ -43,14 +42,9 @@ export function registerRoutes(deps: any) {
     fetchPageIgDebug,
     fetchConversationMessages,
     sendMessage,
-    fetchUserProfile,
-    buildSessionCookie,
-    clearSessionCookie,
-    createSessionToken,
-    requireSession,
     requireUser,
+    requireAccessAuth,
     getUserToken,
-    upsertMetaUser,
     upsertPage,
     getPage,
     upsertIgAsset,
@@ -82,6 +76,29 @@ export function registerRoutes(deps: any) {
     getFollowupSeries,
   } = deps;
   const readJson = readJsonRaw as <T>(req: Request) => Promise<T | null>;
+  const sha256Hex = async (value: string) => {
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(value),
+    );
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+  };
+  const requireAdminAccess = async (req: Request, env: Env) => {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
+      return null;
+    }
+    if (auth.claims.role === 'owner') {
+      return auth;
+    }
+    const canUseOps = await isOpsDashboardEnabledForUser(env, auth.claims.sub);
+    if (!canUseOps) {
+      return null;
+    }
+    return auth;
+  };
   const webhookSubscribeFields = [
     'messages',
     'messaging_postbacks',
@@ -309,150 +326,61 @@ export function registerRoutes(deps: any) {
   };
   addRoute('GET', '/api/health', () => json({ status: 'ok' }));
 
-  addRoute('GET', '/api/auth/login', async (req, env) => {
-    const state = crypto.randomUUID();
-    const url = new URL('https://www.facebook.com/v19.0/dialog/oauth');
-    url.searchParams.set('client_id', env.META_APP_ID);
-    url.searchParams.set('redirect_uri', env.META_REDIRECT_URI);
-    url.searchParams.set('state', state);
-    url.searchParams.set('response_type', 'code');
-    url.searchParams.set('scope', getMetaScopes(env).join(','));
-    url.searchParams.set('auth_type', 'rerequest');
-    return Response.redirect(url.toString(), 302);
+  addRoute('GET', '/api/auth/login', async (req) => {
+    const next = new URL(req.url).searchParams.get('return_to') ?? '/';
+    return Response.redirect(
+      `/auth/start?return_to=${encodeURIComponent(next)}`,
+      302,
+    );
   });
 
-  addRoute('GET', '/api/auth/callback', async (req, env, ctx) => {
+  addRoute('GET', '/api/auth/callback', async (req) => {
     const url = new URL(req.url);
-    const code = url.searchParams.get('code');
-    if (!code) {
-      return json({ error: 'Missing code' }, { status: 400 });
-    }
-
-    const shortToken = await exchangeCodeForToken({
-      env,
-      appId: env.META_APP_ID,
-      appSecret: env.META_APP_SECRET,
-      redirectUri: env.META_REDIRECT_URI,
-      code,
-      version: getApiVersion(env),
-    });
-    const longToken = await exchangeForLongLivedToken({
-      env,
-      appId: env.META_APP_ID,
-      appSecret: env.META_APP_SECRET,
-      accessToken: shortToken.accessToken,
-      version: getApiVersion(env),
-    });
-
-    const appToken = `${env.META_APP_ID}|${env.META_APP_SECRET}`;
-    const debug = await debugToken({
-      env,
-      inputToken: longToken.accessToken,
-      appToken,
-      version: getApiVersion(env),
-    });
-    if (!debug?.user_id || !debug?.is_valid) {
-      return json({ error: 'Token validation failed' }, { status: 400 });
-    }
-
-    await upsertMetaUser(env, {
-      id: debug.user_id,
-      accessToken: longToken.accessToken,
-      tokenType: longToken.tokenType ?? shortToken.tokenType,
-      expiresAt:
-        debug.expires_at && debug.expires_at > 0
-          ? debug.expires_at
-          : longToken.expiresIn
-            ? Math.floor(Date.now() / 1000) + longToken.expiresIn
-            : null,
-    });
-    ctx.waitUntil(
-      (async () => {
-        const pages = await env.DB.prepare(
-          'SELECT id, access_token as accessToken FROM meta_pages WHERE user_id = ?',
-        )
-          .bind(debug.user_id)
-          .all<{ id: string; accessToken: string | null }>();
-        for (const page of pages.results ?? []) {
-          if (!page.accessToken) continue;
-          await subscribePageWebhookBestEffort(env, {
-            userId: debug.user_id,
-            pageId: page.id,
-            pageAccessToken: page.accessToken,
-          });
-        }
-      })(),
-    );
-
-    const fallbackExpiry = longToken.expiresIn ?? 60 * 60 * 24 * 30;
-    const expiresAtSeconds =
-      debug.expires_at && debug.expires_at > 0
-        ? debug.expires_at
-        : Math.floor(Date.now() / 1000) + fallbackExpiry;
-    const session = await createSessionToken(
-      {
-        userId: debug.user_id,
-        expiresAt: expiresAtSeconds * 1000,
-      },
-      env.SESSION_SECRET,
-    );
-    const isSecure =
-      new URL(req.url).protocol === 'https:' ||
-      (env.APP_ORIGIN?.startsWith('https://') ?? false);
-    const cookie = buildSessionCookie(session, 60 * 60 * 24 * 30, {
-      secure: isSecure,
-    });
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'set-cookie': cookie,
-        location: env.APP_ORIGIN ?? '/',
-      },
-    });
+    const search = url.search ? url.search : '';
+    return Response.redirect(`/auth/callback${search}`, 302);
   });
 
-  addRoute('POST', '/api/auth/logout', (req, env) => {
-    const isSecure =
-      new URL(req.url).protocol === 'https:' ||
-      (env.APP_ORIGIN?.startsWith('https://') ?? false);
-    return new Response(null, {
-      status: 204,
+  addRoute('POST', '/api/auth/logout', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
+      return new Response(null, { status: 204 });
+    }
+    await fetch(new URL('/auth/logout', req.url).toString(), {
+      method: 'POST',
       headers: {
-        'set-cookie': clearSessionCookie({ secure: isSecure }),
+        authorization: `Bearer ${auth.token}`,
       },
-    });
+    }).catch(() => null);
+    return new Response(null, { status: 204 });
   });
 
   addRoute('GET', '/api/auth/me', async (req, env) => {
-    const session = await requireSession(req, env);
-    if (!session?.userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ authenticated: false });
     }
-    let name: string | null = null;
-    try {
-      const token = await getUserToken(env, session.userId);
-      if (token?.access_token) {
-        const profile = await fetchUserProfile({
-          env,
-          accessToken: token.access_token,
-          version: getApiVersion(env),
-          workspaceId: session.userId,
-        });
-        name = profile?.name ?? null;
-      }
-    } catch (error) {
-      console.warn('Failed to fetch user profile');
-      console.warn(error);
-    }
-    return json({ authenticated: true, userId: session.userId, name });
+    return json({
+      authenticated: true,
+      userId: auth.claims.sub,
+      orgId: auth.claims.org_id,
+      role: auth.claims.role,
+      name: auth.claims.name,
+      email: auth.claims.email,
+      metaUserId: auth.claims.meta_user_id ?? null,
+    });
   });
 
   addRoute('GET', '/api/auth/whoami', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    return json({ userId });
+    return json({
+      userId: auth.claims.sub,
+      orgId: auth.claims.org_id,
+      role: auth.claims.role,
+      metaUserId: auth.claims.meta_user_id ?? null,
+    });
   });
 
   addRoute('GET', '/api/auth/config', async (_req, env) => {
@@ -464,22 +392,407 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/feature-flags', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({
         followupInbox: isFollowupInboxEnabled(env),
         opsDashboard: isOpsDashboardEnabled(env),
         auditConversations: isAuditConversationsEnabled(env),
       });
     }
+    const userId = auth.claims.sub;
+    const orgId = auth.claims.org_id;
+    const orgFlags = await getOrgFeatureFlags(env, orgId);
+    const userFlags = await getUserFeatureFlags(env, userId);
+    const merged = { ...orgFlags, ...userFlags } as Record<string, unknown>;
+    const read = (key: string, fallback: boolean) => {
+      const value = merged[key];
+      if (value === undefined) return fallback;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+      }
+      return Boolean(value);
+    };
     return json({
-      followupInbox: await isFollowupInboxEnabledForUser(env, userId),
-      opsDashboard: await isOpsDashboardEnabledForUser(env, userId),
-      auditConversations: await isAuditConversationsEnabledForUser(env, userId),
+      followupInbox: read(
+        'FEATURE_FOLLOWUP_INBOX',
+        await isFollowupInboxEnabledForUser(env, userId),
+      ),
+      opsDashboard: read(
+        'FEATURE_OPS_DASHBOARD',
+        await isOpsDashboardEnabledForUser(env, userId),
+      ),
+      auditConversations: read(
+        'FEATURE_AUDIT_CONVERSATIONS',
+        await isAuditConversationsEnabledForUser(env, userId),
+      ),
     });
   });
 
+  addRoute(
+    'POST',
+    '/api/orgs/:orgId/invites',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (auth.claims.role !== 'owner') {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const orgId = params.orgId;
+      if (!orgId || orgId !== auth.claims.org_id) {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const payload = await readJson<{ email?: string; role?: string }>(req);
+      const email = payload?.email?.trim().toLowerCase();
+      const role = payload?.role?.trim() as
+        | 'owner'
+        | 'member'
+        | 'coach'
+        | undefined;
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return json({ error: 'Valid email is required' }, { status: 400 });
+      }
+      if (!role || !['owner', 'member', 'coach'].includes(role)) {
+        return json({ error: 'Valid role is required' }, { status: 400 });
+      }
+      const inviteId = crypto.randomUUID();
+      const tokenRawBytes = crypto.getRandomValues(new Uint8Array(32));
+      const rawToken = btoa(String.fromCharCode(...tokenRawBytes))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+      const tokenHash = await sha256Hex(
+        `${env.AUTH_INVITE_PEPPER}:${rawToken}`,
+      );
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt = now + 7 * 24 * 60 * 60;
+      await env.DB.prepare(
+        `INSERT INTO org_invites (id, org_id, email, role, token_hash, expires_at, accepted_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+      )
+        .bind(inviteId, orgId, email, role, tokenHash, expiresAt, now)
+        .run();
+
+      const acceptUrl = `${env.APP_ORIGIN ?? ''}/accept-invite?token=${encodeURIComponent(rawToken)}`;
+      if (env.RESEND_API_KEY && env.ALERT_EMAIL_FROM) {
+        await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${env.RESEND_API_KEY}`,
+          },
+          body: JSON.stringify({
+            from: env.ALERT_EMAIL_FROM,
+            to: [email],
+            subject: 'You have been invited to msgstats',
+            text: `You have been invited as ${role}. Open this link to accept: ${acceptUrl}`,
+          }),
+        }).catch((error) => {
+          console.warn('Invite email send failed', error);
+        });
+      }
+      return json({ success: true, expires_at: expiresAt });
+    },
+  );
+
+  addRoute('POST', '/api/meta/token/repair', async (req, env) => {
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const url = new URL(req.url);
+    const returnToRaw = url.searchParams.get('return_to');
+    const returnTo =
+      returnToRaw &&
+      returnToRaw.startsWith('/') &&
+      !returnToRaw.startsWith('//')
+        ? returnToRaw
+        : '/';
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO ops_counters (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = value + 1, updated_at = excluded.updated_at`,
+    )
+      .bind('meta.token_repair.requested', 1, now)
+      .run();
+    return json({
+      reconnect_url: `/api/auth/login?repair=1&return_to=${encodeURIComponent(
+        returnTo,
+      )}`,
+      message: 'Reconnect Meta account to refresh token',
+    });
+  });
+
+  addRoute('GET', '/api/org/settings', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const orgId = auth.claims.org_id;
+    const org = await env.DB.prepare(
+      `SELECT id as orgId, name as orgName, created_at as createdAt
+       FROM organizations
+       WHERE id = ?
+       LIMIT 1`,
+    )
+      .bind(orgId)
+      .first<{ orgId: string; orgName: string; createdAt: number }>();
+    if (!org) {
+      return json({ error: 'Organization not found' }, { status: 404 });
+    }
+    const members = await env.DB.prepare(
+      `SELECT m.user_id as userId, m.role, u.email, u.name, m.created_at as createdAt
+       FROM org_memberships m
+       JOIN users u ON u.id = m.user_id
+       WHERE m.org_id = ?
+       ORDER BY m.created_at ASC`,
+    )
+      .bind(orgId)
+      .all<{
+        userId: string;
+        role: 'owner' | 'member' | 'coach';
+        email: string;
+        name: string;
+        createdAt: number;
+      }>();
+    const invites = await env.DB.prepare(
+      `SELECT id, email, role, expires_at as expiresAt, created_at as createdAt, accepted_at as acceptedAt
+       FROM org_invites
+       WHERE org_id = ?
+       ORDER BY created_at DESC`,
+    )
+      .bind(orgId)
+      .all<{
+        id: string;
+        email: string;
+        role: 'owner' | 'member' | 'coach';
+        expiresAt: number;
+        createdAt: number;
+        acceptedAt: number | null;
+      }>();
+    const metaAccounts = await env.DB.prepare(
+      `SELECT omu.meta_user_id as metaUserId, u.id as userId, u.email, u.name,
+              mu.expires_at as expiresAt
+       FROM org_meta_user omu
+       JOIN users u ON u.id = omu.user_id
+       LEFT JOIN meta_users mu ON mu.id = omu.meta_user_id
+       WHERE omu.org_id = ?
+       ORDER BY omu.created_at ASC`,
+    )
+      .bind(orgId)
+      .all<{
+        metaUserId: string;
+        userId: string;
+        email: string;
+        name: string;
+        expiresAt: number | null;
+      }>();
+    const metaUserIds = Array.from(
+      new Set((metaAccounts.results ?? []).map((row) => row.metaUserId)),
+    );
+    const orgUserIds = Array.from(
+      new Set((metaAccounts.results ?? []).map((row) => row.userId)),
+    );
+    const assetOwnerIds = Array.from(new Set([...metaUserIds, ...orgUserIds]));
+    if (assetOwnerIds.length > 0) {
+      const placeholders = assetOwnerIds.map(() => '?').join(',');
+      await env.DB.prepare(
+        `UPDATE meta_pages
+         SET org_id = ?
+         WHERE (org_id IS NULL OR org_id = '') AND user_id IN (${placeholders})`,
+      )
+        .bind(orgId, ...assetOwnerIds)
+        .run();
+      await env.DB.prepare(
+        `UPDATE ig_assets
+         SET org_id = ?
+         WHERE (org_id IS NULL OR org_id = '') AND user_id IN (${placeholders})`,
+      )
+        .bind(orgId, ...assetOwnerIds)
+        .run();
+    }
+    let pages: D1Result<{ id: string; name: string | null }>;
+    let igAssets: D1Result<{ id: string; name: string | null; pageId: string }>;
+    if (assetOwnerIds.length > 0) {
+      const placeholders = assetOwnerIds.map(() => '?').join(',');
+      pages = await env.DB.prepare(
+        `SELECT id, name
+         FROM meta_pages
+         WHERE org_id = ?
+            OR ((org_id IS NULL OR org_id = '') AND user_id IN (${placeholders}))
+         ORDER BY name ASC`,
+      )
+        .bind(orgId, ...assetOwnerIds)
+        .all<{ id: string; name: string | null }>();
+      igAssets = await env.DB.prepare(
+        `SELECT id, name, page_id as pageId
+         FROM ig_assets
+         WHERE org_id = ?
+            OR ((org_id IS NULL OR org_id = '') AND user_id IN (${placeholders}))
+         ORDER BY name ASC`,
+      )
+        .bind(orgId, ...assetOwnerIds)
+        .all<{ id: string; name: string | null; pageId: string }>();
+    } else {
+      pages = await env.DB.prepare(
+        `SELECT id, name
+         FROM meta_pages
+         WHERE org_id = ?
+         ORDER BY name ASC`,
+      )
+        .bind(orgId)
+        .all<{ id: string; name: string | null }>();
+      igAssets = await env.DB.prepare(
+        `SELECT id, name, page_id as pageId
+         FROM ig_assets
+         WHERE org_id = ?
+         ORDER BY name ASC`,
+      )
+        .bind(orgId)
+        .all<{ id: string; name: string | null; pageId: string }>();
+    }
+    return json({
+      org,
+      members: members.results ?? [],
+      invites: invites.results ?? [],
+      meta: {
+        accounts: metaAccounts.results ?? [],
+        pages: pages.results ?? [],
+        igAssets: igAssets.results ?? [],
+      },
+      permissions: {
+        canManage: auth.claims.role === 'owner',
+      },
+    });
+  });
+
+  addRoute('PATCH', '/api/org/settings', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (auth.claims.role !== 'owner') {
+      return json({ error: 'Forbidden' }, { status: 403 });
+    }
+    const body = await readJson<{ name?: string }>(req);
+    const name = body?.name?.trim();
+    if (!name) {
+      return json({ error: 'Missing name' }, { status: 400 });
+    }
+    await env.DB.prepare(
+      'UPDATE organizations SET name = ?, updated_at = ? WHERE id = ?',
+    )
+      .bind(name, Math.floor(Date.now() / 1000), auth.claims.org_id)
+      .run();
+    return json({ ok: true, orgId: auth.claims.org_id, name });
+  });
+
+  addRoute(
+    'PATCH',
+    '/api/org/members/:userId/role',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (auth.claims.role !== 'owner') {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const targetUserId = params.userId;
+      if (!targetUserId) {
+        return json({ error: 'Missing user id' }, { status: 400 });
+      }
+      const body = await readJson<{ role?: string }>(req);
+      const role = (body?.role ?? '').trim();
+      if (!['owner', 'member', 'coach'].includes(role)) {
+        return json({ error: 'Invalid role' }, { status: 400 });
+      }
+      await env.DB.prepare(
+        'UPDATE org_memberships SET role = ? WHERE org_id = ? AND user_id = ?',
+      )
+        .bind(role, auth.claims.org_id, targetUserId)
+        .run();
+      return json({ ok: true, userId: targetUserId, role });
+    },
+  );
+
+  addRoute(
+    'DELETE',
+    '/api/org/members/:userId',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (auth.claims.role !== 'owner') {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const targetUserId = params.userId;
+      if (!targetUserId) {
+        return json({ error: 'Missing user id' }, { status: 400 });
+      }
+      const membership = await env.DB.prepare(
+        'SELECT role FROM org_memberships WHERE org_id = ? AND user_id = ? LIMIT 1',
+      )
+        .bind(auth.claims.org_id, targetUserId)
+        .first<{ role: 'owner' | 'member' | 'coach' }>();
+      if (!membership) {
+        return json({ error: 'Member not found' }, { status: 404 });
+      }
+      if (membership.role === 'owner') {
+        const owners = await env.DB.prepare(
+          `SELECT COUNT(*) as count
+         FROM org_memberships
+         WHERE org_id = ? AND role = 'owner'`,
+        )
+          .bind(auth.claims.org_id)
+          .first<{ count: number }>();
+        if ((owners?.count ?? 0) <= 1) {
+          return json({ error: 'Cannot remove last owner' }, { status: 400 });
+        }
+      }
+      await env.DB.prepare(
+        'DELETE FROM org_memberships WHERE org_id = ? AND user_id = ?',
+      )
+        .bind(auth.claims.org_id, targetUserId)
+        .run();
+      return json({ ok: true, userId: targetUserId });
+    },
+  );
+
+  addRoute(
+    'DELETE',
+    '/api/org/invites/:inviteId',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (auth.claims.role !== 'owner') {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const inviteId = params.inviteId;
+      if (!inviteId) {
+        return json({ error: 'Missing invite id' }, { status: 400 });
+      }
+      await env.DB.prepare(
+        'DELETE FROM org_invites WHERE id = ? AND org_id = ?',
+      )
+        .bind(inviteId, auth.claims.org_id)
+        .run();
+      return json({ ok: true, inviteId });
+    },
+  );
+
   addRoute('GET', '/api/meta/permissions', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({
@@ -488,7 +801,7 @@ export function registerRoutes(deps: any) {
         missing: getMetaScopes(env),
       });
     }
-    const token = await getUserToken(env, userId);
+    const token = await getUserToken(env, userId, orgId);
     if (!token) {
       return json({
         hasToken: false,
@@ -532,11 +845,13 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/meta/businesses', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    const token = await getUserToken(env, userId);
+    const token = await getUserToken(env, userId, orgId);
     if (!token) {
       return json({ error: 'No token' }, { status: 401 });
     }
@@ -572,6 +887,8 @@ export function registerRoutes(deps: any) {
     'GET',
     '/api/meta/businesses/:businessId/pages',
     async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      const orgId = auth?.claims.org_id ?? null;
       const businessId = params.businessId;
       if (!businessId) {
         return json({ error: 'Missing business id' }, { status: 400 });
@@ -580,7 +897,7 @@ export function registerRoutes(deps: any) {
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      const token = await getUserToken(env, userId);
+      const token = await getUserToken(env, userId, orgId);
       if (!token) {
         return json({ error: 'No token' }, { status: 401 });
       }
@@ -621,11 +938,13 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute('GET', '/api/meta/accounts', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    const token = await getUserToken(env, userId);
+    const token = await getUserToken(env, userId, orgId);
     if (!token) {
       return json({ error: 'No token' }, { status: 401 });
     }
@@ -657,10 +976,107 @@ export function registerRoutes(deps: any) {
     }
   });
 
+  addRoute('GET', '/api/meta/accounts/with-ig', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
+    const userId = await requireUser(req, env);
+    if (!userId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const token = await getUserToken(env, userId, orgId);
+    if (!token) {
+      return json({ error: 'No token' }, { status: 401 });
+    }
+    try {
+      const pages = await fetchClassicPages({
+        env,
+        accessToken: token.access_token,
+        version: getApiVersion(env),
+        workspaceId: userId,
+      });
+      const connectedPages = await env.DB.prepare(
+        'SELECT id FROM meta_pages WHERE user_id = ? AND (? IS NULL OR org_id = ? OR org_id IS NULL OR org_id = "")',
+      )
+        .bind(userId, orgId, orgId)
+        .all<{ id: string }>();
+      const connectedIg = await env.DB.prepare(
+        'SELECT id FROM ig_assets WHERE user_id = ? AND (? IS NULL OR org_id = ? OR org_id IS NULL OR org_id = "")',
+      )
+        .bind(userId, orgId, orgId)
+        .all<{ id: string }>();
+      const connectedPageSet = new Set(
+        (connectedPages.results ?? []).map((row) => row.id),
+      );
+      const connectedIgSet = new Set(
+        (connectedIg.results ?? []).map((row) => row.id),
+      );
+
+      const enriched = await Promise.all(
+        pages.map(async (page: { id: string; name: string }) => {
+          try {
+            const pageToken = await fetchPageToken({
+              env,
+              pageId: page.id,
+              accessToken: token.access_token,
+              version: getApiVersion(env),
+              workspaceId: userId,
+            });
+            const igAssets = await fetchInstagramAssets({
+              env,
+              pageId: page.id,
+              accessToken: pageToken.accessToken,
+              version: getApiVersion(env),
+              workspaceId: userId,
+            });
+            return {
+              id: page.id,
+              name: page.name,
+              connected: connectedPageSet.has(page.id),
+              igAssets: igAssets.map(
+                (asset: { id: string; name?: string }) => ({
+                  id: asset.id,
+                  name: asset.name ?? asset.id,
+                  connected: connectedIgSet.has(asset.id),
+                }),
+              ),
+            };
+          } catch {
+            return {
+              id: page.id,
+              name: page.name,
+              connected: connectedPageSet.has(page.id),
+              igAssets: [],
+            };
+          }
+        }),
+      );
+      return json(enriched);
+    } catch (error) {
+      console.error(error);
+      reportError(env, {
+        errorKey: 'meta.accounts_with_ig_failed',
+        kind: 'meta',
+        route: 'GET /api/meta/accounts/with-ig',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Meta accounts fetch failed',
+        },
+        { status: 502 },
+      );
+    }
+  });
+
   addRoute(
     'POST',
     '/api/meta/pages/:pageId/token',
     async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      const orgId = auth?.claims.org_id ?? null;
       const pageId = params.pageId;
       if (!pageId) {
         return json({ error: 'Missing page id' }, { status: 400 });
@@ -669,7 +1085,7 @@ export function registerRoutes(deps: any) {
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      const token = await getUserToken(env, userId);
+      const token = await getUserToken(env, userId, orgId);
       if (!token) {
         return json({ error: 'No token' }, { status: 401 });
       }
@@ -689,6 +1105,7 @@ export function registerRoutes(deps: any) {
           !trimmed || normalized === 'page' ? page.name : trimmed;
         await upsertPage(env, {
           userId,
+          orgId,
           pageId,
           name: resolvedName,
           accessToken: page.accessToken,
@@ -783,6 +1200,8 @@ export function registerRoutes(deps: any) {
     'GET',
     '/api/meta/pages/:pageId/ig-assets',
     async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      const orgId = auth?.claims.org_id ?? null;
       const pageId = params.pageId;
       if (!pageId) {
         return json({ error: 'Missing page id' }, { status: 400 });
@@ -791,7 +1210,7 @@ export function registerRoutes(deps: any) {
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      const page = await getPage(env, userId, pageId);
+      const page = await getPage(env, userId, pageId, orgId);
       if (!page) {
         return json({ error: 'Page not enabled' }, { status: 404 });
       }
@@ -819,7 +1238,7 @@ export function registerRoutes(deps: any) {
         });
         const message = error instanceof Error ? error.message : '';
         if (message.includes('Page Access Token')) {
-          const token = await getUserToken(env, userId);
+          const token = await getUserToken(env, userId, orgId);
           if (token) {
             const refreshed = await fetchPageToken({
               env,
@@ -830,6 +1249,7 @@ export function registerRoutes(deps: any) {
             });
             await upsertPage(env, {
               userId,
+              orgId,
               pageId,
               name: refreshed.name,
               accessToken: refreshed.accessToken,
@@ -864,17 +1284,20 @@ export function registerRoutes(deps: any) {
       for (const asset of assets) {
         await upsertIgAsset(env, {
           userId,
+          orgId,
           pageId,
           id: asset.id,
           name: asset.name ?? asset.id,
         });
       }
-      const stored = await listIgAssets(env, userId, pageId);
+      const stored = await listIgAssets(env, userId, pageId, orgId);
       return json({ igAssets: stored });
     },
   );
 
   addRoute('POST', '/api/meta/pages/subscribe-connected', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
@@ -882,9 +1305,9 @@ export function registerRoutes(deps: any) {
     const pages = await env.DB.prepare(
       `SELECT id, access_token as accessToken
        FROM meta_pages
-       WHERE user_id = ?`,
+       WHERE user_id = ? AND (? IS NULL OR org_id = ? OR org_id IS NULL)`,
     )
-      .bind(userId)
+      .bind(userId, orgId, orgId)
       .all<{ id: string; accessToken: string | null }>();
     let subscribed = 0;
     let skipped = 0;
@@ -918,6 +1341,8 @@ export function registerRoutes(deps: any) {
     'GET',
     '/api/meta/pages/:pageId/ig-debug',
     async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      const orgId = auth?.claims.org_id ?? null;
       const pageId = params.pageId;
       if (!pageId) {
         return json({ error: 'Missing page id' }, { status: 400 });
@@ -926,11 +1351,11 @@ export function registerRoutes(deps: any) {
       if (!userId) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      const page = await getPage(env, userId, pageId);
+      const page = await getPage(env, userId, pageId, orgId);
       if (!page) {
         return json({ error: 'Page not enabled' }, { status: 404 });
       }
-      const token = await getUserToken(env, userId);
+      const token = await getUserToken(env, userId, orgId);
       try {
         const pageData = await fetchPageIgDebug({
           env,
@@ -975,15 +1400,17 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute('GET', '/api/assets', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    const orgId = auth?.claims.org_id ?? null;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ pages: [], igAssets: [], igEnabled: true });
     }
-    const pages = await listPagesWithStats(env, userId);
+    const pages = await listPagesWithStats(env, userId, orgId);
     const igAssets = await env.DB.prepare(
-      'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ?',
+      'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ? AND (? IS NULL OR org_id = ? OR org_id IS NULL)',
     )
-      .bind(userId)
+      .bind(userId, orgId, orgId)
       .all<{ id: string; name: string; pageId: string }>();
     const igStats = await env.DB.prepare(
       `SELECT ig_business_id as igBusinessId,
@@ -1132,7 +1559,12 @@ export function registerRoutes(deps: any) {
         lastSnippet: string | null;
       }>();
 
-    const assets = await getAssetNameMap(env, userId);
+    const authForAssets = await requireAccessAuth(req, env);
+    const assets = await getAssetNameMap(
+      env,
+      userId,
+      authForAssets?.claims.org_id ?? null,
+    );
     const conversationIds = (rows.results ?? []).map(
       (row) => row.conversationId,
     );
@@ -1491,7 +1923,12 @@ export function registerRoutes(deps: any) {
           triggeredByMessageId: string | null;
           triggeredAt: string;
         }>();
-      const assets = await getAssetNameMap(env, userId);
+      const authForAssets = await requireAccessAuth(req, env);
+      const assets = await getAssetNameMap(
+        env,
+        userId,
+        authForAssets?.claims.org_id ?? null,
+      );
       const asset =
         conversation.assetId && assets.has(conversation.assetId)
           ? assets.get(conversation.assetId)
@@ -2712,23 +3149,42 @@ export function registerRoutes(deps: any) {
     );
     const rows = await env.DB.prepare(
       `SELECT u.id as userId,
-              u.feature_flags as featureFlags,
               group_concat(DISTINCT mp.name) as pageNames,
-              group_concat(DISTINCT ig.name) as igAssetNames
-       FROM meta_users u
-       LEFT JOIN meta_pages mp ON mp.user_id = u.id
-       LEFT JOIN ig_assets ig ON ig.user_id = u.id
+              group_concat(DISTINCT ig.name) as igAssetNames,
+              group_concat(DISTINCT mu.feature_flags) as legacyFeatureFlags
+       FROM users u
+       LEFT JOIN org_meta_user omu ON omu.user_id = u.id
+       LEFT JOIN meta_pages mp ON mp.user_id = omu.meta_user_id
+       LEFT JOIN ig_assets ig ON ig.user_id = omu.meta_user_id
+       LEFT JOIN meta_users mu ON mu.id = omu.meta_user_id
        GROUP BY u.id
-       ORDER BY COALESCE(u.updated_at, u.created_at) DESC
+       ORDER BY u.updated_at DESC
        LIMIT ?`,
     )
       .bind(limit)
       .all<{
         userId: string;
-        featureFlags: string | null;
         pageNames: string | null;
         igAssetNames: string | null;
+        legacyFeatureFlags: string | null;
       }>();
+    const userFlagRows = await env.DB.prepare(
+      `SELECT user_id as userId, flag_key as flagKey, flag_value as flagValue
+       FROM feature_flags_user`,
+    ).all<{ userId: string; flagKey: string; flagValue: string }>();
+    const userFlagsByUser = new Map<string, Record<string, unknown>>();
+    for (const row of userFlagRows.results ?? []) {
+      const current = userFlagsByUser.get(row.userId) ?? {};
+      const normalized = row.flagValue.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on'].includes(normalized)) {
+        current[row.flagKey] = true;
+      } else if (['false', '0', 'no', 'off'].includes(normalized)) {
+        current[row.flagKey] = false;
+      } else {
+        current[row.flagKey] = row.flagValue;
+      }
+      userFlagsByUser.set(row.userId, current);
+    }
     const parseNames = (value: string | null) =>
       (value ?? '')
         .split(',')
@@ -2737,17 +3193,21 @@ export function registerRoutes(deps: any) {
     const users =
       rows.results?.map((row) => {
         let flags: Record<string, unknown> = {};
-        if (row.featureFlags) {
-          try {
-            const parsed = JSON.parse(row.featureFlags) as Record<
-              string,
-              unknown
-            >;
-            if (parsed && typeof parsed === 'object') {
-              flags = parsed;
+        const userFlags = userFlagsByUser.get(row.userId);
+        if (userFlags) {
+          flags = { ...flags, ...userFlags };
+        }
+        if (row.legacyFeatureFlags) {
+          for (const chunk of row.legacyFeatureFlags.split(',')) {
+            if (!chunk.trim().startsWith('{')) continue;
+            try {
+              const parsed = JSON.parse(chunk) as Record<string, unknown>;
+              if (parsed && typeof parsed === 'object') {
+                flags = { ...flags, ...parsed };
+              }
+            } catch {
+              // ignore malformed flag payload
             }
-          } catch {
-            flags = {};
           }
         }
         return {
@@ -2761,6 +3221,442 @@ export function registerRoutes(deps: any) {
       }) ?? [];
     return json({ users });
   });
+
+  addRoute('GET', '/api/admin/organizations', async (req, env) => {
+    const auth = await requireAdminAccess(req, env);
+    if (!auth) {
+      return json({ error: 'Forbidden' }, { status: 403 });
+    }
+    const url = new URL(req.url);
+    const q = (url.searchParams.get('q') ?? '').trim();
+    const limit = Math.min(
+      50,
+      Math.max(1, Number(url.searchParams.get('limit') ?? 10)),
+    );
+    const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
+    const like = `%${q}%`;
+
+    const totalRow = await env.DB.prepare(
+      `SELECT COUNT(*) as total
+       FROM organizations
+       WHERE (? = '' OR name LIKE ? OR id LIKE ?)`,
+    )
+      .bind(q, like, like)
+      .first<{ total: number }>();
+    const total = totalRow?.total ?? 0;
+
+    const orgRows = await env.DB.prepare(
+      `SELECT o.id as orgId, o.name as orgName, o.created_at as createdAt
+       FROM organizations o
+       WHERE (? = '' OR o.name LIKE ? OR o.id LIKE ?)
+       ORDER BY o.name ASC
+       LIMIT ? OFFSET ?`,
+    )
+      .bind(q, like, like, limit, offset)
+      .all<{ orgId: string; orgName: string; createdAt: number }>();
+
+    const orgIds = (orgRows.results ?? []).map((row) => row.orgId);
+    if (orgIds.length === 0) {
+      return json({
+        organizations: [],
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore: offset + 0 < total,
+        },
+      });
+    }
+    const placeholders = orgIds.map(() => '?').join(',');
+
+    const membershipRows = await env.DB.prepare(
+      `SELECT m.org_id as orgId, m.user_id as userId, m.role,
+              u.email, u.name
+       FROM org_memberships m
+       JOIN users u ON u.id = m.user_id
+       WHERE m.org_id IN (${placeholders})
+       ORDER BY u.email ASC`,
+    )
+      .bind(...orgIds)
+      .all<{
+        orgId: string;
+        userId: string;
+        role: string;
+        email: string;
+        name: string;
+      }>();
+
+    const metaMapRows = await env.DB.prepare(
+      `SELECT omu.org_id as orgId, omu.user_id as userId, omu.meta_user_id as metaUserId,
+              mu.expires_at as expiresAt
+       FROM org_meta_user omu
+       LEFT JOIN meta_users mu ON mu.id = omu.meta_user_id
+       WHERE omu.org_id IN (${placeholders})`,
+    )
+      .bind(...orgIds)
+      .all<{
+        orgId: string;
+        userId: string;
+        metaUserId: string;
+        expiresAt: number | null;
+      }>();
+
+    const orgFlagRows = await env.DB.prepare(
+      `SELECT org_id as orgId, flag_key as flagKey, flag_value as flagValue
+       FROM feature_flags_org
+       WHERE org_id IN (${placeholders})`,
+    )
+      .bind(...orgIds)
+      .all<{ orgId: string; flagKey: string; flagValue: string }>();
+
+    const userIds = Array.from(
+      new Set((membershipRows.results ?? []).map((row) => row.userId)),
+    );
+    const userPlaceholders = userIds.map(() => '?').join(',');
+    const userFlagRows =
+      userIds.length > 0
+        ? await env.DB.prepare(
+            `SELECT user_id as userId, flag_key as flagKey, flag_value as flagValue
+             FROM feature_flags_user
+             WHERE user_id IN (${userPlaceholders})`,
+          )
+            .bind(...userIds)
+            .all<{ userId: string; flagKey: string; flagValue: string }>()
+        : {
+            results: [] as Array<{
+              userId: string;
+              flagKey: string;
+              flagValue: string;
+            }>,
+          };
+
+    const orgsById = new Map<
+      string,
+      {
+        orgId: string;
+        orgName: string;
+        createdAt: number;
+        members: Array<{
+          userId: string;
+          email: string;
+          name: string;
+          role: string;
+          metaUserIds: string[];
+          metaAccounts: Array<{ id: string; expiresAt: number | null }>;
+          pages: Array<{ id: string; name: string | null }>;
+          igAssets: Array<{ id: string; name: string | null }>;
+          userFlags: Record<string, string>;
+        }>;
+        orgFlags: Record<string, string>;
+      }
+    >();
+
+    for (const row of orgRows.results ?? []) {
+      orgsById.set(row.orgId, {
+        orgId: row.orgId,
+        orgName: row.orgName,
+        createdAt: row.createdAt,
+        members: [],
+        orgFlags: {},
+      });
+    }
+
+    const metaByOrgUser = new Map<
+      string,
+      Array<{ id: string; expiresAt: number | null }>
+    >();
+    for (const row of metaMapRows.results ?? []) {
+      const key = `${row.orgId}::${row.userId}`;
+      const current = metaByOrgUser.get(key) ?? [];
+      current.push({ id: row.metaUserId, expiresAt: row.expiresAt });
+      metaByOrgUser.set(key, current);
+    }
+
+    const ownerIdsByOrg = new Map<string, Set<string>>();
+    for (const row of membershipRows.results ?? []) {
+      const current = ownerIdsByOrg.get(row.orgId) ?? new Set<string>();
+      current.add(row.userId);
+      ownerIdsByOrg.set(row.orgId, current);
+    }
+    for (const row of metaMapRows.results ?? []) {
+      const current = ownerIdsByOrg.get(row.orgId) ?? new Set<string>();
+      current.add(row.metaUserId);
+      ownerIdsByOrg.set(row.orgId, current);
+    }
+    const allOwnerIds = Array.from(
+      new Set(
+        Array.from(ownerIdsByOrg.values()).flatMap((set) => Array.from(set)),
+      ),
+    );
+
+    type PageRow = {
+      orgId: string | null;
+      ownerId: string;
+      pageId: string;
+      name: string | null;
+    };
+    type IgRow = {
+      orgId: string | null;
+      ownerId: string;
+      igId: string;
+      name: string | null;
+    };
+
+    const pageRows =
+      allOwnerIds.length > 0
+        ? await env.DB.prepare(
+            `SELECT org_id as orgId, user_id as ownerId, id as pageId, name
+             FROM meta_pages
+             WHERE org_id IN (${placeholders})
+                OR ((org_id IS NULL OR org_id = '') AND user_id IN (${allOwnerIds.map(() => '?').join(',')}))
+             ORDER BY name ASC`,
+          )
+            .bind(...orgIds, ...allOwnerIds)
+            .all<PageRow>()
+        : await env.DB.prepare(
+            `SELECT org_id as orgId, user_id as ownerId, id as pageId, name
+             FROM meta_pages
+             WHERE org_id IN (${placeholders})
+             ORDER BY name ASC`,
+          )
+            .bind(...orgIds)
+            .all<PageRow>();
+
+    const igRows =
+      allOwnerIds.length > 0
+        ? await env.DB.prepare(
+            `SELECT org_id as orgId, user_id as ownerId, id as igId, name
+             FROM ig_assets
+             WHERE org_id IN (${placeholders})
+                OR ((org_id IS NULL OR org_id = '') AND user_id IN (${allOwnerIds.map(() => '?').join(',')}))
+             ORDER BY name ASC`,
+          )
+            .bind(...orgIds, ...allOwnerIds)
+            .all<IgRow>()
+        : await env.DB.prepare(
+            `SELECT org_id as orgId, user_id as ownerId, id as igId, name
+             FROM ig_assets
+             WHERE org_id IN (${placeholders})
+             ORDER BY name ASC`,
+          )
+            .bind(...orgIds)
+            .all<IgRow>();
+
+    const pagesByOrgOwner = new Map<
+      string,
+      Array<{ id: string; name: string | null }>
+    >();
+    for (const row of pageRows.results ?? []) {
+      const targetOrgIds =
+        row.orgId && row.orgId.trim() !== ''
+          ? [row.orgId]
+          : orgIds.filter((orgId) =>
+              ownerIdsByOrg.get(orgId)?.has(row.ownerId),
+            );
+      for (const orgId of targetOrgIds) {
+        const key = `${orgId}::${row.ownerId}`;
+        const current = pagesByOrgOwner.get(key) ?? [];
+        current.push({ id: row.pageId, name: row.name });
+        pagesByOrgOwner.set(key, current);
+      }
+    }
+
+    const igByOrgOwner = new Map<
+      string,
+      Array<{ id: string; name: string | null }>
+    >();
+    for (const row of igRows.results ?? []) {
+      const targetOrgIds =
+        row.orgId && row.orgId.trim() !== ''
+          ? [row.orgId]
+          : orgIds.filter((orgId) =>
+              ownerIdsByOrg.get(orgId)?.has(row.ownerId),
+            );
+      for (const orgId of targetOrgIds) {
+        const key = `${orgId}::${row.ownerId}`;
+        const current = igByOrgOwner.get(key) ?? [];
+        current.push({ id: row.igId, name: row.name });
+        igByOrgOwner.set(key, current);
+      }
+    }
+
+    const userFlagsByUser = new Map<string, Record<string, string>>();
+    for (const row of userFlagRows.results ?? []) {
+      const current = userFlagsByUser.get(row.userId) ?? {};
+      current[row.flagKey] = row.flagValue;
+      userFlagsByUser.set(row.userId, current);
+    }
+
+    for (const row of orgFlagRows.results ?? []) {
+      const org = orgsById.get(row.orgId);
+      if (!org) continue;
+      org.orgFlags[row.flagKey] = row.flagValue;
+    }
+
+    for (const row of membershipRows.results ?? []) {
+      const org = orgsById.get(row.orgId);
+      if (!org) continue;
+      const metaAccounts =
+        metaByOrgUser.get(`${row.orgId}::${row.userId}`) ?? [];
+      const metaUserIds = metaAccounts.map((account) => account.id);
+      const pagesById = new Map<string, { id: string; name: string | null }>();
+      const igById = new Map<string, { id: string; name: string | null }>();
+      const ownerIds = Array.from(new Set([row.userId, ...metaUserIds]));
+      for (const ownerId of ownerIds) {
+        for (const page of pagesByOrgOwner.get(`${row.orgId}::${ownerId}`) ??
+          []) {
+          pagesById.set(page.id, page);
+        }
+        for (const ig of igByOrgOwner.get(`${row.orgId}::${ownerId}`) ?? []) {
+          igById.set(ig.id, ig);
+        }
+      }
+      org.members.push({
+        userId: row.userId,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        metaUserIds,
+        metaAccounts,
+        pages: Array.from(pagesById.values()),
+        igAssets: Array.from(igById.values()),
+        userFlags: userFlagsByUser.get(row.userId) ?? {},
+      });
+    }
+
+    return json({
+      organizations: Array.from(orgsById.values()),
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + (orgRows.results?.length ?? 0) < total,
+      },
+    });
+  });
+
+  addRoute('GET', '/api/admin/users', async (req, env) => {
+    const auth = await requireAdminAccess(req, env);
+    if (!auth) {
+      return json({ error: 'Forbidden' }, { status: 403 });
+    }
+    const rows = await env.DB.prepare(
+      `SELECT u.id as userId, u.email, u.name,
+              group_concat(DISTINCT m.org_id) as orgIds,
+              group_concat(DISTINCT omu.meta_user_id) as metaUserIds,
+              group_concat(DISTINCT mp.id) as pageIds,
+              group_concat(DISTINCT ig.id) as igIds
+       FROM users u
+       LEFT JOIN org_memberships m ON m.user_id = u.id
+       LEFT JOIN org_meta_user omu ON omu.user_id = u.id
+       LEFT JOIN meta_pages mp ON mp.user_id = omu.meta_user_id
+       LEFT JOIN ig_assets ig ON ig.user_id = omu.meta_user_id
+       GROUP BY u.id
+       ORDER BY u.email ASC`,
+    ).all<{
+      userId: string;
+      email: string;
+      name: string;
+      orgIds: string | null;
+      metaUserIds: string | null;
+      pageIds: string | null;
+      igIds: string | null;
+    }>();
+    const parse = (raw: string | null) =>
+      (raw ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    return json({
+      users: (rows.results ?? []).map((row) => ({
+        userId: row.userId,
+        email: row.email,
+        name: row.name,
+        orgIds: parse(row.orgIds),
+        metaUserIds: parse(row.metaUserIds),
+        pageIds: parse(row.pageIds),
+        igIds: parse(row.igIds),
+      })),
+    });
+  });
+
+  addRoute(
+    'POST',
+    '/api/admin/feature-flags/user/:userId',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAdminAccess(req, env);
+      if (!auth) {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const targetUserId = params.userId;
+      if (!targetUserId) {
+        return json({ error: 'Missing user id' }, { status: 400 });
+      }
+      const body = await readJson<{
+        flagKey?: string;
+        flagValue?: string | null;
+      }>(req);
+      const flagKey = body?.flagKey?.trim();
+      if (!flagKey) {
+        return json({ error: 'Missing flagKey' }, { status: 400 });
+      }
+      if (body?.flagValue === null) {
+        await env.DB.prepare(
+          'DELETE FROM feature_flags_user WHERE user_id = ? AND flag_key = ?',
+        )
+          .bind(targetUserId, flagKey)
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO feature_flags_user (user_id, flag_key, flag_value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(user_id, flag_key) DO UPDATE SET flag_value = excluded.flag_value`,
+        )
+          .bind(targetUserId, flagKey, body?.flagValue ?? 'true')
+          .run();
+      }
+      return json({ ok: true, userId: targetUserId, flagKey });
+    },
+  );
+
+  addRoute(
+    'POST',
+    '/api/admin/feature-flags/org/:orgId',
+    async (req, env, _ctx, params) => {
+      const auth = await requireAdminAccess(req, env);
+      if (!auth) {
+        return json({ error: 'Forbidden' }, { status: 403 });
+      }
+      const targetOrgId = params.orgId;
+      if (!targetOrgId) {
+        return json({ error: 'Missing org id' }, { status: 400 });
+      }
+      const body = await readJson<{
+        flagKey?: string;
+        flagValue?: string | null;
+      }>(req);
+      const flagKey = body?.flagKey?.trim();
+      if (!flagKey) {
+        return json({ error: 'Missing flagKey' }, { status: 400 });
+      }
+      if (body?.flagValue === null) {
+        await env.DB.prepare(
+          'DELETE FROM feature_flags_org WHERE org_id = ? AND flag_key = ?',
+        )
+          .bind(targetOrgId, flagKey)
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO feature_flags_org (org_id, flag_key, flag_value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(org_id, flag_key) DO UPDATE SET flag_value = excluded.flag_value`,
+        )
+          .bind(targetOrgId, flagKey, body?.flagValue ?? 'true')
+          .run();
+      }
+      return json({ ok: true, orgId: targetOrgId, flagKey });
+    },
+  );
 
   addRoute('POST', '/api/ops/audit/export-and-clear', async (req, env) => {
     const userId = await requireUser(req, env);
@@ -2866,38 +3762,60 @@ export function registerRoutes(deps: any) {
       if (!flag) {
         return json({ error: 'Missing flag' }, { status: 400 });
       }
-      const existing = await env.DB.prepare(
+      if (body?.value === null) {
+        await env.DB.prepare(
+          'DELETE FROM feature_flags_user WHERE user_id = ? AND flag_key = ?',
+        )
+          .bind(targetUserId, flag)
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO feature_flags_user (user_id, flag_key, flag_value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(user_id, flag_key) DO UPDATE SET flag_value = excluded.flag_value`,
+        )
+          .bind(targetUserId, flag, String(body?.value))
+          .run();
+      }
+
+      // Keep legacy JSON flags in sync when this ID is a legacy meta user.
+      const existingLegacy = await env.DB.prepare(
         'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
       )
         .bind(targetUserId)
         .first<{ featureFlags: string | null }>();
-      let flags: Record<string, unknown> = {};
-      if (existing?.featureFlags) {
-        try {
-          const parsed = JSON.parse(existing.featureFlags) as Record<
-            string,
-            unknown
-          >;
-          if (parsed && typeof parsed === 'object') {
-            flags = { ...parsed };
+      if (existingLegacy) {
+        let legacyFlags: Record<string, unknown> = {};
+        if (existingLegacy.featureFlags) {
+          try {
+            const parsed = JSON.parse(existingLegacy.featureFlags) as Record<
+              string,
+              unknown
+            >;
+            if (parsed && typeof parsed === 'object') {
+              legacyFlags = { ...parsed };
+            }
+          } catch {
+            legacyFlags = {};
           }
-        } catch {
-          flags = {};
         }
+        if (body?.value === null) {
+          delete legacyFlags[flag];
+        } else {
+          legacyFlags[flag] = body?.value;
+        }
+        const nextFlags =
+          Object.keys(legacyFlags).length > 0
+            ? JSON.stringify(legacyFlags)
+            : null;
+        await env.DB.prepare(
+          'UPDATE meta_users SET feature_flags = ?, updated_at = ? WHERE id = ?',
+        )
+          .bind(nextFlags, new Date().toISOString(), targetUserId)
+          .run();
       }
-      if (body?.value === null) {
-        delete flags[flag];
-      } else {
-        flags[flag] = body?.value;
-      }
-      const nextFlags =
-        Object.keys(flags).length > 0 ? JSON.stringify(flags) : null;
-      const now = new Date().toISOString();
-      await env.DB.prepare(
-        'UPDATE meta_users SET feature_flags = ?, updated_at = ? WHERE id = ?',
-      )
-        .bind(nextFlags, now, targetUserId)
-        .run();
+
+      const flags = await getUserFeatureFlags(env, targetUserId);
       return json({ userId: targetUserId, featureFlags: flags });
     },
   );

@@ -7,3 +7,5 @@ data
 build
 .wrangler
 .dev.vars
+env/cloudflare/*.env
+!env/cloudflare/*.env.example

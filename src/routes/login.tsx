@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex';
 import { Navigate, useSearchParams } from 'react-router';
 import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
+import { consumeAuthFragment, setAuthTokens } from '../lib/authClient';
 
 type AuthResponse = {
   authenticated: boolean;
@@ -10,8 +11,6 @@ type AuthResponse = {
   name?: string | null;
   email?: string | null;
 };
-
-const LOGIN_NEXT_STORAGE_KEY = 'msgstats:auth:next';
 
 const loginStyles = stylex.create({
   page: {
@@ -28,7 +27,7 @@ const loginStyles = stylex.create({
   },
   panel: {
     width: '100%',
-    maxWidth: '440px',
+    maxWidth: '480px',
     backgroundColor: '#ffffff',
     borderRadius: '18px',
     border: '1px solid rgba(12, 27, 26, 0.12)',
@@ -50,9 +49,8 @@ const loginStyles = stylex.create({
   },
   actions: {
     marginTop: '8px',
-    display: 'flex',
+    display: 'grid',
     gap: '10px',
-    alignItems: 'center',
   },
   buttonLink: {
     textDecoration: 'none',
@@ -62,6 +60,21 @@ const loginStyles = stylex.create({
     backgroundColor: '#ffffff',
     borderRadius: '14px',
     padding: '12px 16px',
+  },
+  note: {
+    margin: 0,
+    fontSize: '12px',
+    color: '#4b6478',
+  },
+  field: {
+    display: 'grid',
+    gap: '6px',
+  },
+  input: {
+    border: '1px solid rgba(12, 27, 26, 0.2)',
+    borderRadius: '10px',
+    padding: '10px 12px',
+    fontSize: '14px',
   },
 });
 
@@ -79,6 +92,37 @@ export default function LoginRoute(): React.ReactElement {
   const [searchParams] = useSearchParams();
   const next = sanitizeNext(searchParams.get('next'));
   const [auth, setAuth] = React.useState<AuthResponse | null>(null);
+  const [redirectPath, setRedirectPath] = React.useState<string | null>(null);
+  const [metaSetupToken, setMetaSetupToken] = React.useState<string | null>(
+    null,
+  );
+  const [metaError, setMetaError] = React.useState<string | null>(null);
+  const [submittingMeta, setSubmittingMeta] = React.useState(false);
+  const [metaForm, setMetaForm] = React.useState({
+    email: '',
+    name: '',
+    orgName: '',
+  });
+
+  React.useEffect(() => {
+    const fragment = consumeAuthFragment();
+    if (!fragment) {
+      return;
+    }
+    if ('metaSetupToken' in fragment) {
+      setMetaSetupToken(fragment.metaSetupToken ?? null);
+      return;
+    }
+    if (fragment.accessToken && fragment.sessionHandle) {
+      void (async () => {
+        await setAuthTokens({
+          accessToken: fragment.accessToken,
+          sessionHandle: fragment.sessionHandle,
+        });
+        setRedirectPath(fragment.returnTo || next);
+      })();
+    }
+  }, [next]);
 
   React.useEffect(() => {
     let active = true;
@@ -104,20 +148,61 @@ export default function LoginRoute(): React.ReactElement {
     return () => {
       active = false;
     };
-  }, []);
+  }, [redirectPath]);
 
-  React.useEffect(() => {
-    if (auth?.authenticated && typeof window !== 'undefined') {
-      window.sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
-    }
-  }, [auth?.authenticated]);
+  const onCompleteMetaSetup = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!metaSetupToken) {
+        return;
+      }
+      setSubmittingMeta(true);
+      setMetaError(null);
+      try {
+        const response = await fetch('/api/auth/meta/setup', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            token: metaSetupToken,
+            email: metaForm.email,
+            name: metaForm.name,
+            org_name: metaForm.orgName,
+          }),
+        });
+        const payload = (await response.json().catch(() => null)) as {
+          access_token?: string;
+          session_handle?: string;
+          return_to?: string;
+          error?: string;
+        } | null;
+        if (
+          !response.ok ||
+          !payload?.access_token ||
+          !payload?.session_handle
+        ) {
+          setMetaError(payload?.error ?? 'Could not finish setup.');
+          return;
+        }
+        await setAuthTokens({
+          accessToken: payload.access_token,
+          sessionHandle: payload.session_handle,
+        });
+        setRedirectPath(payload.return_to ?? next);
+      } catch {
+        setMetaError('Could not finish setup.');
+      } finally {
+        setSubmittingMeta(false);
+      }
+    },
+    [metaForm.email, metaForm.name, metaForm.orgName, metaSetupToken, next],
+  );
+
+  if (redirectPath) {
+    return <Navigate to={redirectPath} replace />;
+  }
 
   if (auth?.authenticated) {
-    const storedNext =
-      typeof window !== 'undefined'
-        ? sanitizeNext(window.sessionStorage.getItem(LOGIN_NEXT_STORAGE_KEY))
-        : '/';
-    return <Navigate to={next !== '/' ? next : storedNext} replace />;
+    return <Navigate to={next} replace />;
   }
 
   return (
@@ -130,19 +215,90 @@ export default function LoginRoute(): React.ReactElement {
             Monitor sync health, conversation quality, and follow-up priorities
             in one place.
           </p>
-          <div {...stylex.props(loginStyles.actions)}>
-            <a
-              href={`/api/auth/login?next=${encodeURIComponent(next)}`}
-              {...stylex.props(loginStyles.buttonLink)}
-              onClick={() => {
-                if (typeof window !== 'undefined') {
-                  window.sessionStorage.setItem(LOGIN_NEXT_STORAGE_KEY, next);
-                }
-              }}
+
+          {metaSetupToken ? (
+            <form
+              {...stylex.props(loginStyles.actions)}
+              onSubmit={onCompleteMetaSetup}
             >
-              <button {...stylex.props(layout.button)}>Continue</button>
-            </a>
-          </div>
+              <p {...stylex.props(loginStyles.note)}>
+                Finish account setup to connect your existing Meta data.
+              </p>
+              <label {...stylex.props(loginStyles.field)}>
+                Email
+                <input
+                  type="email"
+                  required
+                  value={metaForm.email}
+                  onChange={(event) =>
+                    setMetaForm((previous) => ({
+                      ...previous,
+                      email: event.target.value,
+                    }))
+                  }
+                  {...stylex.props(loginStyles.input)}
+                />
+              </label>
+              <label {...stylex.props(loginStyles.field)}>
+                Name
+                <input
+                  required
+                  value={metaForm.name}
+                  onChange={(event) =>
+                    setMetaForm((previous) => ({
+                      ...previous,
+                      name: event.target.value,
+                    }))
+                  }
+                  {...stylex.props(loginStyles.input)}
+                />
+              </label>
+              <label {...stylex.props(loginStyles.field)}>
+                Organization name
+                <input
+                  required
+                  value={metaForm.orgName}
+                  onChange={(event) =>
+                    setMetaForm((previous) => ({
+                      ...previous,
+                      orgName: event.target.value,
+                    }))
+                  }
+                  {...stylex.props(loginStyles.input)}
+                />
+              </label>
+              {metaError ? (
+                <p {...stylex.props(loginStyles.note)}>{metaError}</p>
+              ) : null}
+              <button
+                {...stylex.props(layout.button)}
+                disabled={submittingMeta}
+              >
+                {submittingMeta ? 'Saving...' : 'Complete setup'}
+              </button>
+            </form>
+          ) : (
+            <div {...stylex.props(loginStyles.actions)}>
+              <a
+                href={`/auth/start?return_to=${encodeURIComponent(next)}`}
+                {...stylex.props(loginStyles.buttonLink)}
+              >
+                <button {...stylex.props(layout.button)}>Sign in</button>
+              </a>
+              <a
+                href={`/api/auth/login?return_to=${encodeURIComponent(next)}`}
+                {...stylex.props(loginStyles.buttonLink)}
+              >
+                <button {...stylex.props(layout.ghostButton)}>
+                  Connect Facebook
+                </button>
+              </a>
+              <p {...stylex.props(loginStyles.note)}>
+                This app keeps auth credentials only in memory. Closing all tabs
+                signs you out.
+              </p>
+            </div>
+          )}
         </section>
       </div>
       <footer {...stylex.props(loginStyles.footerShell)}>

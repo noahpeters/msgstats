@@ -62,13 +62,7 @@ import {
   recomputeFollowupEventsForConversation,
   repairFollowupEventLossFlags,
 } from './followupEvents';
-import {
-  buildSessionCookie,
-  clearSessionCookie,
-  createSessionToken,
-  getSessionCookie,
-  readSessionToken,
-} from './session';
+import { handleAuthGateway, requireAccessAuth } from './authGateway';
 
 export type Env = {
   DB: D1Database;
@@ -113,6 +107,19 @@ export type Env = {
   FEATURE_OPS_DASHBOARD?: string;
   FEATURE_AUDIT_CONVERSATIONS?: string;
   SESSION_SECRET: string;
+  MSGSTATS_JWT_SECRET: string;
+  MSGSTATS_JWT_ISSUER: string;
+  MSGSTATS_JWT_AUDIENCE: string;
+  AUTH_SESSION_PEPPER: string;
+  AUTH_REFRESH_ENCRYPTION_KEY: string;
+  AUTH_INVITE_PEPPER: string;
+  AUTH0_DOMAIN: string;
+  AUTH0_CLIENT_ID: string;
+  AUTH0_AUDIENCE?: string;
+  AUTH0_REDIRECT_URI: string;
+  AUTH0_AUTHORIZE_URL: string;
+  AUTH0_TOKEN_URL: string;
+  AUTH0_JWKS_URL: string;
   APP_ORIGIN?: string;
   DEPLOY_ENV?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -558,18 +565,79 @@ function isAuditConversationsEnabled(env: Env) {
 }
 
 async function getUserFeatureFlags(env: Env, userId: string) {
-  const row = await env.DB.prepare(
+  const merged: Record<string, unknown> = {};
+  const applyJson = (raw: string | null | undefined) => {
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        Object.assign(merged, parsed as Record<string, unknown>);
+      }
+    } catch {
+      // ignore bad row payload
+    }
+  };
+
+  const userRows = await env.DB.prepare(
+    'SELECT flag_key as flagKey, flag_value as flagValue FROM feature_flags_user WHERE user_id = ?',
+  )
+    .bind(userId)
+    .all<{ flagKey: string; flagValue: string }>();
+  for (const row of userRows.results ?? []) {
+    const normalized = (row.flagValue ?? '').trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) {
+      merged[row.flagKey] = true;
+      continue;
+    }
+    if (['false', '0', 'no', 'off'].includes(normalized)) {
+      merged[row.flagKey] = false;
+      continue;
+    }
+    merged[row.flagKey] = row.flagValue;
+  }
+
+  const legacyDirect = await env.DB.prepare(
     'SELECT feature_flags as featureFlags FROM meta_users WHERE id = ?',
   )
     .bind(userId)
     .first<{ featureFlags: string | null }>();
-  if (!row?.featureFlags) return {};
-  try {
-    const parsed = JSON.parse(row.featureFlags);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+  applyJson(legacyDirect?.featureFlags);
+
+  const legacyMapped = await env.DB.prepare(
+    `SELECT mu.feature_flags as featureFlags
+     FROM org_meta_user omu
+     JOIN meta_users mu ON mu.id = omu.meta_user_id
+     WHERE omu.user_id = ?`,
+  )
+    .bind(userId)
+    .all<{ featureFlags: string | null }>();
+  for (const row of legacyMapped.results ?? []) {
+    applyJson(row.featureFlags);
   }
+
+  return merged;
+}
+
+async function getOrgFeatureFlags(env: Env, orgId: string) {
+  const rows = await env.DB.prepare(
+    'SELECT flag_key as flagKey, flag_value as flagValue FROM feature_flags_org WHERE org_id = ?',
+  )
+    .bind(orgId)
+    .all<{ flagKey: string; flagValue: string }>();
+  const flags: Record<string, unknown> = {};
+  for (const row of rows.results ?? []) {
+    const normalized = (row.flagValue ?? '').trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) {
+      flags[row.flagKey] = true;
+      continue;
+    }
+    if (['false', '0', 'no', 'off'].includes(normalized)) {
+      flags[row.flagKey] = false;
+      continue;
+    }
+    flags[row.flagKey] = row.flagValue;
+  }
+  return flags;
 }
 
 function resolveFeatureFlagValue(
@@ -693,11 +761,14 @@ async function opsIncrementHour(env: Env, hourIso: string, delta: number) {
 }
 
 async function requireSession(req: Request, env: Env) {
-  const token = getSessionCookie(req.headers);
-  if (!token) {
+  const auth = await requireAccessAuth(req, env);
+  if (!auth) {
     return null;
   }
-  return await readSessionToken(token, env.SESSION_SECRET);
+  return {
+    userId: auth.claims.meta_user_id ?? auth.claims.sub,
+    expiresAt: auth.claims.exp * 1000,
+  };
 }
 
 async function requireUser(req: Request, env: Env) {
@@ -708,8 +779,43 @@ async function requireUser(req: Request, env: Env) {
   return session.userId;
 }
 
-async function getUserToken(env: Env, userId: string) {
-  const result = await env.DB.prepare(
+async function getUserToken(env: Env, userId: string, orgId?: string | null) {
+  if (orgId) {
+    const mappedByMetaId = await env.DB.prepare(
+      `SELECT mu.access_token as access_token, mu.token_type as token_type, mu.expires_at as expires_at
+       FROM meta_users mu
+       JOIN org_meta_user omu ON omu.meta_user_id = mu.id
+       WHERE omu.org_id = ? AND omu.meta_user_id = ?
+       LIMIT 1`,
+    )
+      .bind(orgId, userId)
+      .first<{
+        access_token: string;
+        token_type: string | null;
+        expires_at: number | null;
+      }>();
+    if (mappedByMetaId) {
+      return mappedByMetaId;
+    }
+    const mappedByAppUser = await env.DB.prepare(
+      `SELECT mu.access_token as access_token, mu.token_type as token_type, mu.expires_at as expires_at
+       FROM org_meta_user omu
+       JOIN meta_users mu ON mu.id = omu.meta_user_id
+       WHERE omu.org_id = ? AND omu.user_id = ?
+       ORDER BY omu.created_at ASC
+       LIMIT 1`,
+    )
+      .bind(orgId, userId)
+      .first<{
+        access_token: string;
+        token_type: string | null;
+        expires_at: number | null;
+      }>();
+    if (mappedByAppUser) {
+      return mappedByAppUser;
+    }
+  }
+  const legacy = await env.DB.prepare(
     'SELECT access_token, token_type, expires_at FROM meta_users WHERE id = ?',
   )
     .bind(userId)
@@ -718,7 +824,7 @@ async function getUserToken(env: Env, userId: string) {
       token_type: string | null;
       expires_at: number | null;
     }>();
-  return result ?? null;
+  return legacy ?? null;
 }
 
 async function upsertMetaUser(
@@ -766,6 +872,7 @@ async function upsertPage(
   env: Env,
   data: {
     userId: string;
+    orgId?: string | null;
     pageId: string;
     name: string;
     accessToken: string;
@@ -773,20 +880,34 @@ async function upsertPage(
 ) {
   const now = new Date().toISOString();
   const insertResult = await env.DB.prepare(
-    `INSERT OR IGNORE INTO meta_pages (user_id, id, name, access_token, updated_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO meta_pages (user_id, org_id, id, name, access_token, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   )
-    .bind(data.userId, data.pageId, data.name, data.accessToken, now)
+    .bind(
+      data.userId,
+      data.orgId ?? null,
+      data.pageId,
+      data.name,
+      data.accessToken,
+      now,
+    )
     .run();
   if ((insertResult.meta?.changes ?? 0) > 0) {
     await opsIncrement(env, 'assets_total', 1);
   }
   await env.DB.prepare(
     `UPDATE meta_pages
-     SET name = ?, access_token = ?, updated_at = ?
+     SET name = ?, access_token = ?, org_id = COALESCE(org_id, ?), updated_at = ?
      WHERE user_id = ? AND id = ?`,
   )
-    .bind(data.name, data.accessToken, now, data.userId, data.pageId)
+    .bind(
+      data.name,
+      data.accessToken,
+      data.orgId ?? null,
+      now,
+      data.userId,
+      data.pageId,
+    )
     .run();
 }
 
@@ -809,7 +930,26 @@ async function updatePageNameIfPlaceholder(
     .run();
 }
 
-async function getPage(env: Env, userId: string, pageId: string) {
+async function getPage(
+  env: Env,
+  userId: string,
+  pageId: string,
+  orgId?: string | null,
+) {
+  if (orgId) {
+    const scoped = await env.DB.prepare(
+      `SELECT id, name, access_token
+       FROM meta_pages
+       WHERE user_id = ? AND id = ? AND (org_id = ? OR org_id IS NULL)
+       ORDER BY CASE WHEN org_id = ? THEN 0 ELSE 1 END
+       LIMIT 1`,
+    )
+      .bind(userId, pageId, orgId, orgId)
+      .first<{ id: string; name: string | null; access_token: string }>();
+    if (scoped) {
+      return scoped;
+    }
+  }
   return await env.DB.prepare(
     'SELECT id, name, access_token FROM meta_pages WHERE user_id = ? AND id = ?',
   )
@@ -821,6 +961,7 @@ async function upsertIgAsset(
   env: Env,
   data: {
     userId: string;
+    orgId?: string | null;
     pageId: string;
     id: string;
     name: string;
@@ -828,38 +969,58 @@ async function upsertIgAsset(
 ) {
   const now = new Date().toISOString();
   const insertResult = await env.DB.prepare(
-    `INSERT OR IGNORE INTO ig_assets (user_id, id, page_id, name, updated_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO ig_assets (user_id, org_id, id, page_id, name, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   )
-    .bind(data.userId, data.id, data.pageId, data.name, now)
+    .bind(data.userId, data.orgId ?? null, data.id, data.pageId, data.name, now)
     .run();
   if ((insertResult.meta?.changes ?? 0) > 0) {
     await opsIncrement(env, 'assets_total', 1);
   }
   await env.DB.prepare(
     `UPDATE ig_assets
-     SET page_id = ?, name = ?, updated_at = ?
+     SET page_id = ?, name = ?, org_id = COALESCE(org_id, ?), updated_at = ?
      WHERE user_id = ? AND id = ?`,
   )
-    .bind(data.pageId, data.name, now, data.userId, data.id)
+    .bind(data.pageId, data.name, data.orgId ?? null, now, data.userId, data.id)
     .run();
 }
 
-async function listIgAssets(env: Env, userId: string, pageId: string) {
-  const result = await env.DB.prepare(
-    'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ? AND page_id = ?',
-  )
-    .bind(userId, pageId)
-    .all<{ id: string; name: string; pageId: string }>();
+async function listIgAssets(
+  env: Env,
+  userId: string,
+  pageId: string,
+  orgId?: string | null,
+) {
+  const query = orgId
+    ? 'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ? AND page_id = ? AND (org_id = ? OR org_id IS NULL)'
+    : 'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ? AND page_id = ?';
+  const result = orgId
+    ? await env.DB.prepare(query)
+        .bind(userId, pageId, orgId)
+        .all<{ id: string; name: string; pageId: string }>()
+    : await env.DB.prepare(query)
+        .bind(userId, pageId)
+        .all<{ id: string; name: string; pageId: string }>();
   return result.results ?? [];
 }
 
-async function listPagesWithStats(env: Env, userId: string) {
-  const pages = await env.DB.prepare(
-    'SELECT id, name, updated_at FROM meta_pages WHERE user_id = ?',
-  )
-    .bind(userId)
-    .all<{ id: string; name: string | null; updated_at: string | null }>();
+async function listPagesWithStats(
+  env: Env,
+  userId: string,
+  orgId?: string | null,
+) {
+  const pages = orgId
+    ? await env.DB.prepare(
+        'SELECT id, name, updated_at FROM meta_pages WHERE user_id = ? AND (org_id = ? OR org_id IS NULL)',
+      )
+        .bind(userId, orgId)
+        .all<{ id: string; name: string | null; updated_at: string | null }>()
+    : await env.DB.prepare(
+        'SELECT id, name, updated_at FROM meta_pages WHERE user_id = ?',
+      )
+        .bind(userId)
+        .all<{ id: string; name: string | null; updated_at: string | null }>();
   const stats = await env.DB.prepare(
     `SELECT page_id as pageId,
             COUNT(DISTINCT id) as conversations,
@@ -902,17 +1063,31 @@ async function listPagesWithStats(env: Env, userId: string) {
   });
 }
 
-async function getAssetNameMap(env: Env, userId: string) {
-  const pages = await env.DB.prepare(
-    'SELECT id, name FROM meta_pages WHERE user_id = ?',
-  )
-    .bind(userId)
-    .all<{ id: string; name: string | null }>();
-  const igAssets = await env.DB.prepare(
-    'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ?',
-  )
-    .bind(userId)
-    .all<{ id: string; name: string | null; pageId: string }>();
+async function getAssetNameMap(
+  env: Env,
+  userId: string,
+  orgId?: string | null,
+) {
+  const pages = orgId
+    ? await env.DB.prepare(
+        'SELECT id, name FROM meta_pages WHERE user_id = ? AND (org_id = ? OR org_id IS NULL)',
+      )
+        .bind(userId, orgId)
+        .all<{ id: string; name: string | null }>()
+    : await env.DB.prepare('SELECT id, name FROM meta_pages WHERE user_id = ?')
+        .bind(userId)
+        .all<{ id: string; name: string | null }>();
+  const igAssets = orgId
+    ? await env.DB.prepare(
+        'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ? AND (org_id = ? OR org_id IS NULL)',
+      )
+        .bind(userId, orgId)
+        .all<{ id: string; name: string | null; pageId: string }>()
+    : await env.DB.prepare(
+        'SELECT id, name, page_id as pageId FROM ig_assets WHERE user_id = ?',
+      )
+        .bind(userId)
+        .all<{ id: string; name: string | null; pageId: string }>();
   const map = new Map<
     string,
     { name: string; platform: string; pageId?: string }
@@ -3446,6 +3621,7 @@ registerRoutes({
   isOpsDashboardEnabledForUser,
   isAuditConversationsEnabledForUser,
   getUserFeatureFlags,
+  getOrgFeatureFlags,
   exchangeCodeForToken,
   exchangeForLongLivedToken,
   debugToken,
@@ -3460,11 +3636,9 @@ registerRoutes({
   fetchConversationMessages,
   sendMessage,
   fetchUserProfile,
-  buildSessionCookie,
-  clearSessionCookie,
-  createSessionToken,
   requireSession,
   requireUser,
+  requireAccessAuth,
   getUserToken,
   upsertMetaUser,
   upsertPage,
@@ -3500,9 +3674,27 @@ registerRoutes({
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    const authGatewayResponse = await handleAuthGateway(req, env);
+    if (authGatewayResponse) {
+      return authGatewayResponse;
+    }
     const url = new URL(req.url);
     const pathname = url.pathname;
     const method = req.method.toUpperCase();
+    const publicApiPaths = new Set([
+      '/api/health',
+      '/api/auth/login',
+      '/api/auth/callback',
+      '/api/auth/config',
+      '/api/auth/me',
+      '/api/meta/webhook',
+    ]);
+    if (pathname.startsWith('/api/') && !publicApiPaths.has(pathname)) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
 
     for (const route of routes) {
       if (route.method !== method) {

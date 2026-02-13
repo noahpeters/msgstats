@@ -76,16 +76,19 @@ export default {
     }
 
     if (url.pathname === '/sync/runs/subscribe') {
-      // auth gate only
-      const cookie = request.headers.get('cookie') ?? '';
+      const wsToken = url.searchParams.get('access_token');
+      const authHeaders = new Headers();
+      if (wsToken) {
+        authHeaders.set('authorization', `Bearer ${wsToken}`);
+      }
       const whoami = env.API
         ? await env.API.fetch('http://internal/api/auth/whoami', {
-            headers: { cookie },
+            headers: authHeaders,
           })
         : await fetch(
             `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
             {
-              headers: { cookie },
+              headers: authHeaders,
             },
           );
 
@@ -104,15 +107,19 @@ export default {
     }
 
     if (url.pathname === '/inbox/subscribe') {
-      const cookie = request.headers.get('cookie') ?? '';
+      const wsToken = url.searchParams.get('access_token');
+      const authHeaders = new Headers();
+      if (wsToken) {
+        authHeaders.set('authorization', `Bearer ${wsToken}`);
+      }
       const whoami = env.API
         ? await env.API.fetch('http://internal/api/auth/whoami', {
-            headers: { cookie },
+            headers: authHeaders,
           })
         : await fetch(
             `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
             {
-              headers: { cookie },
+              headers: authHeaders,
             },
           );
       if (!whoami.ok) return new Response('Unauthorized', { status: 401 });
@@ -120,12 +127,12 @@ export default {
       if (!payload.userId) return new Response('Unauthorized', { status: 401 });
       const flags = env.API
         ? await env.API.fetch('http://internal/api/feature-flags', {
-            headers: { cookie },
+            headers: authHeaders,
           })
         : await fetch(
             `${env.API_URL ?? 'http://localhost:8787'}/api/feature-flags`,
             {
-              headers: { cookie },
+              headers: authHeaders,
             },
           );
       if (flags.ok) {

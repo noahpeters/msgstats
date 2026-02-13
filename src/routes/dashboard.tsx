@@ -9,6 +9,7 @@ import {
   buildSyncRunKey,
   sendSyncRunsSubscribe,
 } from '../utils/syncRunsWebsocket';
+import { getAccessToken } from '../lib/authClient';
 
 type PermissionResponse = {
   hasToken: boolean;
@@ -778,6 +779,7 @@ export default function Dashboard(): React.ReactElement {
         window.location.hostname,
         window.location.protocol,
         window.location.host,
+        getAccessToken(),
       );
       const currentSocket = new WebSocket(wsUrl);
       socket = currentSocket;

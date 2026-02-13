@@ -4,19 +4,27 @@ import * as stylex from '@stylexjs/stylex';
 import { layout } from '../app/styles';
 import { AppFooter } from '../app/components/AppFooter';
 import { FromTreesIcon } from '../components/FromTreesIcon';
+import { clearAuth, switchActiveOrganization } from '../lib/authClient';
 
 type AuthResponse = {
   authenticated: boolean;
   userId?: string;
+  orgId?: string;
+  role?: string;
   name?: string | null;
   email?: string | null;
+};
+
+type OrgMembership = {
+  orgId: string;
+  orgName: string;
+  role: string;
 };
 
 export type AppShellOutletContext = {
   setToolbarContent: React.Dispatch<React.SetStateAction<React.ReactNode>>;
 };
 
-const LOGIN_NEXT_STORAGE_KEY = 'msgstats:auth:next';
 const shellLayoutVars = {
   footerHeight: '84px',
   dividerColor: 'rgba(12, 27, 26, 0.14)',
@@ -120,6 +128,16 @@ const shellStyles = stylex.create({
     flexWrap: 'wrap',
     justifyContent: 'flex-end',
   },
+  orgSelect: {
+    border: `1px solid ${shellLayoutVars.dividerColor}`,
+    borderRadius: '8px',
+    backgroundColor: '#fff',
+    color: '#0c1b1a',
+    fontSize: '12px',
+    padding: '6px 8px',
+    fontFamily: '"IBM Plex Sans", "Helvetica", sans-serif',
+    maxWidth: '240px',
+  },
   horizontalDivider: {
     height: '1px',
     width: '100%',
@@ -197,6 +215,10 @@ export default function RootRoute(): React.ReactElement {
   } | null>(null);
   const [auth, setAuth] = React.useState<AuthResponse | null>(null);
   const [loggingOut, setLoggingOut] = React.useState(false);
+  const [switchingOrg, setSwitchingOrg] = React.useState(false);
+  const [orgMemberships, setOrgMemberships] = React.useState<OrgMembership[]>(
+    [],
+  );
   const [toolbarContent, setToolbarContent] =
     React.useState<React.ReactNode>(null);
   const buildInfoRaw = import.meta.env.VITE_STAGING_INFO;
@@ -217,7 +239,7 @@ export default function RootRoute(): React.ReactElement {
         setFlags(null);
       }
     })();
-  }, []);
+  }, [auth?.authenticated, auth?.orgId]);
 
   React.useEffect(() => {
     let active = true;
@@ -244,6 +266,38 @@ export default function RootRoute(): React.ReactElement {
       active = false;
     };
   }, [location.key]);
+
+  React.useEffect(() => {
+    if (!auth?.authenticated) {
+      setOrgMemberships([]);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch('/api/auth/orgs', { cache: 'no-store' });
+        if (!response.ok) {
+          return;
+        }
+        const payload = (await response.json()) as {
+          orgs?: OrgMembership[];
+          active_org_id?: string;
+        };
+        if (!active) {
+          return;
+        }
+        setOrgMemberships(payload.orgs ?? []);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setOrgMemberships([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [auth?.authenticated, auth?.orgId]);
 
   React.useEffect(() => {
     const host = window.location.hostname;
@@ -276,30 +330,52 @@ export default function RootRoute(): React.ReactElement {
   }, []);
 
   React.useEffect(() => {
-    if (!auth?.authenticated) {
-      return;
-    }
-    if (location.pathname !== '/') {
-      return;
-    }
-    const storedNext = sanitizeNext(
-      window.sessionStorage.getItem(LOGIN_NEXT_STORAGE_KEY),
+    const onRequired = () => {
+      setAuth({ authenticated: false });
+    };
+    window.addEventListener(
+      'msgstats-auth-required',
+      onRequired as EventListener,
     );
-    if (storedNext !== '/') {
-      window.sessionStorage.removeItem(LOGIN_NEXT_STORAGE_KEY);
-      window.location.replace(storedNext);
-    }
-  }, [auth?.authenticated, location.pathname]);
+    return () => {
+      window.removeEventListener(
+        'msgstats-auth-required',
+        onRequired as EventListener,
+      );
+    };
+  }, []);
 
   const handleLogout = React.useCallback(async () => {
     setLoggingOut(true);
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      await clearAuth();
     } finally {
       setAuth({ authenticated: false });
       setLoggingOut(false);
     }
   }, []);
+
+  const handleOrgSwitch = React.useCallback(
+    async (nextOrgId: string) => {
+      if (!auth?.orgId || nextOrgId === auth.orgId) {
+        return;
+      }
+      setSwitchingOrg(true);
+      try {
+        await switchActiveOrganization(nextOrgId);
+        const me = await fetch('/api/auth/me', { cache: 'no-store' });
+        if (!me.ok) {
+          setAuth({ authenticated: false });
+          return;
+        }
+        const data = (await me.json()) as AuthResponse;
+        setAuth(data);
+      } finally {
+        setSwitchingOrg(false);
+      }
+    },
+    [auth?.orgId],
+  );
 
   if (!auth) {
     return (
@@ -396,11 +472,50 @@ export default function RootRoute(): React.ReactElement {
                 Ops
               </Link>
             ) : null}
+            {auth.role === 'owner' ? (
+              <Link
+                to="/org-settings"
+                {...stylex.props(
+                  shellStyles.pageTab,
+                  location.pathname === '/org-settings' &&
+                    shellStyles.pageTabActive,
+                )}
+              >
+                Org
+              </Link>
+            ) : null}
+            {flags?.opsDashboard ? (
+              <Link
+                to="/admin"
+                {...stylex.props(
+                  shellStyles.pageTab,
+                  location.pathname === '/admin' && shellStyles.pageTabActive,
+                )}
+              >
+                Admin
+              </Link>
+            ) : null}
           </nav>
           <div {...stylex.props(shellStyles.controlsGroup)}>
             <span {...stylex.props(headerStyles.accountName)}>
               {accountLabel}
             </span>
+            {orgMemberships.length > 1 ? (
+              <select
+                {...stylex.props(shellStyles.orgSelect)}
+                value={auth.orgId ?? ''}
+                disabled={switchingOrg}
+                onChange={(event) => {
+                  void handleOrgSwitch(event.target.value);
+                }}
+              >
+                {orgMemberships.map((org) => (
+                  <option key={org.orgId} value={org.orgId}>
+                    {org.orgName} ({org.role})
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               {...stylex.props(layout.ghostButton)}

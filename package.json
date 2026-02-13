@@ -34,7 +34,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "verify": "npm run lint && npm run format && npm run typecheck && npm run test",
-    "prepare": "simple-git-hooks"
+    "prepare": "simple-git-hooks",
+    "auth:secrets:push": "node scripts/set-auth-secrets.mjs",
+    "auth:vars:sync": "node scripts/sync-auth-vars.mjs"
   },
   "dependencies": {
     "@react-router/cloudflare": "^7.0.0",
