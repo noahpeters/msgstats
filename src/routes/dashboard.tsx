@@ -21,6 +21,7 @@ type PermissionResponse = {
 type AuthResponse = {
   authenticated: boolean;
   userId?: string;
+  orgId?: string;
   name?: string | null;
 };
 
@@ -66,6 +67,8 @@ type FollowupCount = {
 
 type SyncRun = {
   id: string;
+  orgId?: string | null;
+  assetId?: string | null;
   pageId: string;
   platform: string;
   igBusinessId?: string | null;
@@ -785,7 +788,7 @@ export default function Dashboard(): React.ReactElement {
       socket = currentSocket;
       currentSocket.addEventListener('open', () => {
         attempts = 0;
-        sendSyncRunsSubscribe(currentSocket, auth.userId);
+        sendSyncRunsSubscribe(currentSocket, auth.orgId);
       });
       currentSocket.addEventListener('message', (event) => {
         try {
@@ -819,7 +822,7 @@ export default function Dashboard(): React.ReactElement {
       }
       socket?.close();
     };
-  }, [auth?.authenticated, auth?.userId, mergeRunUpdate]);
+  }, [auth?.authenticated, auth?.orgId, mergeRunUpdate]);
 
   React.useEffect(() => {
     let shouldRefresh = false;

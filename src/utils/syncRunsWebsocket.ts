@@ -17,12 +17,12 @@ export const buildSyncRunsWsUrl = (
 
 export const sendSyncRunsSubscribe = (
   socket: WebSocket,
-  userId?: string | null,
+  orgId?: string | null,
 ) => {
-  if (!userId) {
+  if (!orgId) {
     return;
   }
-  socket.send(JSON.stringify({ type: 'subscribe', userId }));
+  socket.send(JSON.stringify({ type: 'subscribe', orgId }));
   socket.send(JSON.stringify({ type: 'request_latest' }));
 };
 

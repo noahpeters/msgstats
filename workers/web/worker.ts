@@ -50,6 +50,21 @@ async function getHandler() {
   return await handlerPromise;
 }
 
+async function fetchApiWithFallback(
+  env: Env,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  if (env.API) {
+    try {
+      return await env.API.fetch(`http://internal${path}`, init);
+    } catch {
+      // Fallback to direct local API URL in dev when service binding hot-reloads.
+    }
+  }
+  return await fetch(`${env.API_URL ?? 'http://localhost:8787'}${path}`, init);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -81,25 +96,18 @@ export default {
       if (wsToken) {
         authHeaders.set('authorization', `Bearer ${wsToken}`);
       }
-      const whoami = env.API
-        ? await env.API.fetch('http://internal/api/auth/whoami', {
-            headers: authHeaders,
-          })
-        : await fetch(
-            `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
-            {
-              headers: authHeaders,
-            },
-          );
+      const whoami = await fetchApiWithFallback(env, '/api/auth/whoami', {
+        headers: authHeaders,
+      });
 
       console.log('[subscribe] whoami', whoami.status);
       if (!whoami.ok) return new Response('Unauthorized', { status: 401 });
 
-      const payload = (await whoami.json()) as { userId?: string };
-      if (!payload.userId) return new Response('Unauthorized', { status: 401 });
+      const payload = (await whoami.json()) as { orgId?: string };
+      if (!payload.orgId) return new Response('Unauthorized', { status: 401 });
 
       const stub = env.SYNC_RUNS_HUB.get(
-        env.SYNC_RUNS_HUB.idFromName(payload.userId),
+        env.SYNC_RUNS_HUB.idFromName(payload.orgId),
       );
 
       // Pass the *original* request through unchanged so the DO can do the actual upgrade.
@@ -112,36 +120,26 @@ export default {
       if (wsToken) {
         authHeaders.set('authorization', `Bearer ${wsToken}`);
       }
-      const whoami = env.API
-        ? await env.API.fetch('http://internal/api/auth/whoami', {
-            headers: authHeaders,
-          })
-        : await fetch(
-            `${env.API_URL ?? 'http://localhost:8787'}/api/auth/whoami`,
-            {
-              headers: authHeaders,
-            },
-          );
+      const whoami = await fetchApiWithFallback(env, '/api/auth/whoami', {
+        headers: authHeaders,
+      });
       if (!whoami.ok) return new Response('Unauthorized', { status: 401 });
-      const payload = (await whoami.json()) as { userId?: string };
-      if (!payload.userId) return new Response('Unauthorized', { status: 401 });
-      const flags = env.API
-        ? await env.API.fetch('http://internal/api/feature-flags', {
-            headers: authHeaders,
-          })
-        : await fetch(
-            `${env.API_URL ?? 'http://localhost:8787'}/api/feature-flags`,
-            {
-              headers: authHeaders,
-            },
-          );
+      const payload = (await whoami.json()) as {
+        userId?: string;
+        metaUserId?: string | null;
+      };
+      const inboxChannelId = payload.metaUserId ?? payload.userId ?? null;
+      if (!inboxChannelId) return new Response('Unauthorized', { status: 401 });
+      const flags = await fetchApiWithFallback(env, '/api/feature-flags', {
+        headers: authHeaders,
+      });
       if (flags.ok) {
         const data = (await flags.json()) as { followupInbox?: boolean };
         if (!data.followupInbox) {
           return new Response('Not Found', { status: 404 });
         }
       }
-      const stub = env.INBOX_HUB.get(env.INBOX_HUB.idFromName(payload.userId));
+      const stub = env.INBOX_HUB.get(env.INBOX_HUB.idFromName(inboxChannelId));
       return stub.fetch(request);
     }
 

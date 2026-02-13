@@ -41,6 +41,8 @@
   "dependencies": {
     "@react-router/cloudflare": "^7.0.0",
     "@react-router/node": "^7.0.0",
+    "@simplewebauthn/browser": "^13.2.2",
+    "@simplewebauthn/server": "^13.2.2",
     "@stylexjs/stylex": "^0.7.0",
     "d3": "^7.9.0",
     "react": "^18.3.1",

@@ -38,6 +38,11 @@ function createDeps(overrides: Record<string, unknown>) {
     },
     readJson: async <T>(req: Request) => (await req.json()) as T,
     requireUser: async () => 'user-1',
+    requireAccessAuth: async () => ({
+      claims: { sub: 'user-1', role: 'owner' },
+    }),
+    getUserFeatureFlags: async () => ({}),
+    getOrgFeatureFlags: async () => ({}),
     isAuditConversationsEnabledForUser: async () => false,
     getConversation: async () => null,
     getConversationClassificationExplain: async () => null,

@@ -113,13 +113,21 @@ export type Env = {
   AUTH_SESSION_PEPPER: string;
   AUTH_REFRESH_ENCRYPTION_KEY: string;
   AUTH_INVITE_PEPPER: string;
-  AUTH0_DOMAIN: string;
-  AUTH0_CLIENT_ID: string;
-  AUTH0_AUDIENCE?: string;
-  AUTH0_REDIRECT_URI: string;
-  AUTH0_AUTHORIZE_URL: string;
-  AUTH0_TOKEN_URL: string;
-  AUTH0_JWKS_URL: string;
+  AUTH_PASSWORD_RESET_PEPPER: string;
+  AUTH_PBKDF2_ITERATIONS?: string;
+  AUTH_RP_ID: string;
+  AUTH_RP_NAME: string;
+  AUTH_ORIGIN_ALLOWLIST?: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_REDIRECT_URI: string;
+  APPLE_CLIENT_ID: string;
+  APPLE_TEAM_ID: string;
+  APPLE_KEY_ID: string;
+  APPLE_PRIVATE_KEY_P8: string;
+  APPLE_REDIRECT_URI: string;
+  AUTH_EMAIL_FROM?: string;
+  AUTH_EMAIL_REPLY_TO?: string;
   APP_ORIGIN?: string;
   DEPLOY_ENV?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -168,6 +176,7 @@ type RouteHandler = (
 type SyncRunRow = {
   id: string;
   userId: string;
+  orgId: string | null;
   pageId: string;
   platform: string;
   igBusinessId: string | null;
@@ -188,6 +197,7 @@ type SyncRunRow = {
 
 type SyncScope = {
   userId: string;
+  orgId: string | null;
   pageId: string;
   platform: 'messenger' | 'instagram';
   igBusinessId: string | null;
@@ -693,6 +703,59 @@ async function isAuditConversationsEnabledForUser(env: Env, userId: string) {
   );
 }
 
+async function resolveWorkspaceAuthSubject(
+  env: Env,
+  workspaceUserId: string,
+): Promise<{ appUserId: string; orgId: string | null }> {
+  const viaMeta = await env.DB.prepare(
+    `SELECT user_id as appUserId, org_id as orgId
+     FROM org_meta_user
+     WHERE meta_user_id = ?
+     ORDER BY created_at ASC
+     LIMIT 1`,
+  )
+    .bind(workspaceUserId)
+    .first<{ appUserId: string; orgId: string }>();
+  if (viaMeta?.appUserId) {
+    return { appUserId: viaMeta.appUserId, orgId: viaMeta.orgId ?? null };
+  }
+
+  const viaMembership = await env.DB.prepare(
+    `SELECT user_id as appUserId, org_id as orgId
+     FROM org_memberships
+     WHERE user_id = ?
+     ORDER BY created_at ASC
+     LIMIT 1`,
+  )
+    .bind(workspaceUserId)
+    .first<{ appUserId: string; orgId: string }>();
+  if (viaMembership?.appUserId) {
+    return {
+      appUserId: viaMembership.appUserId,
+      orgId: viaMembership.orgId ?? null,
+    };
+  }
+
+  return { appUserId: workspaceUserId, orgId: null };
+}
+
+async function isFollowupInboxEnabledForWorkspace(
+  env: Env,
+  workspaceUserId: string,
+) {
+  const defaultValue = isFollowupInboxEnabled(env);
+  const subject = await resolveWorkspaceAuthSubject(env, workspaceUserId);
+  const userFlags = await getUserFeatureFlags(env, subject.appUserId);
+  const orgFlags = subject.orgId
+    ? await getOrgFeatureFlags(env, subject.orgId)
+    : {};
+  const merged = { ...orgFlags, ...userFlags } as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(merged, 'FEATURE_FOLLOWUP_INBOX')) {
+    return defaultValue;
+  }
+  return resolveFeatureFlagValue(defaultValue, merged.FEATURE_FOLLOWUP_INBOX);
+}
+
 function parseJsonArray(raw: string | null | undefined): unknown[] {
   if (!raw) return [];
   try {
@@ -827,6 +890,34 @@ async function getUserToken(env: Env, userId: string, orgId?: string | null) {
   return legacy ?? null;
 }
 
+async function resolveOrgIdForWorkspaceUser(env: Env, userId: string) {
+  const mappedByMeta = await env.DB.prepare(
+    'SELECT org_id as orgId FROM org_meta_user WHERE meta_user_id = ? ORDER BY created_at ASC LIMIT 1',
+  )
+    .bind(userId)
+    .first<{ orgId: string }>();
+  if (mappedByMeta?.orgId) {
+    return mappedByMeta.orgId;
+  }
+  const mappedByUser = await env.DB.prepare(
+    'SELECT org_id as orgId FROM org_memberships WHERE user_id = ? ORDER BY created_at ASC LIMIT 1',
+  )
+    .bind(userId)
+    .first<{ orgId: string }>();
+  if (mappedByUser?.orgId) {
+    return mappedByUser.orgId;
+  }
+  const inferredByPage = await env.DB.prepare(
+    'SELECT org_id as orgId FROM meta_pages WHERE user_id = ? AND org_id IS NOT NULL AND org_id != "" LIMIT 1',
+  )
+    .bind(userId)
+    .first<{ orgId: string }>();
+  if (inferredByPage?.orgId) {
+    return inferredByPage.orgId;
+  }
+  return null;
+}
+
 async function upsertMetaUser(
   env: Env,
   data: {
@@ -938,23 +1029,33 @@ async function getPage(
 ) {
   if (orgId) {
     const scoped = await env.DB.prepare(
-      `SELECT id, name, access_token
+      `SELECT id, name, access_token, org_id as orgId
        FROM meta_pages
        WHERE user_id = ? AND id = ? AND (org_id = ? OR org_id IS NULL)
        ORDER BY CASE WHEN org_id = ? THEN 0 ELSE 1 END
        LIMIT 1`,
     )
       .bind(userId, pageId, orgId, orgId)
-      .first<{ id: string; name: string | null; access_token: string }>();
+      .first<{
+        id: string;
+        name: string | null;
+        access_token: string;
+        orgId: string | null;
+      }>();
     if (scoped) {
       return scoped;
     }
   }
   return await env.DB.prepare(
-    'SELECT id, name, access_token FROM meta_pages WHERE user_id = ? AND id = ?',
+    'SELECT id, name, access_token, org_id as orgId FROM meta_pages WHERE user_id = ? AND id = ?',
   )
     .bind(userId, pageId)
-    .first<{ id: string; name: string | null; access_token: string }>();
+    .first<{
+      id: string;
+      name: string | null;
+      access_token: string;
+      orgId: string | null;
+    }>();
 }
 
 async function upsertIgAsset(
@@ -1699,6 +1800,7 @@ async function createSyncRun(
   env: Env,
   data: {
     userId: string;
+    orgId?: string | null;
     pageId: string;
     platform: string;
     igBusinessId?: string | null;
@@ -1708,12 +1810,13 @@ async function createSyncRun(
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.prepare(
-    `INSERT INTO sync_runs (id, user_id, page_id, platform, ig_business_id, status, started_at, finished_at, last_error, conversations, messages, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sync_runs (id, user_id, org_id, page_id, platform, ig_business_id, status, started_at, finished_at, last_error, conversations, messages, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
       data.userId,
+      data.orgId ?? null,
       data.pageId,
       data.platform,
       data.igBusinessId ?? null,
@@ -1733,6 +1836,7 @@ async function getSyncRunRow(env: Env, id: string) {
   return await env.DB.prepare(
     `SELECT id,
             user_id as userId,
+            org_id as orgId,
             page_id as pageId,
             platform,
             ig_business_id as igBusinessId,
@@ -1822,8 +1926,11 @@ async function updateSyncRun(
 }
 
 function sanitizeSyncRunForClient(run: SyncRunRow) {
+  const assetId = run.igBusinessId ?? run.pageId;
   return {
     id: run.id,
+    orgId: run.orgId,
+    assetId,
     pageId: run.pageId,
     platform: run.platform,
     igBusinessId: run.igBusinessId,
@@ -1841,14 +1948,17 @@ function sanitizeSyncRunForClient(run: SyncRunRow) {
 }
 
 async function notifySyncRunUpdated(env: Env, run: SyncRunRow) {
+  const orgId = run.orgId;
+  if (!orgId) {
+    console.warn('Skipping sync run notify: missing org id', { runId: run.id });
+    return;
+  }
   const payload = {
     type: 'run_updated',
     run: sanitizeSyncRunForClient(run),
   };
   try {
-    const stub = env.SYNC_RUNS_HUB.get(
-      env.SYNC_RUNS_HUB.idFromName(run.userId),
-    );
+    const stub = env.SYNC_RUNS_HUB.get(env.SYNC_RUNS_HUB.idFromName(orgId));
     await stub.fetch('https://sync-runs/notify', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1866,7 +1976,7 @@ async function notifySyncRunUpdated(env: Env, run: SyncRunRow) {
       await fetch(env.DEV_WS_PUBLISH_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ userId: run.userId, payload }),
+        body: JSON.stringify({ orgId, payload }),
       });
     } catch (error) {
       console.warn('Failed to publish dev ws update', {
@@ -2026,7 +2136,7 @@ async function updateSyncRunStatsAndNotify(
 
 function buildSyncScopeKey(scope: SyncScope) {
   const igPart = scope.igBusinessId ?? '';
-  return `${scope.userId}:${scope.pageId}:${scope.platform}:${igPart}`;
+  return `${scope.orgId ?? ''}:${scope.userId}:${scope.pageId}:${scope.platform}:${igPart}`;
 }
 
 async function ensureSyncForScope(env: Env, scope: SyncScope, source: string) {
@@ -2057,8 +2167,11 @@ async function ensureSyncForScope(env: Env, scope: SyncScope, source: string) {
     }
   }
 
+  const orgId =
+    scope.orgId ?? (await resolveOrgIdForWorkspaceUser(env, scope.userId));
   const runId = await createSyncRun(env, {
     userId: scope.userId,
+    orgId,
     pageId: scope.pageId,
     platform: scope.platform,
     igBusinessId: scope.igBusinessId,
@@ -2126,26 +2239,34 @@ function chunk<T>(items: T[], size: number) {
 
 async function listCronScopes(env: Env): Promise<SyncScope[]> {
   const pages = await env.DB.prepare(
-    'SELECT user_id as userId, id as pageId FROM meta_pages',
-  ).all<{ userId: string; pageId: string }>();
+    'SELECT user_id as userId, org_id as orgId, id as pageId FROM meta_pages',
+  ).all<{ userId: string; orgId: string | null; pageId: string }>();
   const igAssets = await env.DB.prepare(
     `SELECT ig_assets.user_id as userId,
             ig_assets.page_id as pageId,
-            ig_assets.id as igBusinessId
+            ig_assets.id as igBusinessId,
+            COALESCE(ig_assets.org_id, meta_pages.org_id) as orgId
      FROM ig_assets
      INNER JOIN meta_pages
        ON meta_pages.user_id = ig_assets.user_id
       AND meta_pages.id = ig_assets.page_id`,
-  ).all<{ userId: string; pageId: string; igBusinessId: string }>();
+  ).all<{
+    userId: string;
+    orgId: string | null;
+    pageId: string;
+    igBusinessId: string;
+  }>();
 
   const messengerScopes = (pages.results ?? []).map((row) => ({
     userId: row.userId,
+    orgId: row.orgId,
     pageId: row.pageId,
     platform: 'messenger' as const,
     igBusinessId: null,
   }));
   const instagramScopes = (igAssets.results ?? []).map((row) => ({
     userId: row.userId,
+    orgId: row.orgId,
     pageId: row.pageId,
     platform: 'instagram' as const,
     igBusinessId: row.igBusinessId,
@@ -2696,7 +2817,7 @@ async function runSync(options: {
   cursor?: string | null;
 }) {
   const { env, userId, pageId, platform, igId, runId, cursor } = options;
-  const followupEnabled = await isFollowupInboxEnabledForUser(env, userId);
+  const followupEnabled = await isFollowupInboxEnabledForWorkspace(env, userId);
   const existingRun = await getSyncRunById(env, runId);
   await updateSyncRunAndNotify(env, { id: runId, status: 'running' });
   const page = await getPage(env, userId, pageId);
@@ -2709,6 +2830,21 @@ async function runSync(options: {
     });
     return;
   }
+  const orgId = page.orgId ?? (await resolveOrgIdForWorkspaceUser(env, userId));
+  if (!orgId) {
+    await updateSyncRunAndNotify(env, {
+      id: runId,
+      status: 'failed',
+      lastError: 'Missing org context',
+      finishedAt: new Date().toISOString(),
+    });
+    return;
+  }
+  await env.DB.prepare(
+    'UPDATE sync_runs SET org_id = COALESCE(org_id, ?) WHERE id = ?',
+  )
+    .bind(orgId, runId)
+    .run();
   const accessToken = page.access_token;
   const normalizedName = (page.name ?? '').trim().toLowerCase();
   if (!normalizedName || normalizedName === 'page') {
@@ -2804,8 +2940,8 @@ async function runSync(options: {
        (user_id, id, conversation_id, page_id, sender_type, body, created_time,
         asset_id, platform, ig_business_id, direction, sender_id, sender_name,
         attachments, raw, meta_message_id, features_json, rule_hits_json,
-        message_type, message_trigger)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        message_type, message_trigger, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const repairMessage = env.DB.prepare(
       `UPDATE messages
@@ -2814,6 +2950,7 @@ async function runSync(options: {
              WHEN ? IS NOT NULL AND json_extract(raw, '$.attachments') IS NULL THEN ?
              ELSE raw
            END,
+           org_id = COALESCE(org_id, ?),
            attachments = CASE
              WHEN ? IS NOT NULL AND (attachments IS NULL OR attachments = '' OR attachments = 'null') THEN ?
              ELSE attachments
@@ -2913,6 +3050,7 @@ async function runSync(options: {
           ruleHitsJson,
           null,
           null,
+          orgId,
         ),
       );
       statements.push(
@@ -2920,6 +3058,7 @@ async function runSync(options: {
           raw,
           attachments,
           raw,
+          orgId,
           attachments,
           attachments,
           userId,
@@ -2952,8 +3091,8 @@ async function runSync(options: {
       `INSERT OR IGNORE INTO conversations
        (user_id, id, platform, page_id, ig_business_id, updated_time, started_time, last_message_at,
         customer_count, business_count, price_given, last_inbound_at, last_outbound_at,
-        participant_id, participant_name, meta_thread_id, asset_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        participant_id, participant_name, meta_thread_id, asset_id, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         userId,
@@ -2973,6 +3112,7 @@ async function runSync(options: {
         participantName,
         convo.id,
         igId ?? pageId,
+        orgId,
       )
       .run();
     if ((conversationInsert.meta?.changes ?? 0) > 0) {
@@ -3002,7 +3142,8 @@ async function runSync(options: {
            participant_id = COALESCE(participant_id, ?),
            participant_name = COALESCE(participant_name, ?),
            meta_thread_id = COALESCE(meta_thread_id, ?),
-           asset_id = ?
+           asset_id = ?,
+           org_id = COALESCE(org_id, ?)
        WHERE user_id = ? AND id = ?`,
     )
       .bind(
@@ -3025,6 +3166,7 @@ async function runSync(options: {
         participantName,
         convo.id,
         igId ?? pageId,
+        orgId,
         userId,
         convo.id,
       )
@@ -3336,7 +3478,10 @@ async function recomputeConversationStatsForRun(
   const hasMore = allIds.length > chunkSize;
   const lastProcessedId = pageIds[pageIds.length - 1]?.id ?? null;
   const nextCursor = hasMore ? lastProcessedId : null;
-  const followupEnabled = await isFollowupInboxEnabledForUser(env, data.userId);
+  const followupEnabled = await isFollowupInboxEnabledForWorkspace(
+    env,
+    data.userId,
+  );
   if (followupEnabled) {
     for (const row of pageIds) {
       await recomputeConversationState(
@@ -3408,7 +3553,10 @@ async function recomputeConversationStats(
     }>();
 
   let updated = 0;
-  const followupEnabled = await isFollowupInboxEnabledForUser(env, data.userId);
+  const followupEnabled = await isFollowupInboxEnabledForWorkspace(
+    env,
+    data.userId,
+  );
   for (const row of rows.results ?? []) {
     const lowResponseAfterPrice =
       row.firstPriceAt && (row.customerAfterPriceCount ?? 0) <= 2 ? 1 : 0;
@@ -3557,6 +3705,7 @@ class SyncScopeOrchestrator {
 
     const payload = body as {
       userId?: string;
+      orgId?: string | null;
       pageId?: string;
       platform?: string;
       igBusinessId?: string | null;
@@ -3564,6 +3713,7 @@ class SyncScopeOrchestrator {
     };
 
     const userId = payload.userId;
+    const orgId = payload.orgId ?? null;
     const pageId = payload.pageId;
     const platform = payload.platform;
     const igBusinessId = payload.igBusinessId ?? null;
@@ -3593,6 +3743,7 @@ class SyncScopeOrchestrator {
 
     const scope: SyncScope = {
       userId,
+      orgId,
       pageId,
       platform,
       igBusinessId: platform === 'instagram' ? igBusinessId : null,
@@ -3689,10 +3840,24 @@ export default {
       '/api/auth/me',
       '/api/meta/webhook',
     ]);
+    const bootstrapAllowedApiPaths = new Set([
+      '/api/auth/me',
+      '/api/auth/whoami',
+      '/api/auth/orgs',
+      '/api/auth/logout',
+      '/api/auth/password/set',
+      '/api/auth/passkey/register/start',
+      '/api/auth/passkey/register/finish',
+      '/api/auth/passkey/login/start',
+      '/api/auth/passkey/login/finish',
+    ]);
     if (pathname.startsWith('/api/') && !publicApiPaths.has(pathname)) {
       const auth = await requireAccessAuth(req, env);
       if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (auth.claims.bootstrap && !bootstrapAllowedApiPaths.has(pathname)) {
+        return json({ error: 'credential_setup_required' }, { status: 403 });
       }
     }
 

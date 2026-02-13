@@ -28,11 +28,11 @@ describe('dashboard websocket helpers', () => {
 
   it('sends subscribe and request_latest on open', () => {
     const socket = new FakeSocket();
-    sendSyncRunsSubscribe(socket as unknown as WebSocket, 'user-123');
+    sendSyncRunsSubscribe(socket as unknown as WebSocket, 'org-123');
     expect(socket.messages).toHaveLength(2);
     expect(JSON.parse(socket.messages[0] ?? '')).toEqual({
       type: 'subscribe',
-      userId: 'user-123',
+      orgId: 'org-123',
     });
     expect(JSON.parse(socket.messages[1] ?? '')).toEqual({
       type: 'request_latest',

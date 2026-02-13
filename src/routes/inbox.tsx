@@ -142,6 +142,8 @@ type AssetsResponse = {
 type AuthResponse = {
   authenticated: boolean;
   userId?: string;
+  orgId?: string;
+  role?: string;
   name?: string | null;
   email?: string | null;
 };
@@ -541,6 +543,7 @@ export default function Inbox(): React.ReactElement {
   const useTemplateFromComposerFocusRef = React.useRef(false);
   const composerWasLastFocusedRef = React.useRef(false);
   const inspectorWasOpenRef = React.useRef(inspectorOpen);
+  const autoSwitchedInitialTabRef = React.useRef(false);
   const showAiErrors =
     typeof window !== 'undefined' &&
     (import.meta.env.DEV || window.location.search.includes('ops=1'));
@@ -682,6 +685,13 @@ export default function Inbox(): React.ReactElement {
   }, [loadAssets, loadAuth, loadTemplates]);
 
   React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadAuth();
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [loadAuth]);
+
+  React.useEffect(() => {
     void (async () => {
       try {
         const response = await fetch('/api/feature-flags');
@@ -699,12 +709,40 @@ export default function Inbox(): React.ReactElement {
   }, []);
 
   React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch('/api/feature-flags');
+          if (!response.ok) return;
+          const data = (await response.json()) as FeatureFlagsResponse;
+          setFeatureEnabled(Boolean(data.followupInbox));
+          setOpsDashboardEnabled(Boolean(data.opsDashboard));
+          setAuditFeatureEnabled(Boolean(data.auditConversations));
+        } catch {
+          // Ignore delayed retry failures.
+        }
+      })();
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  React.useEffect(() => {
     void loadConversations();
   }, [loadConversations]);
 
   React.useEffect(() => {
     void loadFilterGroupCounts();
   }, [loadFilterGroupCounts]);
+
+  React.useEffect(() => {
+    if (autoSwitchedInitialTabRef.current) return;
+    if (tab !== 'needs_followup') return;
+    if (!filterGroupCounts) return;
+    if (filterGroupCounts.needs_followup > 0) return;
+    if (filterGroupCounts.active <= 0) return;
+    autoSwitchedInitialTabRef.current = true;
+    setTab('active');
+  }, [filterGroupCounts, tab]);
 
   React.useEffect(() => {
     void loadConversationDetail();
@@ -2293,6 +2331,29 @@ export default function Inbox(): React.ReactElement {
                 )}
               >
                 Ops
+              </Link>
+            ) : null}
+            {auth?.role === 'owner' ? (
+              <Link
+                to="/org-settings"
+                {...stylex.props(
+                  inboxStyles.pageTab,
+                  location.pathname === '/org-settings' &&
+                    inboxStyles.pageTabActive,
+                )}
+              >
+                Org
+              </Link>
+            ) : null}
+            {opsDashboardEnabled ? (
+              <Link
+                to="/admin"
+                {...stylex.props(
+                  inboxStyles.pageTab,
+                  location.pathname === '/admin' && inboxStyles.pageTabActive,
+                )}
+              >
+                Admin
               </Link>
             ) : null}
           </nav>

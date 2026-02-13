@@ -99,6 +99,76 @@ export function registerRoutes(deps: any) {
     }
     return auth;
   };
+  const resolveWorkspaceUserId = async (
+    env: Env,
+    auth: {
+      claims: { sub: string; org_id?: string; meta_user_id?: string };
+    },
+  ) => {
+    if (auth.claims.meta_user_id) {
+      return auth.claims.meta_user_id;
+    }
+    if (auth.claims.org_id) {
+      const mapped = await env.DB.prepare(
+        `SELECT meta_user_id as metaUserId
+         FROM org_meta_user
+         WHERE org_id = ? AND user_id = ?
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+        .bind(auth.claims.org_id, auth.claims.sub)
+        .first<{ metaUserId: string }>();
+      if (mapped?.metaUserId) {
+        return mapped.metaUserId;
+      }
+    }
+    return auth.claims.sub;
+  };
+  const resolveMergedFlag = (
+    merged: Record<string, unknown>,
+    key: string,
+    fallback: boolean,
+  ) => {
+    const value = merged[key];
+    if (value === undefined) return fallback;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+      if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    }
+    return Boolean(value);
+  };
+  const isFollowupInboxEnabledForAuth = async (
+    env: Env,
+    auth: { claims: { sub: string; org_id?: string } },
+  ) => {
+    const userFlags = await getUserFeatureFlags(env, auth.claims.sub);
+    const orgFlags = auth.claims.org_id
+      ? await getOrgFeatureFlags(env, auth.claims.org_id)
+      : {};
+    const merged = { ...orgFlags, ...userFlags } as Record<string, unknown>;
+    return resolveMergedFlag(
+      merged,
+      'FEATURE_FOLLOWUP_INBOX',
+      await isFollowupInboxEnabledForUser(env, auth.claims.sub),
+    );
+  };
+  const isAuditConversationsEnabledForAuth = async (
+    env: Env,
+    auth: { claims: { sub: string; org_id?: string } },
+  ) => {
+    const userFlags = await getUserFeatureFlags(env, auth.claims.sub);
+    const orgFlags = auth.claims.org_id
+      ? await getOrgFeatureFlags(env, auth.claims.org_id)
+      : {};
+    const merged = { ...orgFlags, ...userFlags } as Record<string, unknown>;
+    return resolveMergedFlag(
+      merged,
+      'FEATURE_AUDIT_CONVERSATIONS',
+      await isAuditConversationsEnabledForUser(env, auth.claims.sub),
+    );
+  };
   const webhookSubscribeFields = [
     'messages',
     'messaging_postbacks',
@@ -326,20 +396,6 @@ export function registerRoutes(deps: any) {
   };
   addRoute('GET', '/api/health', () => json({ status: 'ok' }));
 
-  addRoute('GET', '/api/auth/login', async (req) => {
-    const next = new URL(req.url).searchParams.get('return_to') ?? '/';
-    return Response.redirect(
-      `/auth/start?return_to=${encodeURIComponent(next)}`,
-      302,
-    );
-  });
-
-  addRoute('GET', '/api/auth/callback', async (req) => {
-    const url = new URL(req.url);
-    const search = url.search ? url.search : '';
-    return Response.redirect(`/auth/callback${search}`, 302);
-  });
-
   addRoute('POST', '/api/auth/logout', async (req, env) => {
     const auth = await requireAccessAuth(req, env);
     if (!auth) {
@@ -385,9 +441,14 @@ export function registerRoutes(deps: any) {
 
   addRoute('GET', '/api/auth/config', async (_req, env) => {
     return json({
-      appIdPresent: Boolean(env.META_APP_ID),
-      appIdLength: env.META_APP_ID?.length ?? 0,
-      redirectUri: env.META_REDIRECT_URI ?? null,
+      metaAppIdPresent: Boolean(env.META_APP_ID),
+      metaRedirectUri: env.META_REDIRECT_URI ?? null,
+      googleClientIdPresent: Boolean(env.GOOGLE_CLIENT_ID),
+      googleRedirectUri: env.GOOGLE_REDIRECT_URI ?? null,
+      appleClientIdPresent: Boolean(env.APPLE_CLIENT_ID),
+      appleRedirectUri: env.APPLE_REDIRECT_URI ?? null,
+      rpId: env.AUTH_RP_ID ?? null,
+      rpName: env.AUTH_RP_NAME ?? null,
     });
   });
 
@@ -1462,11 +1523,15 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/inbox/conversations', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const orgId = auth.claims.org_id;
+    if (!orgId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
@@ -1482,8 +1547,8 @@ export function registerRoutes(deps: any) {
     );
     const cursor = url.searchParams.get('cursor');
 
-    const where: string[] = ['c.user_id = ?'];
-    const bindings: unknown[] = [userId];
+    const where: string[] = ['c.org_id = ?'];
+    const bindings: unknown[] = [orgId];
     if (state) {
       where.push('c.current_state = ?');
       bindings.push(state);
@@ -1559,12 +1624,8 @@ export function registerRoutes(deps: any) {
         lastSnippet: string | null;
       }>();
 
-    const authForAssets = await requireAccessAuth(req, env);
-    const assets = await getAssetNameMap(
-      env,
-      userId,
-      authForAssets?.claims.org_id ?? null,
-    );
+    const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+    const assets = await getAssetNameMap(env, workspaceUserId, orgId);
     const conversationIds = (rows.results ?? []).map(
       (row) => row.conversationId,
     );
@@ -1580,14 +1641,14 @@ export function registerRoutes(deps: any) {
          INNER JOIN (
            SELECT conversation_id, MAX(created_time) as createdTime
            FROM messages
-           WHERE user_id = ? AND conversation_id IN (${placeholders})
+           WHERE org_id = ? AND conversation_id IN (${placeholders})
            GROUP BY conversation_id
          ) latest
            ON latest.conversation_id = m.conversation_id
           AND latest.createdTime = m.created_time
-         WHERE m.user_id = ?`,
+         WHERE m.org_id = ?`,
       )
-        .bind(userId, ...conversationIds, userId)
+        .bind(orgId, ...conversationIds, orgId)
         .all<{
           conversationId: string;
           body: string | null;
@@ -1621,11 +1682,11 @@ export function registerRoutes(deps: any) {
         `SELECT conversation_id as conversationId,
                 features_json as featuresJson
          FROM messages
-         WHERE user_id = ?
+         WHERE org_id = ?
            AND conversation_id IN (${placeholders})
            AND features_json LIKE '%"ai"%'`,
       )
-        .bind(userId, ...conversationIds)
+        .bind(orgId, ...conversationIds)
         .all<{ conversationId: string; featuresJson: string | null }>();
       for (const row of aiRows.results ?? []) {
         if (!row.featuresJson) continue;
@@ -1719,19 +1780,23 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/inbox/conversations/count', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const orgId = auth.claims.org_id;
+    if (!orgId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
     const needsFollowup = url.searchParams.get('needs_followup');
     const state = url.searchParams.get('state');
     const group = url.searchParams.get('group')?.trim().toLowerCase() || null;
-    const where: string[] = ['user_id = ?'];
-    const bindings: unknown[] = [userId];
+    const where: string[] = ['org_id = ?'];
+    const bindings: unknown[] = [orgId];
     if (state) {
       where.push('current_state = ?');
       bindings.push(state);
@@ -1752,19 +1817,23 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/inbox/conversations/counts', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const orgId = auth.claims.org_id;
+    if (!orgId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
     const url = new URL(req.url);
     const channel = url.searchParams.get('channel')?.trim() || null;
     const search = url.searchParams.get('q')?.trim() || '';
     const assetId = url.searchParams.get('assetId')?.trim() || null;
-    const where: string[] = ['user_id = ?'];
-    const bindings: unknown[] = [userId];
+    const where: string[] = ['org_id = ?'];
+    const bindings: unknown[] = [orgId];
     if (assetId) {
       where.push('asset_id = ?');
       bindings.push(assetId);
@@ -1821,16 +1890,17 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('POST', '/api/inbox/recompute-all', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
     await env.SYNC_QUEUE.send({
       kind: 'recompute_inbox',
-      userId,
+      userId: workspaceUserId,
       forceLabelSync: true,
     });
     return json({ ok: true, queued: true });
@@ -1844,14 +1914,19 @@ export function registerRoutes(deps: any) {
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
       }
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+      if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
-      const conversation = await getConversation(env, userId, conversationId);
+      const conversation = await getConversation(
+        env,
+        workspaceUserId,
+        conversationId,
+      );
       if (!conversation) {
         return json({ error: 'Not found' }, { status: 404 });
       }
@@ -1863,7 +1938,7 @@ export function registerRoutes(deps: any) {
       );
       const cursor = url.searchParams.get('cursor');
       const messageWhere: string[] = ['user_id = ?', 'conversation_id = ?'];
-      const messageBindings: unknown[] = [userId, conversationId];
+      const messageBindings: unknown[] = [workspaceUserId, conversationId];
       if (cursor) {
         messageWhere.push('created_time < ?');
         messageBindings.push(cursor);
@@ -1905,7 +1980,9 @@ export function registerRoutes(deps: any) {
           featuresJson: string | null;
           ruleHitsJson: string | null;
         }>();
-      const tags = await listConversationTags(env, userId, [conversationId]);
+      const tags = await listConversationTags(env, workspaceUserId, [
+        conversationId,
+      ]);
       const events = await env.DB.prepare(
         `SELECT id, from_state as fromState, to_state as toState, confidence, reasons_json as reasonsJson,
               triggered_by_message_id as triggeredByMessageId, triggered_at as triggeredAt
@@ -1913,7 +1990,7 @@ export function registerRoutes(deps: any) {
        WHERE user_id = ? AND conversation_id = ?
        ORDER BY triggered_at ASC`,
       )
-        .bind(userId, conversationId)
+        .bind(workspaceUserId, conversationId)
         .all<{
           id: string;
           fromState: string | null;
@@ -1923,11 +2000,10 @@ export function registerRoutes(deps: any) {
           triggeredByMessageId: string | null;
           triggeredAt: string;
         }>();
-      const authForAssets = await requireAccessAuth(req, env);
       const assets = await getAssetNameMap(
         env,
-        userId,
-        authForAssets?.claims.org_id ?? null,
+        workspaceUserId,
+        auth.claims.org_id ?? null,
       );
       const asset =
         conversation.assetId && assets.has(conversation.assetId)
@@ -2019,15 +2095,20 @@ export function registerRoutes(deps: any) {
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
       }
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isAuditConversationsEnabledForUser(env, userId))) {
+      const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+      if (!(await isAuditConversationsEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
 
-      const conversation = await getConversation(env, userId, conversationId);
+      const conversation = await getConversation(
+        env,
+        workspaceUserId,
+        conversationId,
+      );
       if (!conversation) {
         return json({ error: 'Not found' }, { status: 404 });
       }
@@ -2043,7 +2124,7 @@ export function registerRoutes(deps: any) {
 
       const explanation = await getConversationClassificationExplain(
         env,
-        userId,
+        workspaceUserId,
         conversationId,
       );
       if (!explanation) {
@@ -2067,11 +2148,12 @@ export function registerRoutes(deps: any) {
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
       }
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isAuditConversationsEnabledForUser(env, userId))) {
+      const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+      if (!(await isAuditConversationsEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
       const body = await readJson<{
@@ -2087,7 +2169,11 @@ export function registerRoutes(deps: any) {
         return json({ error: 'is_correct must be a boolean' }, { status: 400 });
       }
 
-      const conversation = await getConversation(env, userId, conversationId);
+      const conversation = await getConversation(
+        env,
+        workspaceUserId,
+        conversationId,
+      );
       if (!conversation) {
         return json({ error: 'Not found' }, { status: 404 });
       }
@@ -2102,7 +2188,7 @@ export function registerRoutes(deps: any) {
 
       const explanation = await getConversationClassificationExplain(
         env,
-        userId,
+        workspaceUserId,
         conversationId,
       );
       if (!explanation) {
@@ -2231,11 +2317,13 @@ export function registerRoutes(deps: any) {
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
       }
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      const orgId = auth.claims.org_id;
+      const workspaceUserId = await resolveWorkspaceUserId(env, auth);
+      if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
       const body = await readJson<{
@@ -2246,11 +2334,15 @@ export function registerRoutes(deps: any) {
       if (!text) {
         return json({ error: 'Message text required' }, { status: 400 });
       }
-      const conversation = await getConversation(env, userId, conversationId);
+      const conversation = await getConversation(
+        env,
+        workspaceUserId,
+        conversationId,
+      );
       if (!conversation) {
         return json({ error: 'Not found' }, { status: 404 });
       }
-      const page = await getPage(env, userId, conversation.pageId);
+      const page = await getPage(env, workspaceUserId, conversation.pageId);
       if (!page) {
         return json({ error: 'Page not connected' }, { status: 404 });
       }
@@ -2264,7 +2356,7 @@ export function registerRoutes(deps: any) {
          ORDER BY created_time DESC
          LIMIT 1`,
           )
-            .bind(userId, conversationId)
+            .bind(workspaceUserId, conversationId)
             .first<{ senderId: string | null }>()
         )?.senderId ??
         null;
@@ -2282,7 +2374,7 @@ export function registerRoutes(deps: any) {
           accessToken: page.access_token,
           version: getApiVersion(env),
           payload,
-          workspaceId: userId,
+          workspaceId: workspaceUserId,
           assetId: conversation.assetId ?? conversation.pageId,
         });
         const now = new Date().toISOString();
@@ -2298,11 +2390,11 @@ export function registerRoutes(deps: any) {
          (user_id, id, conversation_id, page_id, sender_type, body, created_time,
           asset_id, platform, ig_business_id, direction, sender_id, sender_name,
           attachments, raw, meta_message_id, features_json, rule_hits_json,
-          message_type, message_trigger)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          message_type, message_trigger, org_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
-            userId,
+            workspaceUserId,
             messageId,
             conversationId,
             conversation.pageId,
@@ -2322,15 +2414,16 @@ export function registerRoutes(deps: any) {
             JSON.stringify(annotated.ruleHits),
             null,
             null,
+            orgId,
           )
           .run();
         await recomputeFollowupEventsForConversation(env, {
-          userId,
+          userId: workspaceUserId,
           conversationId,
         });
-        await recomputeConversationState(env, userId, conversationId);
+        await recomputeConversationState(env, workspaceUserId, conversationId);
         await notifyInboxEvent(env, {
-          userId,
+          userId: workspaceUserId,
           conversationId,
           type: 'message_sent',
           payload: { createdAt: now },
@@ -2341,12 +2434,16 @@ export function registerRoutes(deps: any) {
         const failure = classifyDeliveryFailure(error);
         await markConversationDeliveryFailure(env, {
           conversationId,
-          userId,
+          userId: workspaceUserId,
           blocked: failure.blocked,
           bounced: failure.bounced,
         });
         if (failure.blocked || failure.bounced) {
-          await recomputeConversationState(env, userId, conversationId);
+          await recomputeConversationState(
+            env,
+            workspaceUserId,
+            conversationId,
+          );
         }
         const message =
           error instanceof MetaApiError
@@ -2363,6 +2460,11 @@ export function registerRoutes(deps: any) {
     'POST',
     '/api/inbox/conversations/:id/final-touch',
     async (req, env, _ctx, params) => {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const orgId = auth.claims.org_id;
       const conversationId = params.id;
       if (!conversationId) {
         return json({ error: 'Missing conversation id' }, { status: 400 });
@@ -2441,8 +2543,8 @@ export function registerRoutes(deps: any) {
          (user_id, id, conversation_id, page_id, sender_type, body, created_time,
           asset_id, platform, ig_business_id, direction, sender_id, sender_name,
           attachments, raw, meta_message_id, features_json, rule_hits_json,
-          message_type, message_trigger)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          message_type, message_trigger, org_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             userId,
@@ -2465,6 +2567,7 @@ export function registerRoutes(deps: any) {
             JSON.stringify(annotated.ruleHits),
             'FINAL_TOUCH',
             'LOST_INACTIVE_TIMEOUT',
+            orgId,
           )
           .run();
         await recomputeFollowupEventsForConversation(env, {
@@ -2705,18 +2808,22 @@ export function registerRoutes(deps: any) {
   );
 
   addRoute('GET', '/api/inbox/templates', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const orgId = auth.claims.org_id;
+    if (!orgId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
     const query = `SELECT id, title, body, created_at as createdAt, updated_at as updatedAt
                FROM saved_responses
-               WHERE user_id = ?
+               WHERE org_id = ?
                ORDER BY updated_at DESC`;
-    const rows = await env.DB.prepare(query).bind(userId).all<{
+    const rows = await env.DB.prepare(query).bind(orgId).all<{
       id: string;
       title: string;
       body: string;
@@ -2727,13 +2834,18 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('POST', '/api/inbox/templates', async (req, env) => {
-    const userId = await requireUser(req, env);
-    if (!userId) {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
       return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+    const orgId = auth.claims.org_id;
+    if (!orgId) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
       return json({ error: 'Not found' }, { status: 404 });
     }
+    const userId = await resolveWorkspaceUserId(env, auth);
     const body = await readJson<{
       title?: string;
       body?: string;
@@ -2747,10 +2859,10 @@ export function registerRoutes(deps: any) {
     const id = crypto.randomUUID();
     await env.DB.prepare(
       `INSERT INTO saved_responses
-     (id, user_id, asset_id, title, body, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     (id, user_id, org_id, asset_id, title, body, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(id, userId, null, title, text, now, now)
+      .bind(id, userId, orgId, null, title, text, now, now)
       .run();
     return json({ id, title, body: text });
   });
@@ -2759,11 +2871,15 @@ export function registerRoutes(deps: any) {
     'PUT',
     '/api/inbox/templates/:id',
     async (req, env, _ctx, params) => {
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      const orgId = auth.claims.org_id;
+      if (!orgId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
       const templateId = params.id;
@@ -2783,9 +2899,9 @@ export function registerRoutes(deps: any) {
       await env.DB.prepare(
         `UPDATE saved_responses
      SET title = ?, body = ?, asset_id = ?, updated_at = ?
-     WHERE id = ? AND user_id = ?`,
+     WHERE id = ? AND org_id = ?`,
       )
-        .bind(title, text, null, now, templateId, userId)
+        .bind(title, text, null, now, templateId, orgId)
         .run();
       return json({
         id: templateId,
@@ -2799,11 +2915,15 @@ export function registerRoutes(deps: any) {
     'DELETE',
     '/api/inbox/templates/:id',
     async (req, env, _ctx, params) => {
-      const userId = await requireUser(req, env);
-      if (!userId) {
+      const auth = await requireAccessAuth(req, env);
+      if (!auth) {
         return json({ error: 'Unauthorized' }, { status: 401 });
       }
-      if (!(await isFollowupInboxEnabledForUser(env, userId))) {
+      const orgId = auth.claims.org_id;
+      if (!orgId) {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      if (!(await isFollowupInboxEnabledForAuth(env, auth))) {
         return json({ error: 'Not found' }, { status: 404 });
       }
       const templateId = params.id;
@@ -2811,15 +2931,20 @@ export function registerRoutes(deps: any) {
         return json({ error: 'Missing template id' }, { status: 400 });
       }
       await env.DB.prepare(
-        'DELETE FROM saved_responses WHERE id = ? AND user_id = ?',
+        'DELETE FROM saved_responses WHERE id = ? AND org_id = ?',
       )
-        .bind(templateId, userId)
+        .bind(templateId, orgId)
         .run();
       return json({ ok: true });
     },
   );
 
   addRoute('POST', '/api/inbox/bulk', async (req, env) => {
+    const auth = await requireAccessAuth(req, env);
+    if (!auth) {
+      return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const orgId = auth.claims.org_id;
     const userId = await requireUser(req, env);
     if (!userId) {
       return json({ error: 'Unauthorized' }, { status: 401 });
@@ -2976,8 +3101,8 @@ export function registerRoutes(deps: any) {
            (user_id, id, conversation_id, page_id, sender_type, body, created_time,
             asset_id, platform, ig_business_id, direction, sender_id, sender_name,
             attachments, raw, meta_message_id, features_json, rule_hits_json,
-            message_type, message_trigger)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            message_type, message_trigger, org_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
             .bind(
               userId,
@@ -3000,6 +3125,7 @@ export function registerRoutes(deps: any) {
               JSON.stringify(annotated.ruleHits),
               null,
               null,
+              orgId,
             )
             .run();
           await recomputeFollowupEventsForConversation(env, {

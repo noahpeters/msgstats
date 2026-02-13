@@ -9,12 +9,12 @@ const buildSyncRunKey = (run) => {
 };
 
 export function createDevWsServer({ port = defaultPort } = {}) {
-  const latestByUserId = new Map();
-  const clientsByUserId = new Map();
-  const socketUserId = new WeakMap();
+  const latestByOrgId = new Map();
+  const clientsByOrgId = new Map();
+  const socketOrgId = new WeakMap();
 
-  const getLatestMessages = (userId) => {
-    const latest = latestByUserId.get(userId);
+  const getLatestMessages = (orgId) => {
+    const latest = latestByOrgId.get(orgId);
     if (!latest) {
       return [];
     }
@@ -34,8 +34,8 @@ export function createDevWsServer({ port = defaultPort } = {}) {
     return sortable.map((entry) => entry.json);
   };
 
-  const sendLatestForUser = (ws, userId) => {
-    const messages = getLatestMessages(userId);
+  const sendLatestForOrg = (ws, orgId) => {
+    const messages = getLatestMessages(orgId);
     for (const message of messages) {
       ws.send(message);
     }
@@ -50,17 +50,17 @@ export function createDevWsServer({ port = defaultPort } = {}) {
       req.on('end', () => {
         try {
           const payload = JSON.parse(body);
-          const userId = payload?.userId;
+          const orgId = payload?.orgId;
           const run = payload?.payload?.run;
-          if (userId && run) {
+          if (orgId && run) {
             const key = buildSyncRunKey(run);
             const message = JSON.stringify({ type: 'run_updated', run });
-            const latestForUser = latestByUserId.get(userId) ?? new Map();
-            const previous = latestForUser.get(key);
+            const latestForOrg = latestByOrgId.get(orgId) ?? new Map();
+            const previous = latestForOrg.get(key);
             if (previous !== message) {
-              latestForUser.set(key, message);
-              latestByUserId.set(userId, latestForUser);
-              const clients = clientsByUserId.get(userId);
+              latestForOrg.set(key, message);
+              latestByOrgId.set(orgId, latestForOrg);
+              const clients = clientsByOrgId.get(orgId);
               if (clients) {
                 for (const socket of clients) {
                   socket.send(message);
@@ -86,42 +86,42 @@ export function createDevWsServer({ port = defaultPort } = {}) {
 
   wss.on('connection', (ws) => {
     const removeSocket = () => {
-      const userId = socketUserId.get(ws);
-      if (!userId) {
+      const orgId = socketOrgId.get(ws);
+      if (!orgId) {
         return;
       }
-      const set = clientsByUserId.get(userId);
+      const set = clientsByOrgId.get(orgId);
       if (set) {
         set.delete(ws);
         if (set.size === 0) {
-          clientsByUserId.delete(userId);
+          clientsByOrgId.delete(orgId);
         }
       }
-      socketUserId.delete(ws);
+      socketOrgId.delete(ws);
     };
 
     ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
-        if (message?.type === 'subscribe' && message.userId) {
-          const userId = message.userId;
-          const previous = socketUserId.get(ws);
-          if (previous && previous !== userId) {
+        if (message?.type === 'subscribe' && message.orgId) {
+          const orgId = message.orgId;
+          const previous = socketOrgId.get(ws);
+          if (previous && previous !== orgId) {
             removeSocket();
           }
-          socketUserId.set(ws, userId);
-          const set = clientsByUserId.get(userId) ?? new Set();
+          socketOrgId.set(ws, orgId);
+          const set = clientsByOrgId.get(orgId) ?? new Set();
           set.add(ws);
-          clientsByUserId.set(userId, set);
-          sendLatestForUser(ws, userId);
+          clientsByOrgId.set(orgId, set);
+          sendLatestForOrg(ws, orgId);
           return;
         }
         if (message?.type === 'request_latest') {
-          const userId = socketUserId.get(ws);
-          if (!userId) {
+          const orgId = socketOrgId.get(ws);
+          if (!orgId) {
             return;
           }
-          sendLatestForUser(ws, userId);
+          sendLatestForOrg(ws, orgId);
         }
       } catch {
         // ignore malformed messages
@@ -140,8 +140,8 @@ export function createDevWsServer({ port = defaultPort } = {}) {
   return {
     server,
     wss,
-    latestByUserId,
-    clientsByUserId,
+    latestByOrgId,
+    clientsByOrgId,
     async listen() {
       await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
       const address = server.address();

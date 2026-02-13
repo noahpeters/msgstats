@@ -52,7 +52,7 @@ describe('sync runs websocket', () => {
     const env = {
       API: {
         fetch: async () =>
-          new Response(JSON.stringify({ userId: 'user-1' }), {
+          new Response(JSON.stringify({ orgId: 'org-1' }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),
@@ -180,7 +180,7 @@ describe('sync runs websocket', () => {
     const env = {
       API: {
         fetch: async () =>
-          new Response(JSON.stringify({ userId: 'user-1' }), {
+          new Response(JSON.stringify({ orgId: 'org-1' }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),
@@ -208,22 +208,22 @@ describe('sync runs websocket', () => {
     expect(response.status).toBe(500);
   });
 
-  it('uses userId from whoami only', async () => {
+  it('uses orgId from whoami only', async () => {
     const originalResponse = globalThis.Response;
     globalThis.Response = TestResponse as unknown as typeof Response;
     try {
-      let requestedUserId = '';
+      let requestedOrgId = '';
       const env = {
         API: {
           fetch: async () =>
-            new OriginalResponse(JSON.stringify({ userId: 'from_whoami' }), {
+            new OriginalResponse(JSON.stringify({ orgId: 'from_whoami' }), {
               status: 200,
               headers: { 'content-type': 'application/json' },
             }),
         },
         SYNC_RUNS_HUB: {
           idFromName(name: string) {
-            requestedUserId = name;
+            requestedOrgId = name;
             return name;
           },
           get() {
@@ -238,7 +238,7 @@ describe('sync runs websocket', () => {
       } as unknown as Parameters<typeof webWorker.fetch>[1];
 
       const request = new Request(
-        'https://app.test/sync/runs/subscribe?userId=evil',
+        'https://app.test/sync/runs/subscribe?orgId=evil',
         { headers: { Upgrade: 'websocket' } },
       );
       const ctx = {
@@ -251,7 +251,7 @@ describe('sync runs websocket', () => {
         ctx as unknown as Parameters<typeof webWorker.fetch>[2],
       );
       expect(response.status).toBe(101);
-      expect(requestedUserId).toBe('from_whoami');
+      expect(requestedOrgId).toBe('from_whoami');
     } finally {
       globalThis.Response = originalResponse;
     }
@@ -265,7 +265,7 @@ describe('sync runs websocket', () => {
       const env = {
         API: {
           fetch: async () =>
-            new OriginalResponse(JSON.stringify({ userId: 'user-1' }), {
+            new OriginalResponse(JSON.stringify({ orgId: 'org-1' }), {
               status: 200,
               headers: { 'content-type': 'application/json' },
             }),

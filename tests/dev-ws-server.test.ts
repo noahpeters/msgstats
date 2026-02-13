@@ -59,7 +59,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-1',
+          orgId: 'user-1',
           payload: { type: 'run_updated', run: { id: 'r1' } },
         }),
       });
@@ -68,7 +68,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-1' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-1' }));
       const message = await waitForMessage(socket);
       expect(JSON.parse(message)).toEqual({
         type: 'run_updated',
@@ -93,7 +93,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-2',
+          orgId: 'user-2',
           payload: { type: 'run_updated', run: { id: 'r2' } },
         }),
       });
@@ -102,7 +102,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-2' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-2' }));
       await waitForMessage(socket);
       socket.send(JSON.stringify({ type: 'request_latest' }));
       const message = await waitForMessage(socket);
@@ -129,7 +129,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-3',
+          orgId: 'user-3',
           payload: {
             type: 'run_updated',
             run: {
@@ -146,7 +146,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-3',
+          orgId: 'user-3',
           payload: {
             type: 'run_updated',
             run: {
@@ -164,7 +164,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-3' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-3' }));
       const messages = await waitForMessages(socket, 2);
       const parsed = messages.map((message) => JSON.parse(message));
       expect(parsed.map((item) => item.run.id)).toEqual(['r2', 'r1']);
@@ -187,7 +187,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-4',
+          orgId: 'user-4',
           payload: {
             type: 'run_updated',
             run: {
@@ -204,7 +204,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-4',
+          orgId: 'user-4',
           payload: {
             type: 'run_updated',
             run: {
@@ -222,7 +222,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-4' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-4' }));
       const messages = await waitForMessages(socket, 2);
       const parsed = messages.map((message) => JSON.parse(message));
       expect(parsed.map((item) => item.run.id).sort()).toEqual(['r1', 'r2']);
@@ -245,7 +245,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-5',
+          orgId: 'user-5',
           payload: {
             type: 'run_updated',
             run: {
@@ -262,7 +262,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-5',
+          orgId: 'user-5',
           payload: {
             type: 'run_updated',
             run: {
@@ -280,7 +280,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-5' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-5' }));
       const message = await waitForMessage(socket);
       const parsed = JSON.parse(message);
       expect(parsed.run.id).toBe('r2');
@@ -310,7 +310,7 @@ describe('dev ws server', () => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            userId: 'user-6',
+            orgId: 'user-6',
             payload: { type: 'run_updated', run },
           }),
         });
@@ -321,7 +321,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-6' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-6' }));
       const messages = await waitForMessages(socket, 1);
       expect(messages).toHaveLength(1);
       socket.close();
@@ -343,7 +343,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-7',
+          orgId: 'user-7',
           payload: {
             type: 'run_updated',
             run: {
@@ -360,7 +360,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-7',
+          orgId: 'user-7',
           payload: {
             type: 'run_updated',
             run: {
@@ -378,7 +378,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-7' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-7' }));
       const message = await waitForMessage(socket);
       expect(JSON.parse(message).run.status).toBe('completed');
       socket.close();
@@ -400,7 +400,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-8',
+          orgId: 'user-8',
           payload: {
             type: 'run_updated',
             run: {
@@ -417,7 +417,7 @@ describe('dev ws server', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          userId: 'user-8',
+          orgId: 'user-8',
           payload: {
             type: 'run_updated',
             run: {
@@ -435,7 +435,7 @@ describe('dev ws server', () => {
       await new Promise<void>((resolve) =>
         socket.once('open', () => resolve()),
       );
-      socket.send(JSON.stringify({ type: 'subscribe', userId: 'user-8' }));
+      socket.send(JSON.stringify({ type: 'subscribe', orgId: 'user-8' }));
       const messages = await waitForMessages(socket, 2);
       const parsed = messages.map((item) => JSON.parse(item));
       expect(parsed.map((item) => item.run.id).sort()).toEqual(['r1', 'r2']);

@@ -4,11 +4,13 @@ import path from 'node:path';
 const CONFIG_PATH = 'wrangler.api.toml';
 const DEFAULT_DIR = 'env/cloudflare';
 const SECRET_KEYS = new Set([
-  'AUTH0_CLIENT_ID',
   'MSGSTATS_JWT_SECRET',
   'AUTH_SESSION_PEPPER',
   'AUTH_INVITE_PEPPER',
   'AUTH_REFRESH_ENCRYPTION_KEY',
+  'AUTH_PASSWORD_RESET_PEPPER',
+  'GOOGLE_CLIENT_SECRET',
+  'APPLE_PRIVATE_KEY_P8',
 ]);
 
 function usage() {

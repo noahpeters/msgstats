@@ -5,21 +5,13 @@ import { spawnSync } from 'node:child_process';
 const CONFIG = 'wrangler.api.toml';
 const DEFAULT_DIR = 'env/cloudflare';
 const REQUIRED_KEYS = [
-  'AUTH0_DOMAIN',
-  'AUTH0_CLIENT_ID',
-  'AUTH0_REDIRECT_URI',
-  'AUTH0_AUTHORIZE_URL',
-  'AUTH0_TOKEN_URL',
-  'AUTH0_JWKS_URL',
-  'MSGSTATS_JWT_ISSUER',
-  'MSGSTATS_JWT_AUDIENCE',
-];
-const OPTIONAL_KEYS = [
-  'AUTH0_AUDIENCE',
   'MSGSTATS_JWT_SECRET',
   'AUTH_SESSION_PEPPER',
   'AUTH_INVITE_PEPPER',
   'AUTH_REFRESH_ENCRYPTION_KEY',
+  'AUTH_PASSWORD_RESET_PEPPER',
+  'GOOGLE_CLIENT_SECRET',
+  'APPLE_PRIVATE_KEY_P8',
 ];
 
 function parseArgs(argv) {
@@ -60,11 +52,11 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(
-    `Usage: node scripts/set-auth-secrets.mjs --env <name> [--env <name>...] [--dir env/cloudflare] [--dry-run]\n\n` +
-      `Reads env files named auth.<env>.env from the target directory and pushes auth keys as Wrangler secrets.\n\n` +
-      `Examples:\n` +
-      `  npm run auth:secrets:push -- --env staging --env production\n` +
-      `  npm run auth:secrets:push -- --env staging --dir ./env/cloudflare --dry-run\n`,
+    'Usage: node scripts/set-auth-secrets.mjs --env <name> [--env <name>...] [--dir env/cloudflare] [--dry-run]\n\n' +
+      'Reads auth.<env>.env and pushes auth secrets via Wrangler.\n\n' +
+      'Examples:\n' +
+      '  npm run auth:secrets:push -- --env staging --env production\n' +
+      '  npm run auth:secrets:push -- --env staging --dry-run\n',
   );
 }
 
@@ -78,8 +70,8 @@ function parseEnvFile(content) {
     const key = line.slice(0, idx).trim();
     let value = line.slice(idx + 1).trim();
     if (
-      value.startsWith(') && value.endsWith(') ||
-      value.startsWith(') && value.endsWith(')
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
     ) {
       value = value.slice(1, -1);
     }
@@ -101,7 +93,6 @@ function runCommand(cmd, args, opts = {}) {
       `${cmd} ${args.join(' ')} failed\n${stdout}\n${stderr}`.trim(),
     );
   }
-  return result;
 }
 
 function ensureWranglerAuth() {
@@ -119,16 +110,6 @@ function loadEnvValues(filePath) {
     }
   }
   return parsed;
-}
-
-function keysToApply(values) {
-  const out = [...REQUIRED_KEYS];
-  for (const key of OPTIONAL_KEYS) {
-    if (values[key] && values[key].trim() !== '') {
-      out.push(key);
-    }
-  }
-  return out;
 }
 
 function putSecret({ envName, key, value, dryRun }) {
@@ -168,11 +149,10 @@ function main() {
   for (const envName of envs) {
     const envPath = path.join(fullDir, `auth.${envName}.env`);
     const values = loadEnvValues(envPath);
-    const keys = keysToApply(values);
     console.log(
-      `Applying ${keys.length} auth secrets to env \"${envName}\" from ${envPath}`,
+      `Applying ${REQUIRED_KEYS.length} auth secrets to env "${envName}" from ${envPath}`,
     );
-    for (const key of keys) {
+    for (const key of REQUIRED_KEYS) {
       putSecret({ envName, key, value: values[key], dryRun });
     }
     console.log(`Done: ${envName}`);

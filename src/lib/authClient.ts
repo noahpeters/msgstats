@@ -16,6 +16,7 @@ const state: AuthState = {
 
 let refreshPromise: Promise<string> | null = null;
 let fetchWrapped = false;
+let requestedSwState = false;
 
 function parseHashParams(hash: string) {
   const content = hash.startsWith('#') ? hash.slice(1) : hash;
@@ -122,12 +123,25 @@ export async function registerAuthServiceWorker() {
       state.sessionHandle = data.session_handle ?? state.sessionHandle;
       return;
     }
+    if (data.type === 'AUTH_STATE') {
+      state.accessToken = data.access_token ?? null;
+      state.sessionHandle = data.session_handle ?? null;
+      return;
+    }
     if (data.type === 'AUTH_REQUIRED') {
       state.accessToken = null;
       state.sessionHandle = null;
       window.dispatchEvent(new CustomEvent('msgstats-auth-required'));
     }
   });
+  if (!requestedSwState) {
+    requestedSwState = true;
+    const requester =
+      navigator.serviceWorker.controller ??
+      registration.active ??
+      registration.waiting;
+    requester?.postMessage({ type: 'AUTH_GET' });
+  }
   void registration.update();
 }
 
