@@ -781,7 +781,7 @@ describe('inference engine', () => {
     expect(result.followupSuggestion).not.toBe('Follow up now');
   });
 
-  test('non-terminal outbound last does not auto-mark needs follow-up from default due date', () => {
+  test('non-terminal outbound last marks follow-up due after 2 business days', () => {
     const outbound = baseMessage({
       id: 'm1',
       direction: 'outbound',
@@ -794,8 +794,8 @@ describe('inference engine', () => {
       now: new Date('2026-01-06T10:01:00Z'),
     });
     expect(result.state).toBe('NEW');
-    expect(result.needsFollowup).toBe(false);
-    expect(result.followupSuggestion).toBe('Follow up later');
+    expect(result.needsFollowup).toBe(true);
+    expect(result.followupSuggestion).toBe('Follow up now');
     expect(result.followupDueAt?.slice(0, 10)).toBe('2026-01-06');
     expect(result.followupDueSource).toBe('default');
   });

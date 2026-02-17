@@ -21,6 +21,7 @@ function baseContext(
     lastMessageAt: '2026-02-10T18:00:00.000Z',
     lastNonFinalMessageAt: '2026-02-10T18:00:00.000Z',
     lastNonFinalDirection: 'inbound',
+    lastOutboundNonFinalAt: '2026-02-10T17:00:00.000Z',
     hasOptOut: false,
     hasBlocked: false,
     hasBounced: false,
@@ -255,6 +256,121 @@ describe('sla regression', () => {
     );
     expect(result.state).not.toBe('LOST');
     expect(result.needsFollowup).toBe(true);
+  });
+});
+
+describe('active outbound stale follow-up', () => {
+  test('active with last outbound 3 business days ago needs follow-up now', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        previousState: 'ENGAGED',
+        lastNonFinalDirection: 'outbound',
+        lastNonFinalMessageAt: '2026-02-06T18:00:00.000Z',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    expect(result.state).toBe('ENGAGED');
+    expect(result.needsFollowup).toBe(true);
+    expect(result.followupSuggestion).toBe('Follow up now');
+    expect(result.followupDueAt).toBe('2026-02-10T18:00:00.000Z');
+    expect(result.followupDueSource).toBe('default');
+  });
+
+  test('active with last outbound 1 business day ago suggests follow up later', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        previousState: 'ENGAGED',
+        lastNonFinalDirection: 'outbound',
+        lastNonFinalMessageAt: '2026-02-10T18:00:00.000Z',
+        lastOutboundNonFinalAt: '2026-02-10T18:00:00.000Z',
+      }),
+    );
+    expect(result.state).toBe('ENGAGED');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).toBe('Follow up later');
+    expect(result.followupDueAt).toBe('2026-02-12T18:00:00.000Z');
+    expect(result.followupDueSource).toBe('default');
+  });
+
+  test('unreplied inbound wins even when outbound is stale', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        previousState: 'ENGAGED',
+        lastNonFinalDirection: 'inbound',
+        lastNonFinalMessageAt: '2026-02-11T17:00:00.000Z',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    expect(result.state).toBe('ENGAGED');
+    expect(result.needsFollowup).toBe(true);
+    expect(result.followupSuggestion).toBe('Reply recommended');
+  });
+
+  test('deferred with stale outbound keeps deferred follow-up gating behavior', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        previousState: 'DEFERRED',
+        hasDeferral: true,
+        followupDueAtFromDeferral: '2026-02-20T18:00:00.000Z',
+        followupDueSourceFromDeferral: 'default',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    expect(result.state).toBe('DEFERRED');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).toBeNull();
+  });
+
+  test('off-platform with stale outbound keeps informational follow-up only', () => {
+    const result = computeInboxStateMachine(
+      baseContext({
+        hasOffPlatform: true,
+        hasExplicitContact: true,
+        offPlatformReason: 'PHONE_OR_EMAIL',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    expect(result.state).toBe('OFF_PLATFORM');
+    expect(result.needsFollowup).toBe(false);
+    expect(result.followupSuggestion).toBe('Visibility lost (off-platform)');
+  });
+
+  test('terminal states always clear follow-ups', () => {
+    const lost = computeInboxStateMachine(
+      baseContext({
+        hasOptOut: true,
+        followupDueAtFromDeferral: '2026-02-20T18:00:00.000Z',
+        followupDueSourceFromDeferral: 'customer_intent',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    const spam = computeInboxStateMachine(
+      baseContext({
+        hasSpamPhraseMatch: true,
+        spamContextConfirmed: true,
+        followupDueAtFromDeferral: '2026-02-20T18:00:00.000Z',
+        followupDueSourceFromDeferral: 'customer_intent',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+    const converted = computeInboxStateMachine(
+      baseContext({
+        hasConversion: true,
+        followupDueAtFromDeferral: '2026-02-20T18:00:00.000Z',
+        followupDueSourceFromDeferral: 'customer_intent',
+        lastOutboundNonFinalAt: '2026-02-06T18:00:00.000Z',
+      }),
+    );
+
+    expect(lost.followupSuggestion).toBeNull();
+    expect(lost.needsFollowup).toBe(false);
+    expect(lost.followupDueAt).toBeNull();
+    expect(spam.followupSuggestion).toBeNull();
+    expect(spam.needsFollowup).toBe(false);
+    expect(spam.followupDueAt).toBeNull();
+    expect(converted.followupSuggestion).toBeNull();
+    expect(converted.needsFollowup).toBe(false);
+    expect(converted.followupDueAt).toBeNull();
   });
 });
 

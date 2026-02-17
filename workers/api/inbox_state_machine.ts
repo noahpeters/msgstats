@@ -46,6 +46,7 @@ export type InboxStateMachineContext = {
   lastMessageAt: string | null;
   lastNonFinalMessageAt: string | null;
   lastNonFinalDirection: 'inbound' | 'outbound' | null;
+  lastOutboundNonFinalAt: string | null;
   hasOptOut: boolean;
   hasBlocked: boolean;
   hasBounced: boolean;
@@ -350,6 +351,9 @@ export function computeInboxStateMachine(
     const lastNonFinalMs = context.lastNonFinalMessageAt
       ? Date.parse(context.lastNonFinalMessageAt)
       : Number.NaN;
+    const lastOutboundNonFinalMs = context.lastOutboundNonFinalAt
+      ? Date.parse(context.lastOutboundNonFinalAt)
+      : Number.NaN;
 
     if (
       context.lastNonFinalDirection === 'inbound' &&
@@ -364,10 +368,23 @@ export function computeInboxStateMachine(
       if (ageHours >= context.slaHours && !hasReason(reasons, 'SLA_BREACH')) {
         reasons.push('SLA_BREACH');
       }
+    } else if (!Number.isNaN(lastOutboundNonFinalMs)) {
+      const dueAt = addBusinessDays(
+        new Date(lastOutboundNonFinalMs),
+        2,
+      ).toISOString();
+      followupDueAt = dueAt;
+      if (!followupDueSource || followupDueSource === 'unknown') {
+        followupDueSource = 'default';
+      }
+      followupSuggestion =
+        Date.parse(dueAt) > nowMs ? 'Follow up later' : 'Follow up now';
+      needsFollowup = Date.parse(dueAt) <= nowMs;
     } else if (
       context.lastNonFinalDirection === 'outbound' &&
       !Number.isNaN(lastNonFinalMs)
     ) {
+      // Backward-compatible fallback when outbound non-final timestamp is not provided.
       const dueAt = addBusinessDays(new Date(lastNonFinalMs), 2).toISOString();
       if (!followupDueAt) {
         followupDueAt = dueAt;
@@ -375,18 +392,8 @@ export function computeInboxStateMachine(
       if (!followupDueSource) {
         followupDueSource = 'default';
       }
-      if (followupDueSource === 'customer_intent') {
-        const dueAtMs = Date.parse(dueAt);
-        const dueSoonWindowMs =
-          Math.max(context.slaHours, context.dueSoonDays * 24) * 60 * 60 * 1000;
-        followupSuggestion =
-          dueAtMs > nowMs ? 'Follow up later' : 'Follow up now';
-        needsFollowup =
-          !Number.isNaN(dueAtMs) && dueAtMs - nowMs <= dueSoonWindowMs;
-      } else {
-        followupSuggestion = 'Follow up later';
-        needsFollowup = false;
-      }
+      followupSuggestion = 'Follow up later';
+      needsFollowup = false;
     }
   }
 
