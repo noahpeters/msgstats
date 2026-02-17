@@ -2,7 +2,6 @@ type ConversationRow = {
   id: string;
   pageId: string;
   platform: string;
-  currentState: string | null;
   updatedTime: string;
   startedTime: string | null;
   lastMessageAt: string | null;
@@ -160,7 +159,6 @@ export async function buildReportFromDb(options: {
                  SELECT id,
                         page_id as pageId,
                         platform,
-                        current_state as currentState,
                         updated_time as updatedTime,
                         started_time as startedTime,
                         last_message_at as lastMessageAt,
@@ -181,27 +179,18 @@ export async function buildReportFromDb(options: {
                    AND events.to_state = 'LOST'
                  GROUP BY events.conversation_id
                ),
-               lost_marker AS (
-                 SELECT filtered.id as conversationId,
-                        COALESCE(first_lost.firstLostAt, filtered.startedTime, filtered.updatedTime) as lostAt
-                 FROM filtered_conversations filtered
-                 LEFT JOIN first_lost
-                   ON first_lost.conversationId = filtered.id
-                 WHERE filtered.currentState = 'LOST'
-               ),
                productive_before_lost AS (
                  SELECT DISTINCT events.conversation_id as conversationId
                  FROM conversation_state_events events
-                 JOIN lost_marker
-                   ON lost_marker.conversationId = events.conversation_id
+                 JOIN first_lost
+                   ON first_lost.conversationId = events.conversation_id
                  WHERE events.user_id = ?
                    AND events.to_state IN ('PRODUCTIVE', 'HIGHLY_PRODUCTIVE')
-                   AND events.triggered_at < lost_marker.lostAt
+                   AND events.triggered_at < first_lost.firstLostAt
                )
                SELECT filtered.id,
                       filtered.pageId,
                       filtered.platform,
-                      filtered.currentState,
                       filtered.updatedTime,
                       filtered.startedTime,
                       filtered.lastMessageAt,
@@ -210,12 +199,14 @@ export async function buildReportFromDb(options: {
                       filtered.businessCount,
                       filtered.priceGiven,
                       CASE
-                        WHEN filtered.currentState = 'LOST'
+                        WHEN first_lost.firstLostAt IS NOT NULL
                          AND productive_before_lost.conversationId IS NULL
                         THEN 1
                         ELSE 0
                       END as earlyLost
                FROM filtered_conversations filtered
+               LEFT JOIN first_lost
+                 ON first_lost.conversationId = filtered.id
                LEFT JOIN productive_before_lost
                  ON productive_before_lost.conversationId = filtered.id
                WHERE 1 = 1`;

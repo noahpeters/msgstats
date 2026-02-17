@@ -198,7 +198,11 @@ describe('report helpers', () => {
     expect(capturedSql).toContain(
       "events.to_state IN ('PRODUCTIVE', 'HIGHLY_PRODUCTIVE')",
     );
-    expect(capturedSql).toContain('events.triggered_at < lost_marker.lostAt');
+    expect(capturedSql).toContain(
+      'events.triggered_at < first_lost.firstLostAt',
+    );
+    expect(capturedSql).toContain('first_lost.firstLostAt IS NOT NULL');
+    expect(capturedSql).not.toContain("filtered.currentState = 'LOST'");
     expect(capturedBindings).toEqual(['u1', 'u1', 'u1', 'p1', 'messenger']);
   });
 });

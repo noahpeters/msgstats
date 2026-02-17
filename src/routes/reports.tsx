@@ -42,7 +42,7 @@ const COLUMN_DEFINITIONS: Record<string, string> = {
   'Low response after price':
     'Conversations where customer sent <=2 messages after first price message. Shows count and (low response after price / price given).',
   'Early lost':
-    'Conversations currently LOST that were never PRODUCTIVE/HIGHLY_PRODUCTIVE before first LOST. Shows count and (early lost / total).',
+    'Conversations that first reached LOST before ever reaching PRODUCTIVE/HIGHLY_PRODUCTIVE. Shows count and (early lost / total).',
   Distribution: 'Spark histogram of conversation message-count distribution.',
 };
 
