@@ -18,6 +18,8 @@ type ReportRow = {
   highly_productive: number;
   price_given: number;
   low_response_after_price: number;
+  early_lost: number;
+  early_lost_pct: number;
   qualified_rate: number;
   histogram: Record<number, number>;
 };
@@ -37,9 +39,19 @@ const COLUMN_DEFINITIONS: Record<string, string> = {
   'Price given': "Conversations where any business message includes '$'.",
   'Low response after price':
     'Conversations where customer sent <=2 messages after first price message.',
+  'Early lost':
+    'Conversations currently LOST that were never PRODUCTIVE/HIGHLY_PRODUCTIVE before first LOST.',
+  'Early lost %':
+    'Early lost conversations divided by total conversations in the same period.',
   'Qualified rate': '(productive + highly productive) / total conversations.',
   Distribution: 'Spark histogram of conversation message-count distribution.',
 };
+
+const percentFormatter = new Intl.NumberFormat('en-US', {
+  style: 'percent',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1,
+});
 
 async function fetchReport(
   endpoint: string,
@@ -426,6 +438,8 @@ function ReportTable({
             <col style={{ width: '90px' }} />
             <col style={{ width: '190px' }} />
             <col style={{ width: '110px' }} />
+            <col style={{ width: '110px' }} />
+            <col style={{ width: '110px' }} />
             <col style={{ width: 'auto' }} />
           </colgroup>
           <thead>
@@ -447,6 +461,12 @@ function ReportTable({
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
                 {renderHead('Low response after price')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Early lost')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Early lost %')}
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
                 {renderHead('Qualified rate')}
@@ -479,7 +499,13 @@ function ReportTable({
                   {row.low_response_after_price}
                 </td>
                 <td {...stylex.props(reportStyles.tableCell)}>
-                  {(row.qualified_rate * 100).toFixed(1)}%
+                  {row.early_lost}
+                </td>
+                <td {...stylex.props(reportStyles.tableCell)}>
+                  {percentFormatter.format(row.early_lost_pct)}
+                </td>
+                <td {...stylex.props(reportStyles.tableCell)}>
+                  {percentFormatter.format(row.qualified_rate)}
                 </td>
                 <td
                   {...stylex.props(

@@ -2,6 +2,7 @@ type ConversationRow = {
   id: string;
   pageId: string;
   platform: string;
+  currentState: string | null;
   updatedTime: string;
   startedTime: string | null;
   lastMessageAt: string | null;
@@ -9,6 +10,7 @@ type ConversationRow = {
   customerCount: number;
   businessCount: number;
   priceGiven: number;
+  earlyLost: number;
 };
 
 type ReportRow = {
@@ -18,6 +20,8 @@ type ReportRow = {
   highly_productive: number;
   price_given: number;
   low_response_after_price: number;
+  early_lost: number;
+  early_lost_pct: number;
   qualified_rate: number;
   histogram: Record<number, number>;
 };
@@ -74,6 +78,7 @@ export function buildReportRows(
       highly: number;
       priceGiven: number;
       lowResponseAfterPrice: number;
+      earlyLost: number;
       histogram: Record<number, number>;
     }
   >();
@@ -94,6 +99,7 @@ export function buildReportRows(
       highly: 0,
       priceGiven: 0,
       lowResponseAfterPrice: 0,
+      earlyLost: 0,
       histogram: emptyHistogram(),
     };
     bucketStats.total += 1;
@@ -109,6 +115,9 @@ export function buildReportRows(
     }
     if (row.lowResponseAfterPrice) {
       bucketStats.lowResponseAfterPrice += 1;
+    }
+    if (row.earlyLost) {
+      bucketStats.earlyLost += 1;
     }
     const messageCount = row.customerCount + row.businessCount;
     if (messageCount > 0) {
@@ -130,6 +139,8 @@ export function buildReportRows(
     highly_productive: stats.highly,
     price_given: stats.priceGiven,
     low_response_after_price: stats.lowResponseAfterPrice,
+    early_lost: stats.earlyLost,
+    early_lost_pct: stats.total ? stats.earlyLost / stats.total : 0,
     qualified_rate: stats.total
       ? (stats.productive + stats.highly) / stats.total
       : 0,
@@ -145,20 +156,76 @@ export async function buildReportFromDb(options: {
   pageId?: string | null;
   platform?: string | null;
 }) {
-  let query = `SELECT id, page_id as pageId, platform, updated_time as updatedTime,
-                     started_time as startedTime, last_message_at as lastMessageAt,
-                     low_response_after_price as lowResponseAfterPrice,
-                     customer_count as customerCount,
-                     business_count as businessCount, price_given as priceGiven
-              FROM conversations
-              WHERE conversations.user_id = ?`;
-  const bindings: unknown[] = [options.userId];
+  let query = `WITH filtered_conversations AS (
+                 SELECT id,
+                        page_id as pageId,
+                        platform,
+                        current_state as currentState,
+                        updated_time as updatedTime,
+                        started_time as startedTime,
+                        last_message_at as lastMessageAt,
+                        low_response_after_price as lowResponseAfterPrice,
+                        customer_count as customerCount,
+                        business_count as businessCount,
+                        price_given as priceGiven
+                 FROM conversations
+                 WHERE conversations.user_id = ?
+               ),
+               first_lost AS (
+                 SELECT events.conversation_id as conversationId,
+                        MIN(events.triggered_at) as firstLostAt
+                 FROM conversation_state_events events
+                 JOIN filtered_conversations filtered
+                   ON filtered.id = events.conversation_id
+                 WHERE events.user_id = ?
+                   AND events.to_state = 'LOST'
+                 GROUP BY events.conversation_id
+               ),
+               lost_marker AS (
+                 SELECT filtered.id as conversationId,
+                        COALESCE(first_lost.firstLostAt, filtered.startedTime, filtered.updatedTime) as lostAt
+                 FROM filtered_conversations filtered
+                 LEFT JOIN first_lost
+                   ON first_lost.conversationId = filtered.id
+                 WHERE filtered.currentState = 'LOST'
+               ),
+               productive_before_lost AS (
+                 SELECT DISTINCT events.conversation_id as conversationId
+                 FROM conversation_state_events events
+                 JOIN lost_marker
+                   ON lost_marker.conversationId = events.conversation_id
+                 WHERE events.user_id = ?
+                   AND events.to_state IN ('PRODUCTIVE', 'HIGHLY_PRODUCTIVE')
+                   AND events.triggered_at < lost_marker.lostAt
+               )
+               SELECT filtered.id,
+                      filtered.pageId,
+                      filtered.platform,
+                      filtered.currentState,
+                      filtered.updatedTime,
+                      filtered.startedTime,
+                      filtered.lastMessageAt,
+                      filtered.lowResponseAfterPrice,
+                      filtered.customerCount,
+                      filtered.businessCount,
+                      filtered.priceGiven,
+                      CASE
+                        WHEN filtered.currentState = 'LOST'
+                         AND productive_before_lost.conversationId IS NULL
+                        THEN 1
+                        ELSE 0
+                      END as earlyLost
+               FROM filtered_conversations filtered
+               LEFT JOIN productive_before_lost
+                 ON productive_before_lost.conversationId = filtered.id
+               WHERE 1 = 1`;
+  const bindings: unknown[] = [options.userId, options.userId, options.userId];
   if (options.pageId) {
-    query += ' AND page_id = ?';
+    query += ' AND filtered.pageId = ?';
     bindings.push(options.pageId);
   }
   if (options.platform) {
-    query += ' AND platform = ?';
+    query += ' AND filtered.platform = ?';
     bindings.push(options.platform);
   }
   const rows = await options.db
