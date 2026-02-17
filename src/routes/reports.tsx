@@ -33,17 +33,16 @@ const COLUMN_DEFINITIONS: Record<string, string> = {
   Period: 'Reporting bucket start date.',
   Total: 'Total conversations in the period.',
   Productive:
-    'Conversations with customer >=3 and business >=3 messages, excluding highly productive.',
+    'Conversations with customer >=3 and business >=3 messages, excluding highly productive. Shows count and (productive / total).',
   'Highly productive':
-    'Conversations with customer >=5 and business >=5 messages.',
-  'Price given': "Conversations where any business message includes '$'.",
-  'Low response after price':
-    'Conversations where customer sent <=2 messages after first price message.',
-  'Early lost':
-    'Conversations currently LOST that were never PRODUCTIVE/HIGHLY_PRODUCTIVE before first LOST.',
-  'Early lost %':
-    'Early lost conversations divided by total conversations in the same period.',
+    'Conversations with customer >=5 and business >=5 messages. Shows count and (highly productive / total).',
   'Qualified rate': '(productive + highly productive) / total conversations.',
+  'Price given':
+    "Conversations where any business message includes '$'. Shows count and (price given / total).",
+  'Low response after price':
+    'Conversations where customer sent <=2 messages after first price message. Shows count and (low response after price / price given).',
+  'Early lost':
+    'Conversations currently LOST that were never PRODUCTIVE/HIGHLY_PRODUCTIVE before first LOST. Shows count and (early lost / total).',
   Distribution: 'Spark histogram of conversation message-count distribution.',
 };
 
@@ -182,6 +181,15 @@ const reportStyles = stylex.create({
     color: '#0c1b1a',
     whiteSpace: 'nowrap',
     verticalAlign: 'middle',
+  },
+  metricValue: {
+    display: 'inline-flex',
+    alignItems: 'baseline',
+    gap: '6px',
+  },
+  metricPct: {
+    fontSize: '11px',
+    color: '#5b7287',
   },
   distributionCell: {
     paddingRight: 0,
@@ -433,13 +441,12 @@ function ReportTable({
           <colgroup>
             <col style={{ width: '130px' }} />
             <col style={{ width: '70px' }} />
-            <col style={{ width: '90px' }} />
-            <col style={{ width: '130px' }} />
-            <col style={{ width: '90px' }} />
-            <col style={{ width: '190px' }} />
+            <col style={{ width: '140px' }} />
+            <col style={{ width: '150px' }} />
             <col style={{ width: '110px' }} />
-            <col style={{ width: '110px' }} />
-            <col style={{ width: '110px' }} />
+            <col style={{ width: '140px' }} />
+            <col style={{ width: '210px' }} />
+            <col style={{ width: '140px' }} />
             <col style={{ width: 'auto' }} />
           </colgroup>
           <thead>
@@ -457,6 +464,9 @@ function ReportTable({
                 {renderHead('Highly productive')}
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
+                {renderHead('Qualified rate')}
+              </th>
+              <th {...stylex.props(reportStyles.tableHead)}>
                 {renderHead('Price given')}
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
@@ -464,12 +474,6 @@ function ReportTable({
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
                 {renderHead('Early lost')}
-              </th>
-              <th {...stylex.props(reportStyles.tableHead)}>
-                {renderHead('Early lost %')}
-              </th>
-              <th {...stylex.props(reportStyles.tableHead)}>
-                {renderHead('Qualified rate')}
               </th>
               <th {...stylex.props(reportStyles.tableHead)}>
                 {renderHead('Distribution')}
@@ -487,25 +491,69 @@ function ReportTable({
                 </td>
                 <td {...stylex.props(reportStyles.tableCell)}>{row.total}</td>
                 <td {...stylex.props(reportStyles.tableCell)}>
-                  {row.productive}
+                  <span {...stylex.props(reportStyles.metricValue)}>
+                    <span>{row.productive}</span>
+                    <span {...stylex.props(reportStyles.metricPct)}>
+                      (
+                      {percentFormatter.format(
+                        row.total ? row.productive / row.total : 0,
+                      )}
+                      )
+                    </span>
+                  </span>
                 </td>
                 <td {...stylex.props(reportStyles.tableCell)}>
-                  {row.highly_productive}
-                </td>
-                <td {...stylex.props(reportStyles.tableCell)}>
-                  {row.price_given}
-                </td>
-                <td {...stylex.props(reportStyles.tableCell)}>
-                  {row.low_response_after_price}
-                </td>
-                <td {...stylex.props(reportStyles.tableCell)}>
-                  {row.early_lost}
-                </td>
-                <td {...stylex.props(reportStyles.tableCell)}>
-                  {percentFormatter.format(row.early_lost_pct)}
+                  <span {...stylex.props(reportStyles.metricValue)}>
+                    <span>{row.highly_productive}</span>
+                    <span {...stylex.props(reportStyles.metricPct)}>
+                      (
+                      {percentFormatter.format(
+                        row.total ? row.highly_productive / row.total : 0,
+                      )}
+                      )
+                    </span>
+                  </span>
                 </td>
                 <td {...stylex.props(reportStyles.tableCell)}>
                   {percentFormatter.format(row.qualified_rate)}
+                </td>
+                <td {...stylex.props(reportStyles.tableCell)}>
+                  <span {...stylex.props(reportStyles.metricValue)}>
+                    <span>{row.price_given}</span>
+                    <span {...stylex.props(reportStyles.metricPct)}>
+                      (
+                      {percentFormatter.format(
+                        row.total ? row.price_given / row.total : 0,
+                      )}
+                      )
+                    </span>
+                  </span>
+                </td>
+                <td {...stylex.props(reportStyles.tableCell)}>
+                  <span {...stylex.props(reportStyles.metricValue)}>
+                    <span>{row.low_response_after_price}</span>
+                    <span {...stylex.props(reportStyles.metricPct)}>
+                      (
+                      {percentFormatter.format(
+                        row.price_given
+                          ? row.low_response_after_price / row.price_given
+                          : 0,
+                      )}
+                      )
+                    </span>
+                  </span>
+                </td>
+                <td {...stylex.props(reportStyles.tableCell)}>
+                  <span {...stylex.props(reportStyles.metricValue)}>
+                    <span>{row.early_lost}</span>
+                    <span {...stylex.props(reportStyles.metricPct)}>
+                      (
+                      {percentFormatter.format(
+                        row.total ? row.early_lost / row.total : 0,
+                      )}
+                      )
+                    </span>
+                  </span>
                 </td>
                 <td
                   {...stylex.props(
