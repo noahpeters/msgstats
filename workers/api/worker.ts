@@ -118,6 +118,7 @@ export type Env = {
   AUTH_RP_ID: string;
   AUTH_RP_NAME: string;
   AUTH_ORIGIN_ALLOWLIST?: string;
+  SOCIAL_LOGIN?: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GOOGLE_REDIRECT_URI: string;

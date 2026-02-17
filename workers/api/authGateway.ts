@@ -86,6 +86,28 @@ function sanitizeReturnTo(value: string | null) {
   return '/';
 }
 
+type SocialProvider = 'google' | 'apple';
+const SOCIAL_PROVIDERS: SocialProvider[] = ['google', 'apple'];
+
+function getAllowedSocialProviders(env: Env): Set<SocialProvider> {
+  const raw = env.SOCIAL_LOGIN;
+  if (raw === undefined) {
+    return new Set(SOCIAL_PROVIDERS);
+  }
+  const allowed = new Set<SocialProvider>();
+  for (const entry of raw.split(',')) {
+    const normalized = entry.trim().toLowerCase();
+    if (normalized === 'google' || normalized === 'apple') {
+      allowed.add(normalized);
+    }
+  }
+  return allowed;
+}
+
+function isSocialProviderEnabled(env: Env, provider: SocialProvider) {
+  return getAllowedSocialProviders(env).has(provider);
+}
+
 function randomBase64Url(bytes = 32) {
   const arr = crypto.getRandomValues(new Uint8Array(bytes));
   return base64UrlEncode(arr);
@@ -791,6 +813,12 @@ async function finalizeLoginSession(
 }
 
 async function handleGoogleStart(req: Request, env: Env) {
+  if (!isSocialProviderEnabled(env, 'google')) {
+    return Response.redirect(
+      `${appOrigin(env, req)}/login?error=social_login_disabled`,
+      302,
+    );
+  }
   const returnTo = sanitizeReturnTo(
     new URL(req.url).searchParams.get('return_to'),
   );
@@ -808,6 +836,12 @@ async function handleGoogleStart(req: Request, env: Env) {
 }
 
 async function handleGoogleCallback(req: Request, env: Env) {
+  if (!isSocialProviderEnabled(env, 'google')) {
+    return Response.redirect(
+      `${appOrigin(env, req)}/login?error=social_login_disabled`,
+      302,
+    );
+  }
   const url = new URL(req.url);
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
@@ -912,6 +946,12 @@ async function signAppleClientSecret(env: Env) {
 }
 
 async function handleAppleStart(req: Request, env: Env) {
+  if (!isSocialProviderEnabled(env, 'apple')) {
+    return Response.redirect(
+      `${appOrigin(env, req)}/login?error=social_login_disabled`,
+      302,
+    );
+  }
   const returnTo = sanitizeReturnTo(
     new URL(req.url).searchParams.get('return_to'),
   );
@@ -945,6 +985,12 @@ async function readAppleCallbackParams(req: Request) {
 }
 
 async function handleAppleCallback(req: Request, env: Env) {
+  if (!isSocialProviderEnabled(env, 'apple')) {
+    return Response.redirect(
+      `${appOrigin(env, req)}/login?error=social_login_disabled`,
+      302,
+    );
+  }
   const { code, state, userJson } = await readAppleCallbackParams(req);
   if (!code || !state) {
     return Response.redirect(

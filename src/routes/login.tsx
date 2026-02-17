@@ -22,6 +22,11 @@ type AuthResponse = {
   bootstrap?: boolean;
 };
 
+type AuthConfigResponse = {
+  socialLoginGoogleEnabled?: boolean;
+  socialLoginAppleEnabled?: boolean;
+};
+
 const loginStyles = stylex.create({
   page: {
     minHeight: '100vh',
@@ -86,6 +91,9 @@ const loginStyles = stylex.create({
     padding: '10px 12px',
     fontSize: '14px',
   },
+  centeredButton: {
+    justifySelf: 'center',
+  },
 });
 
 const sanitizeNext = (value: string | null): string => {
@@ -106,12 +114,17 @@ const ERROR_MESSAGES: Record<string, string> = {
   oauth_missing_code: 'Sign-in response was incomplete. Please try again.',
   apple_email_required_for_first_login:
     'Apple did not provide email for first login. Use another sign-in method.',
+  social_login_disabled: 'This social sign-in method is currently disabled.',
 };
 
 export default function LoginRoute(): React.ReactElement {
   const [searchParams] = useSearchParams();
   const next = sanitizeNext(searchParams.get('next'));
   const [auth, setAuth] = React.useState<AuthResponse | null>(null);
+  const [authConfig, setAuthConfig] = React.useState<AuthConfigResponse>({
+    socialLoginGoogleEnabled: false,
+    socialLoginAppleEnabled: false,
+  });
   const [redirectPath, setRedirectPath] = React.useState<string | null>(null);
   const [metaSetupToken, setMetaSetupToken] = React.useState<string | null>(
     null,
@@ -128,10 +141,13 @@ export default function LoginRoute(): React.ReactElement {
     email: '',
     password: '',
   });
+  const [showPasswordForm, setShowPasswordForm] = React.useState(false);
   const [passwordError, setPasswordError] = React.useState<string | null>(null);
   const [passwordLoading, setPasswordLoading] = React.useState(false);
 
   const [setupPassword, setSetupPassword] = React.useState('');
+  const [showSetupPasswordForm, setShowSetupPasswordForm] =
+    React.useState(false);
   const [setupError, setSetupError] = React.useState<string | null>(null);
   const [setupLoading, setSetupLoading] = React.useState(false);
 
@@ -179,6 +195,28 @@ export default function LoginRoute(): React.ReactElement {
       active = false;
     };
   }, [redirectPath]);
+
+  React.useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch('/api/auth/config', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = (await response.json()) as AuthConfigResponse;
+        if (active) {
+          setAuthConfig({
+            socialLoginGoogleEnabled: Boolean(data.socialLoginGoogleEnabled),
+            socialLoginAppleEnabled: Boolean(data.socialLoginAppleEnabled),
+          });
+        }
+      } catch {
+        // Ignore config fetch failures.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     if (auth?.authenticated && !auth.needsCredentialSetup && !metaSetupToken) {
@@ -565,33 +603,6 @@ export default function LoginRoute(): React.ReactElement {
                 Create your login to finish setup. Meta bootstrap access is
                 temporary.
               </p>
-              <form
-                onSubmit={onSetPassword}
-                {...stylex.props(loginStyles.actions)}
-              >
-                <label {...stylex.props(loginStyles.field)}>
-                  Set password
-                  <input
-                    type="password"
-                    required
-                    minLength={10}
-                    value={setupPassword}
-                    onChange={(event) => {
-                      setSetupPassword(event.target.value);
-                    }}
-                    {...stylex.props(loginStyles.input)}
-                  />
-                </label>
-                {setupError ? (
-                  <p {...stylex.props(loginStyles.note)}>{setupError}</p>
-                ) : null}
-                <button
-                  {...stylex.props(layout.button)}
-                  disabled={setupLoading}
-                >
-                  {setupLoading ? 'Saving...' : 'Set password'}
-                </button>
-              </form>
               <button
                 {...stylex.props(layout.button)}
                 onClick={() => {
@@ -601,105 +612,166 @@ export default function LoginRoute(): React.ReactElement {
               >
                 {setupLoading ? 'Working...' : 'Create passkey'}
               </button>
-              <a
-                href={`/auth/oauth/start/google?return_to=${encodeURIComponent(next)}`}
-                {...stylex.props(loginStyles.buttonLink)}
-              >
-                <button {...stylex.props(layout.ghostButton)}>
-                  Link Google
+              {!showSetupPasswordForm ? (
+                <button
+                  type="button"
+                  {...stylex.props(layout.ghostButton)}
+                  onClick={() => {
+                    setShowSetupPasswordForm(true);
+                    setSetupError(null);
+                  }}
+                  disabled={setupLoading}
+                >
+                  Create password
                 </button>
-              </a>
-              <a
-                href={`/auth/oauth/start/apple?return_to=${encodeURIComponent(next)}`}
-                {...stylex.props(loginStyles.buttonLink)}
-              >
-                <button {...stylex.props(layout.ghostButton)}>
-                  Link Apple
-                </button>
-              </a>
+              ) : (
+                <form
+                  onSubmit={onSetPassword}
+                  {...stylex.props(loginStyles.actions)}
+                >
+                  <label {...stylex.props(loginStyles.field)}>
+                    Set password
+                    <input
+                      type="password"
+                      required
+                      minLength={10}
+                      value={setupPassword}
+                      onChange={(event) => {
+                        setSetupPassword(event.target.value);
+                      }}
+                      {...stylex.props(loginStyles.input)}
+                    />
+                  </label>
+                  {setupError ? (
+                    <p {...stylex.props(loginStyles.note)}>{setupError}</p>
+                  ) : null}
+                  <button
+                    {...stylex.props(layout.button)}
+                    disabled={setupLoading}
+                  >
+                    {setupLoading ? 'Saving...' : 'Set password'}
+                  </button>
+                </form>
+              )}
+              {!showSetupPasswordForm && setupError ? (
+                <p {...stylex.props(loginStyles.note)}>{setupError}</p>
+              ) : null}
+              {authConfig.socialLoginGoogleEnabled ? (
+                <a
+                  href={`/auth/oauth/start/google?return_to=${encodeURIComponent(next)}`}
+                  {...stylex.props(loginStyles.buttonLink)}
+                >
+                  <button {...stylex.props(layout.ghostButton)}>
+                    Link Google
+                  </button>
+                </a>
+              ) : null}
+              {authConfig.socialLoginAppleEnabled ? (
+                <a
+                  href={`/auth/oauth/start/apple?return_to=${encodeURIComponent(next)}`}
+                  {...stylex.props(loginStyles.buttonLink)}
+                >
+                  <button {...stylex.props(layout.ghostButton)}>
+                    Link Apple
+                  </button>
+                </a>
+              ) : null}
             </div>
           ) : (
             <div {...stylex.props(loginStyles.actions)}>
-              <form
-                onSubmit={onPasswordLogin}
-                {...stylex.props(loginStyles.actions)}
-              >
-                <label {...stylex.props(loginStyles.field)}>
-                  Email
-                  <input
-                    type="email"
-                    required
-                    value={passwordForm.email}
-                    onChange={(event) =>
-                      setPasswordForm((previous) => ({
-                        ...previous,
-                        email: event.target.value,
-                      }))
-                    }
-                    {...stylex.props(loginStyles.input)}
-                  />
-                </label>
-                <label {...stylex.props(loginStyles.field)}>
-                  Password
-                  <input
-                    type="password"
-                    required
-                    value={passwordForm.password}
-                    onChange={(event) =>
-                      setPasswordForm((previous) => ({
-                        ...previous,
-                        password: event.target.value,
-                      }))
-                    }
-                    {...stylex.props(loginStyles.input)}
-                  />
-                </label>
-                {passwordError ? (
-                  <p {...stylex.props(loginStyles.note)}>{passwordError}</p>
-                ) : null}
-                <button
-                  {...stylex.props(layout.button)}
-                  disabled={passwordLoading}
-                >
-                  {passwordLoading ? 'Signing in...' : 'Sign in with password'}
-                </button>
-              </form>
-
-              <button
-                {...stylex.props(layout.ghostButton)}
-                onClick={onPasskeyLogin}
-              >
+              <button {...stylex.props(layout.button)} onClick={onPasskeyLogin}>
                 Sign in with passkey
               </button>
-              <a
-                href={`/auth/oauth/start/google?return_to=${encodeURIComponent(next)}`}
-                {...stylex.props(loginStyles.buttonLink)}
-              >
-                <button {...stylex.props(layout.ghostButton)}>
-                  Continue with Google
+              {!showPasswordForm ? (
+                <button
+                  {...stylex.props(layout.ghostButton)}
+                  onClick={() => {
+                    setShowPasswordForm(true);
+                    setPasswordError(null);
+                  }}
+                >
+                  Sign in with password
                 </button>
-              </a>
-              <a
-                href={`/auth/oauth/start/apple?return_to=${encodeURIComponent(next)}`}
-                {...stylex.props(loginStyles.buttonLink)}
+              ) : (
+                <form
+                  onSubmit={onPasswordLogin}
+                  {...stylex.props(loginStyles.actions)}
+                >
+                  <label {...stylex.props(loginStyles.field)}>
+                    Email
+                    <input
+                      type="email"
+                      required
+                      value={passwordForm.email}
+                      onChange={(event) =>
+                        setPasswordForm((previous) => ({
+                          ...previous,
+                          email: event.target.value,
+                        }))
+                      }
+                      {...stylex.props(loginStyles.input)}
+                    />
+                  </label>
+                  <label {...stylex.props(loginStyles.field)}>
+                    Password
+                    <input
+                      type="password"
+                      required
+                      value={passwordForm.password}
+                      onChange={(event) =>
+                        setPasswordForm((previous) => ({
+                          ...previous,
+                          password: event.target.value,
+                        }))
+                      }
+                      {...stylex.props(loginStyles.input)}
+                    />
+                  </label>
+                  {passwordError ? (
+                    <p {...stylex.props(loginStyles.note)}>{passwordError}</p>
+                  ) : null}
+                  <button
+                    {...stylex.props(layout.button)}
+                    disabled={passwordLoading}
+                  >
+                    {passwordLoading
+                      ? 'Signing in...'
+                      : 'Sign in with password'}
+                  </button>
+                </form>
+              )}
+              <button
+                type="button"
+                {...stylex.props(
+                  layout.ghostButton,
+                  loginStyles.centeredButton,
+                )}
+                onClick={() => {
+                  window.location.href = `/api/auth/login?return_to=${encodeURIComponent(next)}`;
+                }}
               >
-                <button {...stylex.props(layout.ghostButton)}>
-                  Continue with Apple
-                </button>
-              </a>
-              <a
-                href={`/api/auth/login?return_to=${encodeURIComponent(next)}`}
-                {...stylex.props(loginStyles.buttonLink)}
-              >
-                <button {...stylex.props(layout.ghostButton)}>
-                  Connect Facebook to migrate
-                </button>
-              </a>
-
-              <p {...stylex.props(loginStyles.note)}>
-                This app keeps auth credentials only in memory. Closing all tabs
-                signs you out.
-              </p>
+                Create New Account With Facebook Login
+              </button>
+              {authConfig.socialLoginGoogleEnabled ? (
+                <a
+                  href={`/auth/oauth/start/google?return_to=${encodeURIComponent(next)}`}
+                  {...stylex.props(loginStyles.buttonLink)}
+                >
+                  <button {...stylex.props(layout.ghostButton)}>
+                    Continue with Google
+                  </button>
+                </a>
+              ) : null}
+              {authConfig.socialLoginAppleEnabled ? (
+                <a
+                  href={`/auth/oauth/start/apple?return_to=${encodeURIComponent(next)}`}
+                  {...stylex.props(loginStyles.buttonLink)}
+                >
+                  <button {...stylex.props(layout.ghostButton)}>
+                    Continue with Apple
+                  </button>
+                </a>
+              ) : null}
             </div>
           )}
         </section>

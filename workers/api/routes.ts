@@ -440,6 +440,18 @@ export function registerRoutes(deps: any) {
   });
 
   addRoute('GET', '/api/auth/config', async (_req, env) => {
+    const rawSocialLogin = env.SOCIAL_LOGIN;
+    const allowedSocialLogin =
+      rawSocialLogin === undefined
+        ? ['google', 'apple']
+        : rawSocialLogin
+            .split(',')
+            .map((value) => value.trim().toLowerCase())
+            .filter(
+              (value): value is 'google' | 'apple' =>
+                value === 'google' || value === 'apple',
+            );
+    const socialLoginSet = new Set(allowedSocialLogin);
     return json({
       metaAppIdPresent: Boolean(env.META_APP_ID),
       metaRedirectUri: env.META_REDIRECT_URI ?? null,
@@ -447,6 +459,9 @@ export function registerRoutes(deps: any) {
       googleRedirectUri: env.GOOGLE_REDIRECT_URI ?? null,
       appleClientIdPresent: Boolean(env.APPLE_CLIENT_ID),
       appleRedirectUri: env.APPLE_REDIRECT_URI ?? null,
+      socialLogin: allowedSocialLogin,
+      socialLoginGoogleEnabled: socialLoginSet.has('google'),
+      socialLoginAppleEnabled: socialLoginSet.has('apple'),
       rpId: env.AUTH_RP_ID ?? null,
       rpName: env.AUTH_RP_NAME ?? null,
     });
