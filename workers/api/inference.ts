@@ -818,6 +818,7 @@ export function inferConversation(
   let lastMessageAt: string | null = null;
   let lastNonFinalMessageAt: string | null = null;
   let lastNonFinalDirection: 'inbound' | 'outbound' | null = null;
+  let lastOutboundNonFinalAt: string | null = null;
   let lastActionableMessageAt: string | null = null;
   let lastActionableDirection: 'inbound' | 'outbound' | null = null;
   let deferralHint: string | null = null;
@@ -837,6 +838,9 @@ export function inferConversation(
       }
       lastNonFinalMessageAt = msg.createdAt;
       lastNonFinalDirection = msg.direction;
+      if (msg.direction === 'outbound') {
+        lastOutboundNonFinalAt = msg.createdAt;
+      }
       const isAckInbound = msg.direction === 'inbound' && msg.features.ack_only;
       if (!isAckInbound) {
         lastActionableMessageAt = msg.createdAt;
@@ -1151,6 +1155,7 @@ export function inferConversation(
     lastMessageAt,
     lastNonFinalMessageAt: lastActionableMessageAt ?? lastNonFinalMessageAt,
     lastNonFinalDirection: lastActionableDirection ?? lastNonFinalDirection,
+    lastOutboundNonFinalAt,
     hasOptOut,
     hasBlocked,
     hasBounced,
