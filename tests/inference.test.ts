@@ -294,7 +294,11 @@ describe('inference engine', () => {
         },
       },
     };
-    const result = inferConversation({ messages: [msg1, msg2], config });
+    const result = inferConversation({
+      messages: [msg1, msg2],
+      config,
+      now: new Date('2026-02-02T10:00:00Z'),
+    });
     expect(result.state).toBe('DEFERRED');
     expect(result.reasons).toContain('DEFERRAL_PHRASE');
     expect(result.reasons).not.toContain('AI_DEFERRED');
