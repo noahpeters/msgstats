@@ -135,18 +135,24 @@ async function fetchWithTelemetry(
   init: RequestInit | undefined,
   context?: MetaCallContext,
 ): Promise<Response> {
-  if (!context?.telemetry) {
-    return fetch(url, init);
+  try {
+    if (!context?.telemetry) {
+      return await fetch(url, init);
+    }
+    return await metaFetch(context.telemetry.env, {
+      op: context.telemetry.op,
+      route: context.telemetry.route,
+      method: context.telemetry.method,
+      url,
+      init,
+      workspaceId: context.telemetry.workspaceId ?? undefined,
+      assetId: context.telemetry.assetId ?? undefined,
+    });
+  } catch {
+    // Fetch errors can echo URLs, headers or bodies. Do not let the original
+    // error (including its cause or custom properties) reach callers' logs.
+    throw new Error('Meta API network request failed');
   }
-  return metaFetch(context.telemetry.env, {
-    op: context.telemetry.op,
-    route: context.telemetry.route,
-    method: context.telemetry.method,
-    url,
-    init,
-    workspaceId: context.telemetry.workspaceId ?? undefined,
-    assetId: context.telemetry.assetId ?? undefined,
-  });
 }
 
 function buildTelemetry(options: {
@@ -171,13 +177,6 @@ function buildTelemetry(options: {
 
 function withVersion(path: string, version: string) {
   return `${metaConfig.baseUrl}/${version}${path}`;
-}
-
-function redactURL(url: string) {
-  return url.replace(
-    /([&?])access_token=([^&]*)/g,
-    '$1access_token=<redacted>',
-  );
 }
 
 function buildUrl(
@@ -273,21 +272,28 @@ async function fetchWithRetry(
 ): Promise<Response> {
   let attempt = 0;
   let lastError: unknown;
+  // Only use application-defined labels, never the URL or query parameters.
+  const requestLog = {
+    op: context?.telemetry?.op,
+    route: context?.telemetry?.route,
+    method: init?.method ?? 'GET',
+  };
   while (attempt <= retry.retries) {
+    let status: number | undefined;
     try {
-      console.info('Meta fetch request: %s', redactURL(input));
+      console.info('Meta fetch request', requestLog);
       const response = await fetchWithTelemetry(input, init, context);
+      status = response.status;
       if (response.status >= 500 || response.status === 429) {
         throw new Error(`Transient error: ${response.status}`);
       }
       return response;
     } catch (err) {
       console.error('Meta API request failed', {
-        url: input,
-        method: init?.method ?? 'GET',
+        ...requestLog,
+        status,
         attempt: attempt + 1,
         maxAttempts: retry.retries + 1,
-        error: err instanceof Error ? err.message : err,
       });
       lastError = err;
       attempt += 1;
@@ -310,7 +316,12 @@ async function fetchMetaJson<T>(
   context?: MetaCallContext,
 ) {
   const response = await fetchWithTelemetry(url, init, context);
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw new Error('Meta API response read failed');
+  }
   const { parsed } = parseJsonSafe<T>(text);
   return { response, raw: text, parsed };
 }
@@ -453,6 +464,19 @@ async function paginateList<T>(firstUrl: string, context?: MetaCallContext) {
   return results;
 }
 
+async function parseOAuthTokenResponse(response: Response) {
+  try {
+    return (await response.json()) as {
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+    };
+  } catch {
+    // JSON parser errors can include fragments of a token-bearing response.
+    throw new Error('Invalid Meta OAuth token response');
+  }
+}
+
 export async function exchangeCodeForToken(options: {
   env: MetaEnv;
   appId: string;
@@ -484,11 +508,7 @@ export async function exchangeCodeForToken(options: {
     logRateLimitUsage(response, 'exchangeCodeForToken');
     throw new Error('OAuth token request failed');
   }
-  const payload = (await response.json()) as {
-    access_token: string;
-    token_type: string;
-    expires_in?: number;
-  };
+  const payload = await parseOAuthTokenResponse(response);
   return {
     accessToken: payload.access_token,
     tokenType: payload.token_type,
@@ -526,11 +546,7 @@ export async function exchangeForLongLivedToken(options: {
     logRateLimitUsage(response, 'exchangeForLongLivedToken');
     throw new Error('Long-lived token request failed');
   }
-  const payload = (await response.json()) as {
-    access_token: string;
-    token_type: string;
-    expires_in?: number;
-  };
+  const payload = await parseOAuthTokenResponse(response);
   return {
     accessToken: payload.access_token,
     tokenType: payload.token_type,
@@ -565,7 +581,11 @@ export async function debugToken(options: {
       method: 'GET',
       workspaceId: options.workspaceId,
     }),
-  );
+  ).catch(() => {
+    // Token validation errors may echo input_token or the app access token.
+    // Keep response details out of uncaught-error and caller logs.
+    throw new Error('Meta token validation failed');
+  });
   return payload.data;
 }
 
@@ -649,7 +669,7 @@ export async function fetchBusinessPages(options: {
   } catch (error) {
     console.warn('Failed to fetch owned pages', {
       businessId: options.businessId,
-      error: error instanceof Error ? error.message : error,
+      status: error instanceof MetaApiError ? error.status : undefined,
     });
     // fall through to client_pages
   }

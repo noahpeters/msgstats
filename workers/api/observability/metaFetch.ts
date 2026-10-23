@@ -131,11 +131,10 @@ export async function metaFetch(
       ],
       doubles: [1, ok ? 1 : 0, durationMs],
     });
-  } catch (error) {
+  } catch {
     console.warn('Failed to write meta telemetry', {
       op: options.op,
       route: options.route,
-      error: error instanceof Error ? error.message : error,
     });
   }
   return response;
